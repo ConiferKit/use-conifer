@@ -258,6 +258,44 @@ test("streaming yields chunks and resolves the receipt after the loop", async ()
   assert.equal(receipt.costNanoUsd, 1_250_000);
 });
 
+test("a streamed receipt carries routing but NOT cost, because the wire cannot", async () => {
+  // Measured live 2026-08-26: on SSE the response HEAD is sent before the
+  // first token, so the gateway knows the route but not yet the money. The
+  // SDK must report that absence rather than invent a zero.
+  const { fetchImpl } = stubFetch([
+    new Response('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n', {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "x-conifer-effective-model": "claude-haiku-4-5",
+        "x-conifer-endpoint": "credits",
+        "x-conifer-receipt-venue": "cloud",
+        "x-conifer-request-id": "gw-1",
+      },
+    }),
+  ]);
+  const stream = await client(fetchImpl).stream({ model: "m", messages: [] });
+  let terminalUsage: unknown;
+  for await (const chunk of stream) if (chunk.usage) terminalUsage = chunk.usage;
+  const receipt = await stream.receipt();
+  assert.equal(receipt.effectiveModel, "claude-haiku-4-5");
+  assert.equal(receipt.receiptVenue, "cloud");
+  assert.equal(receipt.costNanoUsd, undefined, "never fabricate a cost the wire did not send");
+  assert.equal(receipt.costUsd, undefined);
+  assert.equal(terminalUsage, undefined);
+});
+
+test("the two newer receipt headers are parsed, not dropped", () => {
+  const receipt = readReceipt(
+    new Headers({
+      "x-conifer-receipt-venue": "cloud",
+      "x-conifer-counterfactual-nanousd": "9000000",
+    }),
+  );
+  assert.equal(receipt.receiptVenue, "cloud");
+  assert.equal(receipt.counterfactualNanoUsd, 9_000_000);
+});
+
 test("hard constraints ride as headers; advisory ones ride as both", () => {
   const headers = chatHeaders(
     {

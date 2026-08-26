@@ -26,9 +26,14 @@ const output = card("sdk.output.card.json");
 const portability = card("portability.card.json");
 
 /**
- * The gateway's OWN generated contract artifact. Vendored by path rather than
- * copied, so a receipt header renamed in the gateway breaks this test instead
- * of silently making the SDK parse a header nobody sends.
+ * The gateway's OWN generated contract artifact.
+ *
+ * This reads `the gateway repo/`, the repo that is actually DEPLOYED. The first draft
+ * read `the gateway repo/`, an older sibling checkout whose artifact was two
+ * receipt headers behind — so the test passed while production sent
+ * `x-conifer-receipt-venue` and `x-conifer-counterfactual-nanousd` that the SDK
+ * silently dropped. Pinning the wrong copy of a contract is indistinguishable
+ * from having no pin at all, which is why the path matters more than it looks.
  */
 const gatewayContract = JSON.parse(
   readFileSync(here("../contracts/gateway-contract.json"), "utf8"),
@@ -51,6 +56,8 @@ test("the SDK parses exactly the receipt headers the gateway emits", () => {
     "endpoint",
     "costNanoUsd",
     "serviceTier",
+    "receiptVenue",
+    "counterfactualNanoUsd",
     "requestId",
   ]) {
     assert.ok(populated.includes(expected), `${expected} must be parsed`);
