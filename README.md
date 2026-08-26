@@ -107,13 +107,16 @@ hook — it can only use what its host exposes as a tool. So:
 {
   "mcpServers": {
     "conifer": {
-      "command": "node",
-      "args": ["--experimental-strip-types", "/path/to/sdk/mcp/server.ts"],
+      "command": "npx",
+      "args": ["-y", "@conifer/sdk", "conifer-mcp"],
       "env": { "CONIFER_API_KEY": "sk-conifer-…" }
     }
   }
 }
 ```
+
+Working from this repo instead of an install? Point at the checkout:
+`"command": "node", "args": ["--experimental-strip-types", "/path/to/sdk/mcp/server.ts"]`.
 
 Four tools, each one real gateway call:
 
@@ -169,12 +172,16 @@ languages refuse the same things.
 ## Tests
 
 ```bash
-node --experimental-strip-types --test tests/*.test.ts   # 57 tests
-cd python && python3 -m unittest discover -s tests       # 30 tests
+npm run build                                            # emit dist/ (ESM + .d.ts)
+node --experimental-strip-types --test tests/*.test.ts   # 66 tests
+cd python && python3 -m unittest discover -s tests       # 32 tests
 ```
 
-Both suites run with an injected transport: no network, no mock framework, and
-every assertion is about bytes that would go on the wire or values handed back.
+Most assertions run with an injected transport: no network, no mock framework,
+and every one is about bytes that would go on the wire or values handed back.
+`tests/packaging.test.ts` is the exception and the important one — it checks the
+package as a CONSUMER receives it, because that is where two real defects hid
+(see below).
 
 ## What Conifer does not do
 
@@ -199,6 +206,16 @@ recording here:
 2. **A TLS trust failure was reported as "could not reach the gateway"**, which
    sends the reader to check the network, the key, and the gateway, none of which
    are wrong. It now names the real cause and the two fixes.
+
+3. **The package was unusable on the Node version it advertised.** `engines`
+   said `>=22`, but the entry point was a raw `.ts` file, so Node 22 threw
+   `ERR_UNKNOWN_FILE_EXTENSION` on `import`. It now ships compiled ESM plus
+   `.d.ts` and runs from Node 18.
+4. **`npx conifer-mcp` exited 0 in silence.** The server's
+   direct-invocation guard compared `import.meta.url` against `process.argv[1]`,
+   which is the bin shim's path in a published package — never the module's — so
+   `serve()` never started, and an MCP host just saw no answer. Both are pinned
+   by `tests/packaging.test.ts`, verified against a real `npm i` on Node 22.
 
 Live results: exact receipts (`0.000046000` USD on a haiku turn, itemized and
 summing to the total), `ConiferCostCeilingError` on a $0.000000001 ceiling with
