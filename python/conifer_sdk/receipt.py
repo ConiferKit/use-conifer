@@ -1,5 +1,9 @@
 """The ``x-conifer-*`` disclosure headers, parsed. Twin of src/receipt.ts.
 
+STREAMING CAVEAT (measured live 2026-08-26): on an SSE turn the response HEAD
+is sent before the completion settles, so the routing receipt is present but the
+COST headers are not. Reconcile a stream from its terminal ``usage`` chunk.
+
 Absence is preserved: the gateway OMITS ``x-conifer-cost-components-nanousd``
 rather than approximate it, and omits ``x-conifer-service-tier`` when no
 completion window was declared. Zero-filling either would be a confident lie.
@@ -33,6 +37,12 @@ class Receipt:
     cost_usd: Optional[str] = None
     cost_components_nano_usd: Optional[CostComponents] = None
     service_tier: Optional[str] = None
+    #: The venue that SERVED the turn; this gateway is always ``cloud``.
+    receipt_venue: Optional[str] = None
+    #: Retail counterfactual at the documented default pin. OMITTED unless the
+    #: routed predicate holds, and never 0-as-guess: absence means "not
+    #: applicable", not "no saving".
+    counterfactual_nano_usd: Optional[int] = None
     cache: Optional[str] = None
     request_id: Optional[str] = None
 
@@ -96,6 +106,8 @@ def read_receipt(headers: Mapping[str, str]) -> Receipt:
             lowered.get("x-conifer-cost-components-nanousd")
         ),
         service_tier=lowered.get("x-conifer-service-tier"),
+        receipt_venue=lowered.get("x-conifer-receipt-venue"),
+        counterfactual_nano_usd=integer("x-conifer-counterfactual-nanousd"),
         cache=lowered.get("x-conifer-cache"),
         request_id=lowered.get("x-conifer-request-id") or lowered.get("x-request-id"),
     )

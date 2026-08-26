@@ -264,6 +264,16 @@ class WireTests(unittest.TestCase):
         self.assertIsNone(receipt.cost_components_nano_usd)
         self.assertIsNone(receipt.service_tier)
 
+    def test_the_two_newer_receipt_headers_are_parsed(self):
+        receipt = read_receipt(
+            {
+                "x-conifer-receipt-venue": "cloud",
+                "x-conifer-counterfactual-nanousd": "9000000",
+            }
+        )
+        self.assertEqual(receipt.receipt_venue, "cloud")
+        self.assertEqual(receipt.counterfactual_nano_usd, 9_000_000)
+
     def test_a_partial_itemization_is_discarded(self):
         self.assertIsNone(parse_cost_components("fresh=1,output=2"))
         full = parse_cost_components("fresh=1,cache_write=2,cache_read=3,output=4")
@@ -477,7 +487,7 @@ class ParityTests(unittest.TestCase):
         contract = json.loads(
             (
                 Path(__file__).resolve().parents[3]
-                / "typhoon-gateway/contracts/gateway-contract.json"
+                / "typhoon/contracts/gateway-contract.json"
             ).read_text()
         )
         self.assertEqual(DEFAULT_TIMEOUT_SECONDS, contract["timeouts_secs"]["edge_silent_cut"])

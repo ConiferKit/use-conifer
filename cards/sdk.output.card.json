@@ -3,27 +3,29 @@
   "version": 1,
   "purpose": "Everything the Conifer SDK emits. Consumers depend on this card, never on src/ internals.",
   "completion": {
-    "id": "string — the upstream completion id",
-    "model": "string — the model the gateway actually served (the effective spelling)",
+    "id": "string \u2014 the upstream completion id",
+    "model": "string \u2014 the model the gateway actually served (the effective spelling)",
     "choices": "the OpenAI chat wire, verbatim. Vendor extras (reasoning, reasoning_content) are NOT stripped.",
     "usage": "the OpenAI usage object, verbatim, including prompt_tokens_details.cached_tokens / cache_write_tokens when the upstream reported them",
     "receipt": {
-      "note": "The x-conifer-* disclosure headers, parsed. Absent fields are ABSENT — never zero-filled, because the gateway omits a receipt it cannot guarantee.",
+      "note": "The x-conifer-* disclosure headers, parsed. Absent fields are ABSENT \u2014 never zero-filled, because the gateway omits a receipt it cannot guarantee.",
       "requestedModel": "x-conifer-requested-model",
       "effectiveModel": "x-conifer-effective-model",
       "reason": "x-conifer-receipt-reason",
       "endpoint": "x-conifer-endpoint",
       "costNanoUsd": "x-conifer-cost-nanousd, as a BigInt-safe integer string plus a number convenience field",
       "costComponentsNanoUsd": "x-conifer-cost-components-nanousd, split into {fresh, cacheWrite, cacheRead, output}; the four sum to costNanoUsd by construction",
-      "serviceTier": "x-conifer-service-tier — ABSENT when no completion window was declared; never fabricated",
-      "requestId": "x-conifer-request-id"
+      "serviceTier": "x-conifer-service-tier \u2014 ABSENT when no completion window was declared; never fabricated",
+      "requestId": "x-conifer-request-id",
+      "receiptVenue": "x-conifer-receipt-venue \u2014 the venue that SERVED the turn; this gateway is always `cloud`. Distinct from the REQUEST constraint `x-conifer-venue`; the contract never repurposes a name.",
+      "counterfactualNanoUsd": "x-conifer-counterfactual-nanousd \u2014 the retail counterfactual at the documented default pin. OMITTED unless the routed predicate holds, and never 0-as-guess, so absence means 'not applicable', not 'no saving'."
     },
-    "fallbackIndex": "number — which member of a client-side fallback chain served (0 = the model you asked for). Always present, always honest."
+    "fallbackIndex": "number \u2014 which member of a client-side fallback chain served (0 = the model you asked for). Always present, always honest."
   },
   "stream": {
     "note": "An async iterable of raw OpenAI chunks plus a terminal receipt.",
     "chunks": "chat.completion.chunk objects, verbatim",
-    "receipt": "resolved once the stream ends; same shape as above. Read it after the loop, not during."
+    "receipt": "the ROUTING receipt (requested/effective model, endpoint, venue, request id), available as soon as the response head arrives. The COST fields are ABSENT on a stream, and that is a property of the wire, not a gap in this SDK: the head is sent before the first token, and the money is not settled until the last one. Measured live 2026-08-26. Reconcile a streamed turn from the terminal `usage` chunk, which the SDK always requests."
   },
   "catalog": {
     "note": "GET /v1/models, projected without loss.",
@@ -33,7 +35,7 @@
     "contextWindow": "number | absent",
     "maxOutputTokens": "number | absent",
     "maxTools": "number | absent",
-    "caps": "string[] | absent — declared capabilities. ABSENT means undeclared, NOT unsupported.",
+    "caps": "string[] | absent \u2014 declared capabilities. ABSENT means undeclared, NOT unsupported.",
     "pricing": "the AS-CHARGED price for THIS entry's lane only. Never both lanes.",
     "feePct": "the BYOK take rate, on byok entries only. Display-only.",
     "unavailable": "true only when BYOK custody is degraded for a model you hold a key for"
@@ -47,16 +49,16 @@
   "errors": {
     "note": "One error class per gateway `error.type`, so a consumer branches on a name rather than a status number. Every error carries `status`, `type`, `message`, `requestId`, and `retryable`.",
     "ConiferAuthError": "401 unauthorized",
-    "ConiferPaymentError": "402 insufficient_allowance — carries requiredNanoUsd / balanceNanoUsd",
-    "ConiferCostCeilingError": "402 cost_ceiling_exceeded — carries projectedNanoUsd / ceilingNanoUsd",
+    "ConiferPaymentError": "402 insufficient_allowance \u2014 carries requiredNanoUsd / balanceNanoUsd",
+    "ConiferCostCeilingError": "402 cost_ceiling_exceeded \u2014 carries projectedNanoUsd / ceilingNanoUsd",
     "ConiferBadRequestError": "400 invalid_request",
-    "ConiferModelNotFoundError": "404 model_not_found — indistinguishable from 'not visible to you', by design",
+    "ConiferModelNotFoundError": "404 model_not_found \u2014 indistinguishable from 'not visible to you', by design",
     "ConiferConflictError": "409 request_in_progress",
     "ConiferByokKeyError": "422 byok_key_rejected",
-    "ConiferRateLimitError": "429 rate_limited — carries retryAfterSeconds when the gateway sent one",
+    "ConiferRateLimitError": "429 rate_limited \u2014 carries retryAfterSeconds when the gateway sent one",
     "ConiferUpstreamError": "422/502 upstream_error or wire_upstream_mismatch",
     "ConiferUnavailableError": "503 service_available=false",
-    "ConiferTimeoutError": "client-side abort — no gateway verdict, so no billing claim is made either way"
+    "ConiferTimeoutError": "client-side abort \u2014 no gateway verdict, so no billing claim is made either way"
   },
   "consumers": [
     "sdk/mcp (the MCP server)",

@@ -4,6 +4,12 @@
 // migrating from: the EXACT integer cost of the turn, itemized, arrives on the
 // same response as the completion. No second stats call, no float dollars.
 //
+// STREAMING CAVEAT (measured live 2026-08-26): on an SSE turn the response
+// HEAD is sent before the completion settles, so the routing receipt is present
+// but the COST headers are not — the money is known only after the last token.
+// The SDK reports that honestly (`costNanoUsd` stays undefined) rather than
+// inventing a number; read the terminal `usage` chunk to reconcile a stream.
+//
 // The parsing law here is absence-preserving: a header the gateway omitted
 // stays `undefined`. The gateway omits `x-conifer-cost-components-nanousd`
 // rather than approximate it, and omits `x-conifer-service-tier` when no
@@ -35,6 +41,14 @@ export interface Receipt {
   costComponentsNanoUsd?: CostComponents;
   /** `flex` only ever from the provider's own echo; absent when no window was declared. */
   serviceTier?: string;
+  /** The venue that SERVED the turn. This gateway is always `cloud`. */
+  receiptVenue?: string;
+  /**
+   * The retail counterfactual at the documented default pin — what this turn
+   * would have cost unrouted. OMITTED unless the routed predicate holds; never
+   * a 0-as-guess, so absence means "not applicable", not "no saving".
+   */
+  counterfactualNanoUsd?: number;
   /** Prompt-cache disclosure, when the gateway sent one. */
   cache?: string;
   /** The id to quote in a support request. */
@@ -110,6 +124,8 @@ export function readReceipt(headers: HeaderReader): Receipt {
       headers.get("x-conifer-cost-components-nanousd"),
     ),
     serviceTier: text(headers, "x-conifer-service-tier"),
+    receiptVenue: text(headers, "x-conifer-receipt-venue"),
+    counterfactualNanoUsd: integer(headers, "x-conifer-counterfactual-nanousd"),
     cache: text(headers, "x-conifer-cache"),
     requestId:
       text(headers, "x-conifer-request-id") ?? text(headers, "x-request-id"),
