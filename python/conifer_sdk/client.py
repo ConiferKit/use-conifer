@@ -14,7 +14,7 @@ import ssl
 import urllib.error
 import urllib.request
 import uuid
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from .errors import (
     ConiferConnectionError,
@@ -23,7 +23,7 @@ from .errors import (
     ConiferTimeoutError,
     error_from,
 )
-from .receipt import nano_usd_to_usd_string, read_receipt
+from .receipt import Receipt, nano_usd_to_usd_string, read_receipt
 from .types import Balance, CatalogModel, ChatRequest, Completion
 
 DEFAULT_BASE_URL = "https://api.conifer.build"
@@ -138,6 +138,9 @@ class Conifer:
         self.max_retries = max_retries
         self.default_headers = dict(default_headers or {})
         self._transport: Transport = transport or _urllib_transport
+        #: The routing receipt of the most recent :meth:`stream` call. Cost
+        #: fields are absent on a stream; see that method's note.
+        self.stream_receipt: Optional[Receipt] = None
 
     # ------------------------------------------------------------- transport
 
@@ -210,6 +213,63 @@ class Conifer:
             raise failure
 
         raise last or ConiferConnectionError("request loop exhausted")
+
+    # ---------------------------------------------------------------- stream
+
+    def stream(self, request: ChatRequest) -> Iterator[Dict[str, Any]]:
+        """Stream one turn, yielding raw OpenAI chunks.
+
+        The terminal ``usage`` chunk is always requested, because a streamed
+        turn that cannot report its own tokens is one the caller cannot
+        reconcile — and on a stream that chunk is the ONLY cost signal: the
+        response head is sent before the first token, so the ``x-conifer-cost-*``
+        headers are necessarily absent (measured live 2026-08-26). Read
+        :attr:`stream_receipt` after the loop for the routing half.
+
+        A fallback chain cannot ride a stream: the first token commits the turn,
+        so a mid-stream switch would be a second billed turn stitched onto the
+        first without the caller seeing the seam.
+        """
+        if request.fallback_models:
+            raise ConiferPortabilityError(
+                "fallback_models+stream",
+                "a client-side fallback chain cannot be applied to a stream: the first "
+                "token commits the turn. Call chat() for a chain, or handle the failure "
+                "and re-stream yourself.",
+            )
+        key = request.idempotency_key or f"idem-{uuid.uuid4()}"
+        headers = chat_headers(request, key)
+        headers["accept"] = "text/event-stream"
+        response = self._open_stream(chat_body(request, stream=True), headers)
+        self.stream_receipt = read_receipt(response.headers)
+        try:
+            for line in response:
+                chunk = parse_frame(line.decode("utf-8"))
+                if chunk is not None:
+                    yield chunk
+        finally:
+            response.close()
+
+    def _open_stream(self, body: Dict[str, Any], headers: Dict[str, str]) -> Any:
+        """The raw SSE response. Separate from :meth:`request` on purpose: a
+        stream is not retryable (bytes already delivered cannot be un-delivered)
+        and must not be buffered."""
+        merged = dict(self.default_headers)
+        merged.update(headers)
+        merged["authorization"] = f"Bearer {self.api_key}"
+        merged["content-type"] = "application/json"
+        url = f"{self.base_url}/v1/chat/completions"
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode("utf-8"), headers=merged, method="POST"
+        )
+        try:
+            return urllib.request.urlopen(req, timeout=self.timeout, context=_ssl_context())
+        except urllib.error.HTTPError as error:
+            raise error_from(
+                error.code,
+                _parse_json(error.read().decode("utf-8"), error.code),
+                {k.lower(): v for k, v in (error.headers or {}).items()},
+            ) from error
 
     # ------------------------------------------------------------------ chat
 
@@ -446,6 +506,20 @@ def pick_cheapest(
     if not eligible:
         return None
     return min(eligible, key=lambda m: price_of(m) or 0)
+
+
+def parse_frame(frame: str) -> Optional[Dict[str, Any]]:
+    """One SSE line -> one chunk. ``[DONE]``, comments and blanks yield None."""
+    line = frame.strip()
+    if not line.startswith("data:"):
+        return None
+    data = line[5:].strip()
+    if data == "" or data == "[DONE]":
+        return None
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError:
+        return None
 
 
 def backoff_seconds(attempt: int) -> float:

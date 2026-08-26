@@ -26,14 +26,25 @@ console.log(answer.receipt.costComponentsNanoUsd); // itemized across four token
 ```python
 from conifer_sdk import Conifer, ChatRequest
 
-answer = Conifer().chat(ChatRequest(
+conifer = Conifer()
+answer = conifer.chat(ChatRequest(
     model="claude-haiku-4-5",
     messages=[{"role": "user", "content": "three names for a build cache"}],
     max_tokens=200,
     max_cost_nano_usd=5_000_000,
 ))
 print(answer.text, answer.receipt.cost_usd)
+
+# Streaming, with the same semantics as the TypeScript twin.
+for chunk in conifer.stream(ChatRequest(model="claude-haiku-4-5", messages=[...])):
+    ...
+print(conifer.stream_receipt.effective_model)   # routing arrives with the head
 ```
+
+On a **streamed** turn the cost headers are absent in both languages, and that
+is the wire being honest rather than a gap: the response head is sent before the
+first token and the money settles after the last. Reconcile a stream from its
+terminal `usage` chunk, which the SDK always requests.
 
 ## Why this exists when the OpenAI SDK already works
 
@@ -174,7 +185,7 @@ languages refuse the same things.
 ```bash
 npm run build                                            # emit dist/ (ESM + .d.ts)
 node --experimental-strip-types --test tests/*.test.ts   # 66 tests
-cd python && python3 -m unittest discover -s tests       # 32 tests
+cd python && python3 -m unittest discover -s tests       # 35 tests
 ```
 
 Most assertions run with an injected transport: no network, no mock framework,

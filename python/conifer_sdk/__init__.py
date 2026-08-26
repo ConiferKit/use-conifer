@@ -12,7 +12,13 @@ Standard library only, so ``pip install`` pulls no tree and the SDK works in a
 lambda, a Slack bot, or a locked-down build image unchanged.
 """
 
-from .client import Conifer, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_SECONDS, resolve_base_url
+from .client import (
+    Conifer,
+    DEFAULT_BASE_URL,
+    DEFAULT_TIMEOUT_SECONDS,
+    parse_frame,
+    resolve_base_url,
+)
 from .errors import (
     ConiferAuthError,
     ConiferBadRequestError,
@@ -46,6 +52,7 @@ __all__ = [
     "DEFAULT_BASE_URL",
     "DEFAULT_TIMEOUT_SECONDS",
     "resolve_base_url",
+    "parse_frame",
     "ConiferError",
     "ConiferAuthError",
     "ConiferPaymentError",
