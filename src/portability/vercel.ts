@@ -1,0 +1,112 @@
+// portability/vercel.ts — the Vercel AI Gateway / AI SDK migration path.
+//
+// Vercel's gateway speaks the OpenAI wire at https://ai-gateway.vercel.sh/v1,
+// which is the same wire Conifer serves. So most of this is a URL and a key,
+// and the honest work is in the two places it is NOT:
+//
+//   · `providerOptions.gateway` (order, models) — provider pinning and
+//     server-side fallbacks, neither of which Conifer's admission model has.
+//   · `/embeddings` and image generation — doors Conifer does not serve at all.
+//
+// Both throw. See cards/portability.card.json.
+
+import { ConiferPortabilityError } from "../errors.ts";
+import { DEFAULT_BASE_URL } from "../client.ts";
+import type { ChatRequest } from "../types.ts";
+
+/** The OpenAI-compatible door, which is what every AI SDK provider wants. */
+export function coniferOpenAICompatibleConfig(options: {
+  apiKey?: string;
+  baseUrl?: string;
+  client?: string;
+} = {}): { name: string; baseURL: string; apiKey: string; headers: Record<string, string> } {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    .process?.env ?? {};
+  const apiKey = options.apiKey ?? env.CONIFER_API_KEY;
+  if (apiKey === undefined || apiKey === "") {
+    throw new ConiferPortabilityError(
+      "apiKey",
+      "CONIFER_API_KEY is missing. Unlike Vercel's OIDC path there is no ambient credential to fall back on: supply the key.",
+    );
+  }
+  const headers: Record<string, string> = {};
+  if (options.client !== undefined) headers["x-conifer-client"] = options.client;
+  return {
+    // The AI SDK uses `name` only for provider-namespaced telemetry.
+    name: "conifer",
+    baseURL: `${(options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "")}/v1`,
+    apiKey,
+    headers,
+  };
+}
+
+/** What a Vercel `providerOptions` bag may carry, as far as this shim reads. */
+export interface VercelProviderOptions {
+  gateway?: {
+    /** Provider pinning. No Conifer equivalent. */
+    order?: string[];
+    /** Server-side model fallbacks. Becomes a client-side chain, opt-in. */
+    models?: string[];
+    only?: string[];
+    [extra: string]: unknown;
+  };
+  [provider: string]: unknown;
+}
+
+/**
+ * `providerOptions` -> the Conifer request fields it implies.
+ *
+ * Per-provider blocks OTHER than `gateway` (e.g. `anthropic: {...}`) are
+ * returned for you to place in `extraBody`: Conifer forwards unmodelled body
+ * fields to the upstream verbatim, so a provider-native option can still ride
+ * along — but you place it deliberately, rather than the shim guessing that
+ * every upstream understands it.
+ */
+export function fromVercelProviderOptions(
+  providerOptions: VercelProviderOptions,
+  options: { allowClientFallback?: boolean } = {},
+): { request: Partial<ChatRequest>; passthrough: Record<string, unknown> } {
+  const gateway = providerOptions.gateway ?? {};
+  if (gateway.order !== undefined || gateway.only !== undefined) {
+    throw new ConiferPortabilityError(
+      "providerOptions.gateway.order",
+      "provider pinning has no Conifer equivalent: the gateway picks the host for the admitted model by price and health, and the model you named is always the model you are charged for. Use `maxCostNanoUsd` if the goal was cost control.",
+    );
+  }
+  const request: Partial<ChatRequest> = {};
+  if (gateway.models !== undefined) {
+    request.fallbackModels = gateway.models;
+    request.allowClientFallback = options.allowClientFallback;
+  }
+  const passthrough: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(providerOptions)) {
+    if (key !== "gateway") passthrough[key] = value;
+  }
+  return { request, passthrough };
+}
+
+/** Doors Conifer does not serve. Named so a migration fails at the call site. */
+export function assertSupportedVercelSurface(surface: string): void {
+  const unsupported: Record<string, string> = {
+    embeddings:
+      "Conifer serves no /v1/embeddings door. Keep embeddings on your current provider, or open the request for one — this is a gateway gap, not a client one.",
+    "image-generation":
+      "Conifer serves no image-output door. Keep image generation on your current provider.",
+    oidc:
+      "there is no Conifer OIDC exchange. Mint a key at https://conifer.build/console#/keys and set CONIFER_API_KEY.",
+  };
+  const why = unsupported[surface];
+  if (why !== undefined) throw new ConiferPortabilityError(surface, why);
+}
+
+/** The env vars a Vercel-shaped app already sets, rewritten for Conifer. */
+export function vercelEnvMigration(): Record<string, string> {
+  return {
+    // Vercel's own client reads AI_GATEWAY_API_KEY; the OpenAI-compatible
+    // provider path reads whatever you pass it, so the honest instruction is
+    // one variable and one base URL.
+    CONIFER_API_KEY: "sk-conifer-…",
+    OPENAI_BASE_URL: `${DEFAULT_BASE_URL}/v1`,
+    OPENAI_API_KEY: "$CONIFER_API_KEY",
+  };
+}
