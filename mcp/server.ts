@@ -257,8 +257,26 @@ export function serve(input: NodeJS.ReadableStream, output: NodeJS.WritableStrea
 }
 
 // Run as a binary, stay importable as a module.
-const invokedDirectly =
-  typeof process !== "undefined" &&
-  process.argv[1] !== undefined &&
-  import.meta.url === new URL(`file://${process.argv[1]}`).href;
-if (invokedDirectly) serve(process.stdin, process.stdout);
+//
+// The obvious guard — comparing `import.meta.url` to `process.argv[1]` — is
+// WRONG for a published package, and silently so: `npx conifer-mcp` runs the
+// bin shim, so argv[1] is the shim's path and never this module's. The server
+// then started nothing and exited 0, which looks exactly like an MCP host
+// getting no answer. Measured against a real `npm i` consumer on Node 22.
+//
+// So the shim asks explicitly (`bin/conifer-mcp.mjs` sets the flag by importing
+// this module for its side effect), and a direct `node mcp/server.ts` still
+// works via the argv comparison for the development path.
+function shouldServe(): boolean {
+  if (typeof process === "undefined") return false;
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  // Direct execution: `node mcp/server.ts` (or the compiled dist path).
+  const here = import.meta.url.replace(/\.ts$/, "");
+  const invoked = new URL(`file://${entry}`).href.replace(/\.(ts|js)$/, "");
+  if (here.replace(/\.js$/, "") === invoked) return true;
+  // Published binary: the bin shim is the entry point.
+  return /conifer-mcp(\.mjs)?$/.test(entry);
+}
+
+if (shouldServe()) serve(process.stdin, process.stdout);

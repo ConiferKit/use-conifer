@@ -4,18 +4,34 @@
   "description": "The Conifer gateway SDK: one client, exact per-turn cost receipts, and honest migration shims from OpenRouter, Vercel AI Gateway, and Helicone.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./mcp": "./mcp/server.ts"
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/server.d.ts",
+      "default": "./dist/mcp/server.js"
+    }
   },
+  "types": "./dist/src/index.d.ts",
   "bin": {
-    "conifer-mcp": "./mcp/server.ts"
+    "conifer-mcp": "./bin/conifer-mcp.mjs"
   },
-  "files": ["src", "mcp", "cards", "README.md"],
+  "files": [
+    "dist",
+    "bin",
+    "cards",
+    "README.md"
+  ],
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepack": "npm run build"
   },
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=18"
+  },
   "devDependencies": {
     "typescript": "^5.6.0"
   },
