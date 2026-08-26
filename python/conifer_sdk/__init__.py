@@ -1,0 +1,80 @@
+"""The Conifer gateway SDK for Python.
+
+Same cards as the TypeScript SDK (``sdk/cards/``), same laws:
+
+* the receipt is parsed absence-preserving — a header the gateway omitted stays
+  ``None``, because zero-filling turns "we do not know" into a wrong number;
+* retries are narrow (transport faults and 429/502/503/504 only) and always
+  carry one idempotency key, so a retry cannot double-bill;
+* a portability input Conifer cannot honor raises rather than being dropped.
+
+Standard library only, so ``pip install`` pulls no tree and the SDK works in a
+lambda, a Slack bot, or a locked-down build image unchanged.
+"""
+
+from .client import Conifer, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_SECONDS, resolve_base_url
+from .errors import (
+    ConiferAuthError,
+    ConiferBadRequestError,
+    ConiferByokKeyError,
+    ConiferConflictError,
+    ConiferConnectionError,
+    ConiferCostCeilingError,
+    ConiferError,
+    ConiferModelNotFoundError,
+    ConiferPaymentError,
+    ConiferPortabilityError,
+    ConiferRateLimitError,
+    ConiferTimeoutError,
+    ConiferUnavailableError,
+    ConiferUpstreamError,
+    error_from,
+)
+from .receipt import CostComponents, Receipt, nano_usd_to_usd_string, read_receipt
+from .portability import (
+    ceiling_from_policy,
+    conifer_openai_compatible_config,
+    from_helicone_headers,
+    from_openrouter,
+    from_vercel_provider_options,
+    parse_fallbacks,
+)
+from .types import Balance, CatalogModel, ChatRequest, Completion
+
+__all__ = [
+    "Conifer",
+    "DEFAULT_BASE_URL",
+    "DEFAULT_TIMEOUT_SECONDS",
+    "resolve_base_url",
+    "ConiferError",
+    "ConiferAuthError",
+    "ConiferPaymentError",
+    "ConiferCostCeilingError",
+    "ConiferBadRequestError",
+    "ConiferModelNotFoundError",
+    "ConiferConflictError",
+    "ConiferByokKeyError",
+    "ConiferRateLimitError",
+    "ConiferUpstreamError",
+    "ConiferUnavailableError",
+    "ConiferTimeoutError",
+    "ConiferConnectionError",
+    "ConiferPortabilityError",
+    "error_from",
+    "Receipt",
+    "CostComponents",
+    "read_receipt",
+    "nano_usd_to_usd_string",
+    "ChatRequest",
+    "Completion",
+    "CatalogModel",
+    "Balance",
+    "from_openrouter",
+    "from_helicone_headers",
+    "from_vercel_provider_options",
+    "conifer_openai_compatible_config",
+    "ceiling_from_policy",
+    "parse_fallbacks",
+]
+
+__version__ = "0.1.0"
