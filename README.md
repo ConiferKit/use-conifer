@@ -7,6 +7,11 @@ so tools that speak no OpenAI wire can still call it.
 export CONIFER_API_KEY='sk-conifer-…'   # mint one at https://conifer.build/console#/keys
 ```
 
+> **Not yet published.** `@conifer/sdk` is not on npm and `conifer-sdk` is not
+> on PyPI, so the imports below assume a local install
+> (`npm i /path/to/conifer/sdk`, or `sys.path` at `sdk/python`). Everything else
+> in this README is verified against the live gateway.
+
 ```ts
 import { Conifer, textOf } from "@conifer/sdk";
 
@@ -114,20 +119,28 @@ The paste-one-line-into-your-agent trick only helps a tool that already speaks
 the OpenAI wire. An agent, a Slack bot, or an IDE that speaks MCP has no such
 hook — it can only use what its host exposes as a tool. So:
 
+Build it once, then point any MCP host at the compiled binary:
+
+```bash
+cd sdk && npm install && npm run build
+```
+
 ```json
 {
   "mcpServers": {
     "conifer": {
-      "command": "npx",
-      "args": ["-y", "@conifer/sdk", "conifer-mcp"],
+      "command": "node",
+      "args": ["/path/to/conifer/sdk/bin/conifer-mcp.mjs"],
       "env": { "CONIFER_API_KEY": "sk-conifer-…" }
     }
   }
 }
 ```
 
-Working from this repo instead of an install? Point at the checkout:
-`"command": "node", "args": ["--experimental-strip-types", "/path/to/sdk/mcp/server.ts"]`.
+Once `@conifer/sdk` is published this becomes
+`"command": "npx", "args": ["-y", "@conifer/sdk", "conifer-mcp"]` and the build
+step goes away. It is written as a path today because the npx form would 404 —
+see the note on publishing below.
 
 Four tools, each one real gateway call:
 
