@@ -10,6 +10,7 @@ import json
 import os
 import random
 import time
+import ssl
 import urllib.error
 import urllib.request
 import uuid
@@ -66,12 +67,33 @@ def _is_conifer_host(url: str) -> bool:
     return host is not None and host.endswith("conifer.build")
 
 
+def _ssl_context() -> Optional["ssl.SSLContext"]:
+    """The system trust store, falling back to certifi when it is unusable.
+
+    A python.org install whose ``Install Certificates.command`` was never run
+    has an EMPTY trust store, so every HTTPS call fails with
+    CERTIFICATE_VERIFY_FAILED — including this one. When ``certifi`` happens to
+    be installed we use its bundle rather than failing, and when it is not we
+    let the real error through (see the diagnosis in ``request``): silently
+    disabling verification would be the other way to make this "work", and that
+    is not a trade this SDK gets to make on a caller's behalf.
+    """
+    context = ssl.create_default_context()
+    if context.cert_store_stats().get("x509_ca", 0) > 0:
+        return context
+    try:
+        import certifi
+    except ImportError:
+        return context
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def _urllib_transport(
     method: str, url: str, headers: Dict[str, str], body: Optional[bytes], timeout: float
 ) -> TransportResult:
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
             return (
                 response.status,
                 {key.lower(): value for key, value in response.headers.items()},
@@ -153,6 +175,22 @@ class Conifer:
                     continue
                 raise last from cause
             except OSError as cause:
+                # Name a TLS trust failure for what it is. It is NOT "the
+                # gateway is unreachable": the host answered, this Python just
+                # cannot verify anyone's certificate — most often a python.org
+                # install whose "Install Certificates.command" was never run.
+                # Reported as connectivity, it sends the reader to look at the
+                # gateway, the key, and the network, none of which are wrong.
+                if isinstance(cause, ssl.SSLCertVerificationError) or (
+                    isinstance(getattr(cause, "reason", None), ssl.SSLCertVerificationError)
+                ):
+                    raise ConiferConnectionError(
+                        f"TLS certificate verification failed for {url}. This Python has no "
+                        "usable CA trust store, so it cannot verify ANY https host. On macOS "
+                        'run "/Applications/Python 3.x/Install Certificates.command", or '
+                        "`pip install certifi`. The gateway itself is reachable.",
+                        cause,
+                    ) from cause
                 last = ConiferConnectionError(f"could not reach the gateway at {url}", cause)
                 if attempt < self.max_retries:
                     time.sleep(backoff_seconds(attempt))
@@ -343,15 +381,43 @@ def to_catalog_model(entry: Mapping[str, Any]) -> CatalogModel:
 
 
 def price_of(model: CatalogModel) -> Optional[float]:
-    """A single comparable ranking number: the sum of declared per-token rates.
+    """A comparable ranking number per model, in USD per million tokens.
 
-    Not a forecast of a turn's cost — a ranking key, and only among entries
-    whose prices the catalog actually stated.
+    The catalog states prices as DECIMAL STRINGS ("10", "12.5"), not numbers —
+    they are money, and a string survives the JSON round-trip a float would
+    quietly perturb. Parsing them is not a detail: the first version of this
+    summed only numeric values and so ranked the entire live catalog as
+    unpriced, making ``cheapest_for`` return nothing at all.
+
+    Input and output are weighted rather than every field summed, because a
+    flat sum lets a model with cheap input and ruinous output outrank one that
+    is cheaper for any real turn. The 3:1 weighting is a ranking convention,
+    NOT a cost forecast — ``receipt.cost_nano_usd`` is the only authority on
+    what a turn actually cost. Cache rates are excluded: whether they apply is
+    a property of the conversation, not of the model.
     """
     if not model.pricing:
         return None
-    values = [v for v in model.pricing.values() if isinstance(v, (int, float)) and not isinstance(v, bool)]
-    return sum(values) if values else None
+    input_rate = _decimal(model.pricing.get("in_usd_per_mtok"))
+    output_rate = _decimal(model.pricing.get("out_usd_per_mtok"))
+    if input_rate is None and output_rate is None:
+        # An unrecognized pricing shape is UNPRICED, not free.
+        return None
+    return (input_rate or 0.0) + 3 * (output_rate or 0.0)
+
+
+def _decimal(value: Any) -> Optional[float]:
+    """A catalog money value: a decimal string, or a number if one appears."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def pick_cheapest(

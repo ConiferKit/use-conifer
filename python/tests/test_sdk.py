@@ -296,7 +296,12 @@ class WireTests(unittest.TestCase):
                 {
                     "object": "list",
                     "data": [
-                        {"id": "a", "caps": ["tools"], "pricing": {"input": 1}, "context_window": 100},
+                        {
+                            "id": "a",
+                            "caps": ["tools"],
+                            "pricing": {"in_usd_per_mtok": "1", "out_usd_per_mtok": "5"},
+                            "context_window": 100,
+                        },
                         {"id": "bare", "endpoint_kind": "byok", "fee_pct": 4.5},
                     ],
                 },
@@ -312,16 +317,34 @@ class WireTests(unittest.TestCase):
         balance = client(transport).balance()
         self.assertEqual(balance.remaining_usd, "12.500000000")
 
-    def test_cheapest_skips_undeclared_caps_and_unpriced_entries(self):
+    def test_cheapest_reads_the_catalogs_decimal_string_prices(self):
+        # Regression: an earlier version summed only NUMERIC pricing values, so
+        # against the real catalog (money as strings) every model ranked as
+        # unpriced and cheapest_for returned nothing at all.
+        def priced(inp, out):
+            return {"in_usd_per_mtok": inp, "out_usd_per_mtok": out}
+
         models = [
-            CatalogModel(id="no-caps", pricing={"input": 1}),
-            CatalogModel(id="cheap", caps=["tools"], pricing={"input": 2}),
-            CatalogModel(id="dear", caps=["tools"], pricing={"input": 90}),
+            CatalogModel(id="no-caps", pricing=priced("1", "1")),
+            CatalogModel(id="cheap", caps=["tools"], pricing=priced("1", "5")),
+            CatalogModel(id="dear", caps=["tools"], pricing=priced("10", "50")),
             CatalogModel(id="unpriced", caps=["tools"]),
-            CatalogModel(id="degraded", caps=["tools"], pricing={"input": 1}, unavailable=True),
+            CatalogModel(id="degraded", caps=["tools"], pricing=priced("0.1", "0.1"), unavailable=True),
         ]
         self.assertEqual(pick_cheapest(models, ["tools"]).id, "cheap")
         self.assertIsNone(pick_cheapest(models, ["tools"], min_context_window=1))
+
+    def test_output_rate_is_weighted_and_unknown_shapes_are_unpriced(self):
+        from conifer_sdk.client import price_of
+
+        trap = CatalogModel(id="trap", pricing={"in_usd_per_mtok": "0.5", "out_usd_per_mtok": "100"})
+        balanced = CatalogModel(id="balanced", pricing={"in_usd_per_mtok": "2", "out_usd_per_mtok": "6"})
+        self.assertEqual(pick_cheapest([trap, balanced]).id, "balanced")
+        self.assertIsNone(price_of(CatalogModel(id="x", pricing={"future_field": "3"})))
+        self.assertEqual(
+            price_of(CatalogModel(id="x", pricing={"in_usd_per_mtok": "10", "out_usd_per_mtok": "50"})),
+            160,
+        )
 
     def test_a_missing_key_fails_at_construction(self):
         with self.assertRaises(Exception) as caught:
