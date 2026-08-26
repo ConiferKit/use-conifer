@@ -67,6 +67,25 @@ test("a built dist exists and exposes the public seam", async () => {
   }
 });
 
+test("shipped declarations are real .d.ts a consumer can compile against", async () => {
+  const dts = new URL("../dist/src/index.d.ts", import.meta.url);
+  if (!existsSync(dts)) return;
+  const text = readFileSync(dts, "utf8");
+  // Re-exported types, not `any`: a .d.ts that erases the public shapes is
+  // worse than none, because the consumer's editor confidently shows nothing.
+  assert.match(text, /Completion/);
+  assert.match(text, /Receipt/);
+  assert.match(text, /ConiferPortabilityError/);
+
+  // The lib requirement is DOCUMENTED at its source. `AsyncIterable` is
+  // ES2018, so an ES2017 consumer sees TS2583 pointing into our types (the
+  // official `openai` package fails the same check the same way). A reader
+  // who hits it must find the explanation in the file the error names.
+  const types = readFileSync(new URL("../dist/src/types.d.ts", import.meta.url), "utf8");
+  assert.match(types, /lib\.es2018/i, "state the lib requirement where the error points");
+  assert.match(types, /ES2018\+|"lib": \["ES2018"\]/, "say what to change");
+});
+
 test("the MCP bin answers over stdio instead of exiting silently", () => {
   const bin = new URL("../bin/conifer-mcp.mjs", import.meta.url);
   if (!existsSync(new URL("../dist/mcp/server.js", import.meta.url))) return;

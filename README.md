@@ -193,6 +193,18 @@ never sent, or if a field the portability card calls unsupported does not
 actually refuse. The Python suite re-checks the same portability card, so both
 languages refuse the same things.
 
+## TypeScript consumers
+
+Target **ES2018 or later** (`"target": "ES2018"`, or `"lib": ["ES2018"]`). The
+stream type is an `AsyncIterable`, whose name only exists in `lib.es2018`, so an
+older target reports `TS2583` pointing into our declarations. The official
+`openai` package has the same requirement for the same reason — async iteration
+cannot be described without the names that describe it.
+
+Verified from a real `npm i`: an ES2022 consumer typechecks clean under
+`strict` with **no** `skipLibCheck`, and CommonJS `require()` works on Node 22,
+24 and 26.
+
 ## Tests
 
 ```bash

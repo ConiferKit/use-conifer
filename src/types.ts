@@ -121,6 +121,23 @@ export interface StreamChunk {
   [extra: string]: unknown;
 }
 
+/**
+ * The stream handle: an async iterable of raw chunks plus a terminal receipt.
+ *
+ * LIB REQUIREMENT, stated because it is easy to hit and confusing to diagnose:
+ * `AsyncIterable` lives in `lib.es2018`, so a consumer whose tsconfig targets
+ * ES2017 or older sees `TS2583: Cannot find name 'AsyncIterable'` pointing
+ * INTO this file. That is not a bug in these types — the official `openai`
+ * package fails the same check the same way, because there is no way to
+ * describe async iteration without the names that describe it. Target ES2018+
+ * (or add `"lib": ["ES2018"]`), which any runtime new enough to run this SDK
+ * already supports.
+ *
+ * An earlier draft tried to dodge this by spelling the iterator out
+ * structurally. It did not work — the `[Symbol.asyncIterator]` key is itself
+ * ES2018 — and it traded a clear declaration for an obscure one, so it was
+ * reverted rather than kept as decoration.
+ */
 export interface CompletionStream extends AsyncIterable<StreamChunk> {
   /**
    * The receipt for the streamed turn. Resolves when the stream ends.
