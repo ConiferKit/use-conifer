@@ -34,6 +34,7 @@ from conifer_sdk import (  # noqa: E402
 )
 from conifer_sdk.client import (  # noqa: E402
     chat_body,
+    parse_frame,
     chat_headers,
     pick_cheapest,
     resolve_chain,
@@ -360,6 +361,34 @@ class WireTests(unittest.TestCase):
         with self.assertRaises(Exception) as caught:
             Conifer(api_key=None, env={})
         self.assertIn("CONIFER_API_KEY", str(caught.exception))
+
+
+class StreamTests(unittest.TestCase):
+    """Parity with the TypeScript stream(): same opt-in refusal, same frames."""
+
+    def test_a_fallback_chain_cannot_ride_a_stream(self):
+        c = client(lambda *a: None)
+        with self.assertRaises(ConiferPortabilityError):
+            list(
+                c.stream(
+                    ChatRequest(
+                        model="m",
+                        messages=[],
+                        fallback_models=["b"],
+                        allow_client_fallback=True,
+                    )
+                )
+            )
+
+    def test_frames_parse_and_terminators_yield_nothing(self):
+        self.assertIsNone(parse_frame("data: [DONE]"))
+        self.assertIsNone(parse_frame(": keep-alive"))
+        self.assertIsNone(parse_frame(""))
+        self.assertEqual(parse_frame('data: {"id":"x"}'), {"id": "x"})
+
+    def test_a_stream_body_always_requests_the_terminal_usage_chunk(self):
+        body = chat_body(ChatRequest(model="m", messages=[]), stream=True)
+        self.assertEqual(body["stream_options"], {"include_usage": True})
 
 
 class PortabilityTests(unittest.TestCase):
