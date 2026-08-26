@@ -184,3 +184,23 @@ Stated here so you find out now rather than mid-migration:
 - **No provider pinning.** The gateway chooses the host for the model you named, by price and health. The model is never substituted.
 - **No server-side prompt compression, moderation, injection scanning, or prompt registry.**
 - **No mid-stream fallback.** The first token commits the turn, so a chain cannot be attached to a stream.
+
+## Verified against the live gateway
+
+The suites above run offline. The package was also exercised against production
+(`api.conifer.build`, 83-model catalog), which is what caught the two bugs worth
+recording here:
+
+1. **The catalog states money as decimal strings** (`"in_usd_per_mtok": "10"`),
+   not numbers. The first `priceOf` summed only numeric values, so every model
+   in the real catalog ranked as unpriced and `cheapestFor` returned nothing at
+   all — while passing a unit test built on an invented shape. The tests now use
+   the live shape.
+2. **A TLS trust failure was reported as "could not reach the gateway"**, which
+   sends the reader to check the network, the key, and the gateway, none of which
+   are wrong. It now names the real cause and the two fixes.
+
+Live results: exact receipts (`0.000046000` USD on a haiku turn, itemized and
+summing to the total), `ConiferCostCeilingError` on a $0.000000001 ceiling with
+the projection attached, and `ConiferModelNotFoundError` on an unknown id — in
+both languages.

@@ -349,18 +349,42 @@ export function pickCheapest(
 }
 
 /**
- * A single comparable number per model: the sum of its declared per-token
- * rates. Not a forecast of a turn's cost — a ranking key, and only among
- * entries whose prices the catalog actually stated.
+ * A single comparable number per model, in USD per million tokens.
+ *
+ * The catalog states prices as DECIMAL STRINGS (`"10"`, `"12.5"`), not numbers
+ * — they are money, and a string survives the JSON round-trip that a float
+ * would quietly perturb. Parsing them here rather than assuming numbers is not
+ * a detail: the first version of this function summed only `typeof === number`
+ * and therefore ranked the entire live catalog as unpriced, so `cheapestFor`
+ * returned nothing at all.
+ *
+ * The ranking key weights input and output rather than summing every field,
+ * because a flat sum lets a model with cheap input and ruinous output outrank
+ * one that is cheaper for any real turn. The 3:1 output:input weighting is a
+ * ranking convention, NOT a cost forecast — `receipt.costNanoUsd` is the only
+ * authority on what a turn actually cost. Cache rates are excluded: whether
+ * they apply is a property of the conversation, not of the model.
  */
 export function priceOf(model: CatalogModel): number | undefined {
   const pricing = model.pricing;
   if (pricing === undefined) return undefined;
-  const values = Object.values(pricing).filter(
-    (value): value is number => typeof value === "number",
-  );
-  if (values.length === 0) return undefined;
-  return values.reduce((sum, value) => sum + value, 0);
+  const input = decimal(pricing.in_usd_per_mtok);
+  const output = decimal(pricing.out_usd_per_mtok);
+  if (input === undefined && output === undefined) {
+    // An unrecognized pricing shape is UNPRICED, not free. Falling back to a
+    // sum of whatever numbers happen to be present would rank a model on
+    // fields we cannot name.
+    return undefined;
+  }
+  return (input ?? 0) + 3 * (output ?? 0);
+}
+
+/** A catalog money value: a decimal string, or a number if one ever appears. */
+function decimal(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return undefined;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 /** Wrap an SSE response as an async iterable of chunks plus a terminal receipt. */

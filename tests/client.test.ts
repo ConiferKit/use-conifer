@@ -18,6 +18,7 @@ import {
   parseCostComponents,
   parseFrame,
   pickCheapest,
+  priceOf,
   readReceipt,
   resolveBaseUrl,
   resolveChain,
@@ -329,17 +330,42 @@ test("balance converts nanodollars to an exact decimal string", async () => {
   assert.equal(balance.remainingUsd, "12.500000000");
 });
 
-test("cheapest-capable skips undeclared caps and unpriced entries", () => {
+/** The LIVE catalog's shape: prices are decimal STRINGS per million tokens. */
+function priced(inUsd: string, outUsd: string) {
+  return {
+    in_usd_per_mtok: inUsd,
+    out_usd_per_mtok: outUsd,
+    cache_read_usd_per_mtok: "1",
+    cache_write_usd_per_mtok: "12.5",
+  };
+}
+
+test("cheapest-capable reads the catalog's decimal-STRING prices", () => {
+  // Regression: an earlier version summed only numeric pricing values, so
+  // against the real catalog (which states money as strings) every model
+  // ranked as unpriced and cheapestFor returned nothing at all.
   const models = [
-    { id: "no-caps", raw: {}, pricing: { input: 1 } },
-    { id: "capable-cheap", raw: {}, caps: ["tools"], pricing: { input: 2, output: 2 } },
-    { id: "capable-dear", raw: {}, caps: ["tools"], pricing: { input: 90 } },
+    { id: "no-caps", raw: {}, pricing: priced("1", "1") },
+    { id: "capable-cheap", raw: {}, caps: ["tools"], pricing: priced("1", "5") },
+    { id: "capable-dear", raw: {}, caps: ["tools"], pricing: priced("10", "50") },
     { id: "capable-unpriced", raw: {}, caps: ["tools"] },
-    { id: "degraded", raw: {}, caps: ["tools"], pricing: { input: 1 }, unavailable: true },
+    { id: "degraded", raw: {}, caps: ["tools"], pricing: priced("0.1", "0.1"), unavailable: true },
   ];
   assert.equal(pickCheapest(models, ["tools"])?.id, "capable-cheap");
   assert.equal(pickCheapest(models, ["tools"], { minContextWindow: 1 }), undefined);
   assert.equal(pickCheapest(models, [])?.id, "no-caps");
+});
+
+test("output rate is weighted, so cheap input cannot hide ruinous output", () => {
+  const cheapInputRuinousOutput = { id: "trap", raw: {}, pricing: priced("0.5", "100") };
+  const balanced = { id: "balanced", raw: {}, pricing: priced("2", "6") };
+  assert.equal(pickCheapest([cheapInputRuinousOutput, balanced], [])?.id, "balanced");
+});
+
+test("an unrecognized pricing shape is unpriced, never free", () => {
+  assert.equal(priceOf({ id: "x", raw: {}, pricing: { some_future_field: "3" } }), undefined);
+  assert.equal(priceOf({ id: "x", raw: {} }), undefined);
+  assert.equal(priceOf({ id: "x", raw: {}, pricing: priced("10", "50") }), 160);
 });
 
 test("receipt parsing preserves absence rather than zero-filling", () => {

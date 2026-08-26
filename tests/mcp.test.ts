@@ -39,13 +39,14 @@ const CATALOG = {
       provider: "anthropic",
       context_window: 200000,
       caps: ["tools"],
-      pricing: { input: 1, output: 5 },
+      // The LIVE catalog's shape: money as decimal strings per million tokens.
+      pricing: { in_usd_per_mtok: "1", out_usd_per_mtok: "5" },
     },
     {
       id: "expensive-model",
       endpoint_kind: "conifer",
       caps: ["tools", "vision"],
-      pricing: { input: 50, output: 200 },
+      pricing: { in_usd_per_mtok: "50", out_usd_per_mtok: "200" },
     },
   ],
 };
