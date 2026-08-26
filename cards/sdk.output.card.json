@@ -1,0 +1,66 @@
+{
+  "card": "sdk.output",
+  "version": 1,
+  "purpose": "Everything the Conifer SDK emits. Consumers depend on this card, never on src/ internals.",
+  "completion": {
+    "id": "string — the upstream completion id",
+    "model": "string — the model the gateway actually served (the effective spelling)",
+    "choices": "the OpenAI chat wire, verbatim. Vendor extras (reasoning, reasoning_content) are NOT stripped.",
+    "usage": "the OpenAI usage object, verbatim, including prompt_tokens_details.cached_tokens / cache_write_tokens when the upstream reported them",
+    "receipt": {
+      "note": "The x-conifer-* disclosure headers, parsed. Absent fields are ABSENT — never zero-filled, because the gateway omits a receipt it cannot guarantee.",
+      "requestedModel": "x-conifer-requested-model",
+      "effectiveModel": "x-conifer-effective-model",
+      "reason": "x-conifer-receipt-reason",
+      "endpoint": "x-conifer-endpoint",
+      "costNanoUsd": "x-conifer-cost-nanousd, as a BigInt-safe integer string plus a number convenience field",
+      "costComponentsNanoUsd": "x-conifer-cost-components-nanousd, split into {fresh, cacheWrite, cacheRead, output}; the four sum to costNanoUsd by construction",
+      "serviceTier": "x-conifer-service-tier — ABSENT when no completion window was declared; never fabricated",
+      "requestId": "x-conifer-request-id"
+    },
+    "fallbackIndex": "number — which member of a client-side fallback chain served (0 = the model you asked for). Always present, always honest."
+  },
+  "stream": {
+    "note": "An async iterable of raw OpenAI chunks plus a terminal receipt.",
+    "chunks": "chat.completion.chunk objects, verbatim",
+    "receipt": "resolved once the stream ends; same shape as above. Read it after the loop, not during."
+  },
+  "catalog": {
+    "note": "GET /v1/models, projected without loss.",
+    "id": "string",
+    "endpointKind": "\"conifer\" (credits lane) or \"byok\" (your own key would serve it)",
+    "provider": "serving provider name",
+    "contextWindow": "number | absent",
+    "maxOutputTokens": "number | absent",
+    "maxTools": "number | absent",
+    "caps": "string[] | absent — declared capabilities. ABSENT means undeclared, NOT unsupported.",
+    "pricing": "the AS-CHARGED price for THIS entry's lane only. Never both lanes.",
+    "feePct": "the BYOK take rate, on byok entries only. Display-only.",
+    "unavailable": "true only when BYOK custody is degraded for a model you hold a key for"
+  },
+  "balance": {
+    "remainingNanoUsd": "spendable total",
+    "includedNanoUsd": "period allowance granted",
+    "allowanceRemainingNanoUsd": "allowance portion left",
+    "creditsRemainingNanoUsd": "purchased-credit portion left"
+  },
+  "errors": {
+    "note": "One error class per gateway `error.type`, so a consumer branches on a name rather than a status number. Every error carries `status`, `type`, `message`, `requestId`, and `retryable`.",
+    "ConiferAuthError": "401 unauthorized",
+    "ConiferPaymentError": "402 insufficient_allowance — carries requiredNanoUsd / balanceNanoUsd",
+    "ConiferCostCeilingError": "402 cost_ceiling_exceeded — carries projectedNanoUsd / ceilingNanoUsd",
+    "ConiferBadRequestError": "400 invalid_request",
+    "ConiferModelNotFoundError": "404 model_not_found — indistinguishable from 'not visible to you', by design",
+    "ConiferConflictError": "409 request_in_progress",
+    "ConiferByokKeyError": "422 byok_key_rejected",
+    "ConiferRateLimitError": "429 rate_limited — carries retryAfterSeconds when the gateway sent one",
+    "ConiferUpstreamError": "422/502 upstream_error or wire_upstream_mismatch",
+    "ConiferUnavailableError": "503 service_available=false",
+    "ConiferTimeoutError": "client-side abort — no gateway verdict, so no billing claim is made either way"
+  },
+  "consumers": [
+    "sdk/mcp (the MCP server)",
+    "sdk/python (the parity implementation, same cards)",
+    "Conifer-Website/components/docs/content/sdk*.tsx (the docs)"
+  ]
+}

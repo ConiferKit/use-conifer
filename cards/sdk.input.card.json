@@ -1,0 +1,68 @@
+{
+  "card": "sdk.input",
+  "version": 1,
+  "purpose": "Everything the Conifer SDK reads. If the SDK consumes it, it is named here. The logic in src/ reads this card's fields and nothing else.",
+  "client_config": {
+    "apiKey": {
+      "type": "string",
+      "required": true,
+      "env": "CONIFER_API_KEY",
+      "note": "The entitlement credential. Sent as `Authorization: Bearer` on the OpenAI door and `x-api-key` on the Anthropic door. Never logged, never placed in a URL."
+    },
+    "baseUrl": {
+      "type": "string",
+      "default": "https://api.conifer.build",
+      "env": "CONIFER_BASE_URL",
+      "note": "Gateway origin WITHOUT the /v1 suffix. The OpenAI door is `${baseUrl}/v1`; the Anthropic Messages door is `${baseUrl}/v1/messages`."
+    },
+    "fetch": {
+      "type": "function",
+      "default": "globalThis.fetch",
+      "note": "Injected so tests and edge runtimes supply their own transport. The SDK opens no socket of its own."
+    },
+    "timeoutMs": {
+      "type": "number",
+      "default": 300000,
+      "note": "Client-side abort. Chosen to match the gateway's own 300s edge silent-cut (contracts/gateway-contract.json timeouts_secs.edge_silent_cut) so the client never gives up on a turn the gateway is still serving."
+    },
+    "maxRetries": {
+      "type": "number",
+      "default": 2,
+      "note": "Retries apply ONLY to transport faults and to 429/502/503/504. A 4xx the gateway authored (400/401/402/404/409/422) is never retried: the same bytes are refused again. Every retry of a POST carries the SAME idempotency key, so a retried turn cannot double-bill."
+    },
+    "defaultHeaders": {
+      "type": "record<string,string>",
+      "default": {},
+      "note": "Merged under the SDK's own headers. Cannot overwrite the credential."
+    }
+  },
+  "request_options": {
+    "note": "Per-call knobs. Each maps to a REAL gateway input; nothing here is invented client-side except `fallbackModels`, which is explicitly a client-side chain (see portability.card.json).",
+    "model": { "wire": "body.model", "note": "Accepts `vendor/model` spellings; the gateway resolves the last segment when the full id is absent." },
+    "messages": { "wire": "body.messages" },
+    "maxTokens": { "wire": "body.max_tokens" },
+    "temperature": { "wire": "body.temperature" },
+    "topP": { "wire": "body.top_p" },
+    "stop": { "wire": "body.stop" },
+    "tools": { "wire": "body.tools" },
+    "toolChoice": { "wire": "body.tool_choice" },
+    "stream": { "wire": "body.stream", "note": "SSE. `stream_options.include_usage` is set for you when `stream: true`, so the final usage chunk always arrives." },
+    "maxCostNanoUsd": { "wire": "header x-conifer-max-cost-nanousd", "note": "HARD ceiling on the caller-total worst case. Over-ceiling requests are REFUSED (402/`cost_ceiling_exceeded`) before any upstream call." },
+    "deadlineSeconds": { "wire": "body.completion_window_seconds + header x-conifer-deadline", "note": "ADVISORY. Only widens how a turn may be served (flex tier). Never changes auth, model, or price." },
+    "defer": { "wire": "body.defer = \"allow\"", "note": "Opts a wide-window turn into the 202 deferred-job protocol. An explicit marker that cannot be honored is a 400, never a silent sync serve." },
+    "venue": { "wire": "header x-conifer-venue", "note": "HARD constraint. This gateway is the cloud venue; `local` is refused, never silently satisfied." },
+    "idempotencyKey": { "wire": "header idempotency-key", "note": "Bound to the request body by the gateway. Reusing a key with a different body is refused, not served the prior result." },
+    "promptCache": { "wire": "header x-conifer-cache", "note": "Only `\"off\"` is meaningful: it opts this one request out of prompt-cache annotation, so no +25% cache-write class is charged. The header can never turn caching ON." },
+    "requestId": { "wire": "header x-request-id" },
+    "client": { "wire": "header x-conifer-client", "note": "Your app's name, for your own usage attribution." },
+    "fallbackModels": {
+      "wire": "NONE — client-side",
+      "note": "OpenRouter's `models: []` has no gateway equivalent: the gateway admits exactly the model named. The SDK therefore walks the chain ITSELF, one full request per member, and reports which member served in the result's `fallbackIndex`. Honest, not free: each attempt is its own billed turn only if it reached upstream, and only retryable failures advance the chain."
+    }
+  },
+  "environment": {
+    "CONIFER_API_KEY": "the credential",
+    "CONIFER_BASE_URL": "override the gateway origin (staging, a local gateway)",
+    "OPENAI_BASE_URL": "read ONLY as a fallback when CONIFER_BASE_URL is unset and it already points at a Conifer host, so a drop-in env survives"
+  }
+}

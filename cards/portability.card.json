@@ -1,0 +1,106 @@
+{
+  "card": "sdk.portability",
+  "version": 1,
+  "purpose": "The migration contract. For each competing gateway SDK, exactly which inputs Conifer HONORS, which it TRANSLATES, and which it REFUSES to pretend about. A field this card marks `unsupported` is one the shim throws on rather than dropping silently — dropping a routing or spend constraint is the failure mode that makes a migration look successful and bill wrong.",
+  "law": [
+    "Never silently drop a constraint. A ceiling, a venue, or a provider restriction that cannot be honored is an error at the call site, not an absence at the gateway.",
+    "Never invent a server feature client-side and present it as one. Client-side chains report themselves as client-side (`fallbackIndex`, `x-conifer-client`).",
+    "Model ids migrate untouched. `vendor/model` resolves through the gateway's own last-segment rule; the SDK does no rewriting of its own."
+  ],
+
+  "openrouter": {
+    "base_url_they_use": "https://openrouter.ai/api/v1",
+    "conifer_equivalent": "https://api.conifer.build/v1",
+    "honored": {
+      "model": "identical, `vendor/model` included",
+      "messages": "identical",
+      "max_tokens": "identical",
+      "temperature": "identical",
+      "top_p": "identical",
+      "stop": "identical",
+      "stream": "identical, SSE",
+      "tools": "identical OpenAI shape",
+      "tool_choice": "identical",
+      "response_format": "forwarded verbatim to the upstream; honored where the upstream honors it",
+      "usage.prompt_tokens_details.cached_tokens": "identical field name"
+    },
+    "translated": {
+      "models": "OpenRouter's fallback array. The gateway admits exactly one model per request, so the SDK walks the array as a CLIENT-SIDE chain and reports `fallbackIndex`. Opt in with `allowClientFallback: true`; without it the shim throws rather than quietly serving only the first.",
+      "usage.cost": "OpenRouter returns credits on the body. Conifer discloses nanodollars on `x-conifer-cost-nanousd`, which is exact integer money. The shim exposes both `costNanoUsd` and a `usage.cost`-shaped USD number computed from it.",
+      "transforms: [\"middle-out\"]": "no server-side prompt compression exists here. The shim throws; it will not ship a silently-different prompt.",
+      "HTTP-Referer / X-Title": "mapped to `x-conifer-client` (usage attribution). Conifer has no public app-ranking board, so this is attribution only."
+    },
+    "unsupported_refused": {
+      "provider": "OpenRouter's ProviderPreferences (order/allow_fallbacks/ignore/data_collection/quantizations). Conifer picks the host for the admitted model by price/health inside the gateway; a client cannot pin it. Sending this throws.",
+      "route": "`route: \"fallback\"` is server-side failover. Conifer admits exactly the model you name, so there is no host-level retry to enable. Use `models` + `allowClientFallback`.",
+      "plugins": "`web`, `file-parser`, `response-healing`, `context-compression` have no Conifer equivalent. Throws.",
+      "prompt": "the legacy text-completions field. Conifer serves the chat wire. Throws.",
+      "top_k / min_p / top_a / repetition_penalty / logit_bias": "not modelled on the gateway's request card; forwarded ONLY when `passthroughUnknown: true` is set, and then explicitly at the caller's risk."
+    },
+    "generation_stats_endpoint": "OpenRouter's GET /api/v1/generation has no equivalent: Conifer settles the cost onto the SAME response's receipt headers, so the stats are already in hand when the call returns. The shim reads them there rather than making a second call."
+  },
+
+  "vercel_ai_gateway": {
+    "base_url_they_use": "https://ai-gateway.vercel.sh/v1",
+    "conifer_equivalent": "https://api.conifer.build/v1",
+    "auth": "Vercel accepts an API key OR an OIDC token on the same Bearer header. Conifer accepts an entitlement token or an API key on that same header, so an `AI_GATEWAY_API_KEY`-shaped integration only changes the value and the URL.",
+    "honored": {
+      "POST /chat/completions": "identical",
+      "GET /models": "identical shape; Conifer adds caps/pricing/endpoint_kind fields that a Vercel-shaped reader ignores",
+      "GET /models/{model}": "identical",
+      "streaming / tool calling / structured outputs": "identical, as the OpenAI spec",
+      "reasoning": "the gateway forwards a `reasoning` block and relays vendor reasoning fields on the message; not every model emits one"
+    },
+    "translated": {
+      "@ai-sdk/openai-compatible": "the supported AI SDK path. `createOpenAICompatible({ baseURL: 'https://api.conifer.build/v1', apiKey })` works unchanged; the SDK ships `coniferAiSdk()` as that call with the base URL and headers pre-wired.",
+      "@ai-sdk/gateway (the first-party `gateway()` provider)": "Vercel-specific transport. Use the openai-compatible provider above instead.",
+      "providerOptions.gateway.order": "provider pinning — same refusal as OpenRouter's `provider`. Throws.",
+      "providerOptions.gateway.models": "model fallbacks — same treatment as OpenRouter's `models`: client-side chain, opt-in."
+    },
+    "unsupported_refused": {
+      "POST /embeddings": "the gateway serves no embeddings door today. Throws with that sentence, rather than 404-ing from inside the OpenAI client.",
+      "image generation": "no image-output door. Throws.",
+      "OIDC auto-auth": "there is no Conifer OIDC exchange; supply CONIFER_API_KEY."
+    }
+  },
+
+  "helicone": {
+    "base_url_they_use": "https://gateway.helicone.ai/v1",
+    "conifer_equivalent": "https://api.conifer.build/v1",
+    "shape": "Helicone is a header-driven proxy in front of YOUR provider key. Conifer is the biller and router itself, so the mapping is mostly header-to-header, with the proxy-target headers dropped by definition.",
+    "honored": {
+      "Helicone-Request-Id": "-> `x-request-id` (and the gateway echoes `x-conifer-request-id`)",
+      "Helicone-User-Id": "-> `x-conifer-client` attribution",
+      "Helicone-Property-*": "-> merged into the `x-conifer-client` attribution string; Conifer stores no arbitrary custom-property index, so the shim keeps them client-side for your own logs rather than claiming server storage",
+      "Helicone-Cache-Enabled: false": "-> `x-conifer-cache: off`, the gateway's real per-request prompt-cache OPT-OUT. Note the asymmetry, which the shim preserves: the header can only turn caching OFF. `Helicone-Cache-Enabled: true` therefore throws — house policy already decides when to cache, and a client cannot force a cache-write class it did not pay for."
+    },
+    "translated": {
+      "Helicone-Auth": "-> `Authorization: Bearer $CONIFER_API_KEY`. There is no second credential: Conifer is not proxying your provider key. If you WANT your own provider key used, that is BYOK custody (PUT /v1/keys/{provider}), which the SDK exposes as `keys.put()`.",
+      "Helicone-Target-URL / Helicone-OpenAI-Api-Base": "dropped by definition — Conifer is the destination, not a pass-through proxy. Sending one throws so a migrated app cannot believe it is still proxying elsewhere.",
+      "Helicone-Fallbacks": "-> client-side `fallbackModels`, same opt-in rule as OpenRouter's `models`.",
+      "Helicone-RateLimit-Policy": "no per-request client-set policy. Conifer's spend control is the HARD `x-conifer-max-cost-nanousd` ceiling, which is strictly stronger (money, not request count). The shim maps a `u=cents` policy onto that ceiling and throws on `u=requests`.",
+      "Helicone-Retry-Enabled + helicone-retry-*": "-> the SDK's own `maxRetries`, which retries ONLY transport faults and 429/502/503/504, always under one idempotency key."
+    },
+    "unsupported_refused": {
+      "Helicone-Prompt-Id / prompt versioning": "no server-side prompt registry. Throws.",
+      "Helicone-Moderations-Enabled / Helicone-LLM-Security-Enabled": "no moderation or injection-scanning layer. Throws — a security feature that silently does nothing is worse than an error.",
+      "Helicone-Token-Limit-Exception-Handler": "no server-side truncation or middle-out. The gateway refuses an over-window request with a typed 400 naming the window instead. Throws.",
+      "Helicone-Session-Id / Session-Path / Session-Name": "no session tree in Conifer's observability. Throws.",
+      "Helicone-Posthog-*": "no third-party fan-out."
+    }
+  },
+
+  "receipt_superset": {
+    "note": "What Conifer gives that none of the three do on the response of the SAME call: exact integer nanodollar cost, itemized across the four billed token classes, plus the requested-vs-effective model spelling and the serving endpoint. `costComponentsNanoUsd` always sums to `costNanoUsd`; when that identity cannot be guaranteed the header is omitted rather than approximated.",
+    "headers": [
+      "x-conifer-requested-model",
+      "x-conifer-effective-model",
+      "x-conifer-receipt-reason",
+      "x-conifer-endpoint",
+      "x-conifer-cost-nanousd",
+      "x-conifer-cost-components-nanousd",
+      "x-conifer-service-tier",
+      "x-conifer-request-id"
+    ]
+  }
+}
