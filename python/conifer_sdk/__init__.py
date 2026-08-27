@@ -43,6 +43,7 @@ from .errors import (
 )
 from .receipt import CostComponents, Receipt, nano_usd_to_usd_string, read_receipt
 from .portability import (
+    attribution_from_openrouter,
     ceiling_from_policy,
     conifer_openai_compatible_config,
     from_helicone_headers,
@@ -118,6 +119,7 @@ __all__ = [
     "CatalogModel",
     "Balance",
     "from_openrouter",
+    "attribution_from_openrouter",
     "from_helicone_headers",
     "from_vercel_provider_options",
     "conifer_openai_compatible_config",

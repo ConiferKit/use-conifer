@@ -36,7 +36,12 @@
       "prompt": "the legacy text-completions field. Conifer serves the chat wire. Throws.",
       "top_k / min_p / top_a / repetition_penalty / logit_bias": "not modelled on the gateway's request card; forwarded ONLY when `passthroughUnknown: true` is set, and then explicitly at the caller's risk."
     },
-    "generation_stats_endpoint": "OpenRouter's GET /api/v1/generation has no equivalent: Conifer settles the cost onto the SAME response's receipt headers, so the stats are already in hand when the call returns. The shim reads them there rather than making a second call."
+    "generation_stats_endpoint": "OpenRouter's GET /api/v1/generation has no equivalent: Conifer settles the cost onto the SAME response's receipt headers, so the stats are already in hand when the call returns. The shim reads them there rather than making a second call.",
+    "unmodelled_opt_in": "Knobs Conifer's request card does not model: top_k, min_p, top_a, repetition_penalty, logit_bias, seed, frequency_penalty, presence_penalty, top_logprobs, prediction, debug. NOT refusals — the gateway forwards unknown body fields (verified live 2026-08-27), but whether the UPSTREAM honors one varies by model, so the SDK throws by default and forwards under passthroughUnknown. THE INVARIANT: a field that is neither refused nor listed here is SILENTLY DROPPED, which breaks law #1. Five were being dropped exactly that way until the list was checked against OpenRouter's published schema instead of this card. Both suites now drive an anti-drift gate from the VENDOR's field list.",
+    "unsupported_refused_headers": {
+      "note": "Refused by `attributionFromOpenRouter`, not by the body converter. Kept separate because the card-driven test drives each through its own entry point.",
+      "X-OpenRouter-Categories": "assigns categories in OpenRouter's public model marketplace. Conifer has no marketplace or leaderboard, so there is nothing for it to become; a lenient reading would return it as the app NAME and mislabel every turn's attribution. Throws."
+    }
   },
   "vercel_ai_gateway": {
     "base_url_they_use": "https://ai-gateway.vercel.sh/v1",

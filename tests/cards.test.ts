@@ -16,6 +16,7 @@ import {
   embeddingsHeaders,
   fromHeliconeHeaders,
   fromOpenRouter,
+  attributionFromOpenRouter,
   readReceipt,
 } from "../src/index.ts";
 
@@ -155,6 +156,21 @@ test("the card's base64 claim matches what the client actually requests", () => 
     embeddingsBody({ model: "m", input: "hi", encodingFormat: "float" }).encoding_format,
     "float",
   );
+});
+
+test("every HEADER the card calls unsupported refuses through its own door", () => {
+  // Headers are refused by `attributionFromOpenRouter`, not by the body
+  // converter, so they live in their own card section and are driven through
+  // their own entry point. Mixing them made the body-driven test fail on a
+  // header it could never have refused — a small mistake the gate caught.
+  for (const name of Object.keys(portability.openrouter.unsupported_refused_headers)) {
+    if (name === "note") continue;
+    assert.throws(
+      () => attributionFromOpenRouter({ [name]: "x" }),
+      ConiferPortabilityError,
+      `openrouter header ${name} is documented as refused but does not refuse`,
+    );
+  }
 });
 
 test("every field the portability card calls unsupported actually refuses", () => {

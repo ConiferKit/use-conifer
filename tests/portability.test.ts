@@ -271,3 +271,91 @@ test("every unserved door the card names actually refuses, and the served ones d
     );
   }
 });
+
+/**
+ * THE ANTI-DRIFT GATE for OpenRouter's request schema.
+ *
+ * Every other test in this file checks the shim against OUR card, which cannot
+ * catch the failure that actually happened: the vendor's API grew fields our
+ * card never heard of, and `fromOpenRouter` — which converts a known list and
+ * returns — dropped each one without a word. That is a direct violation of the
+ * portability card's first law ("never silently drop a constraint"), and it was
+ * invisible to a suite that only ever asked our own documents.
+ *
+ * Six fields were being dropped this way (checked against OpenRouter's
+ * published request schema on 2026-08-27): `frequency_penalty`,
+ * `presence_penalty`, `top_logprobs`, `prediction`, `debug`, and `user`.
+ *
+ * So this list is the VENDOR's, transcribed from their docs, and every member
+ * must end up in exactly one of three states. A seventh field appearing in
+ * their schema fails here until someone decides which state it belongs in.
+ */
+const OPENROUTER_REQUEST_FIELDS = [
+  // Converted to a real Conifer input.
+  "messages", "model", "response_format", "stop", "stream", "max_tokens",
+  "temperature", "tools", "tool_choice", "top_p", "models", "user",
+  // Refused: a server feature Conifer does not have.
+  "prompt", "plugins", "route", "provider",
+  // Unmodelled: forwarded only under an explicit opt-in.
+  "seed", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty",
+  "logit_bias", "top_logprobs", "min_p", "top_a", "prediction", "debug",
+] as const;
+
+test("no OpenRouter request field is silently dropped", () => {
+  // Fields that are structural to the call and cannot be probed one at a time.
+  const structural = new Set(["messages", "model", "stream"]);
+  const sampleFor = (field: string): unknown =>
+    field === "models" ? ["b"] : field === "logit_bias" ? { 1: 1 } : "x";
+
+  for (const field of OPENROUTER_REQUEST_FIELDS) {
+    if (structural.has(field)) continue;
+    const request: Record<string, unknown> = {
+      model: "m",
+      messages: [],
+      [field]: sampleFor(field),
+    };
+
+    let converted: Record<string, unknown> | undefined;
+    try {
+      // `models` needs its opt-in; `passthroughUnknown` reveals where an
+      // unmodelled knob would land. Neither changes whether it is DROPPED.
+      converted = fromOpenRouter(request, {
+        allowClientFallback: true,
+        passthroughUnknown: true,
+      }) as unknown as Record<string, unknown>;
+    } catch (error) {
+      // Refused loudly. That is one of the three acceptable outcomes.
+      assert.ok(
+        error instanceof ConiferPortabilityError,
+        `${field} threw something that is not a portability error`,
+      );
+      continue;
+    }
+
+    // Otherwise it must be VISIBLE somewhere in the result — as a mapped
+    // field, or in extraBody. Anywhere is fine; nowhere is the bug.
+    const serialized = JSON.stringify(converted);
+    const survived =
+      serialized.includes(JSON.stringify(sampleFor(field))) ||
+      (converted.extraBody as Record<string, unknown> | undefined)?.[field] !== undefined;
+    assert.ok(
+      survived,
+      `OpenRouter's \`${field}\` was accepted and then SILENTLY DROPPED. Refuse it, or add it to UNMODELLED — the one thing the card forbids is losing it quietly.`,
+    );
+  }
+});
+
+test("a marketplace-only attribution header refuses instead of vanishing", () => {
+  // `X-OpenRouter-Categories` assigns categories in OpenRouter's public model
+  // marketplace. Conifer has no marketplace, so there is nothing for it to
+  // become — and a lenient reading would return it as the app NAME, which
+  // would mislabel every turn's attribution.
+  refuses("X-OpenRouter-Categories", () =>
+    attributionFromOpenRouter({ "X-OpenRouter-Categories": "roleplay" }),
+  );
+
+  // The title headers DO have an equivalent, under either spelling.
+  assert.equal(attributionFromOpenRouter({ "X-OpenRouter-Title": "my-app" }), "my-app");
+  assert.equal(attributionFromOpenRouter({ "X-Title": "my-app" }), "my-app");
+  assert.equal(attributionFromOpenRouter({ "HTTP-Referer": "https://example.com" }), "https://example.com");
+});

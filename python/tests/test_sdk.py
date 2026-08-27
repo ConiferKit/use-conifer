@@ -41,6 +41,7 @@ from conifer_sdk import (  # noqa: E402
     conifer_openai_compatible_config,
     from_helicone_headers,
     from_openrouter,
+    attribution_from_openrouter,
     from_vercel_provider_options,
     nano_usd_to_usd_string,
     parse_fallbacks,
@@ -570,6 +571,16 @@ class ParityTests(unittest.TestCase):
                 continue
             with self.assertRaises(ConiferPortabilityError, msg=f"openrouter.{field}"):
                 from_openrouter({"model": "m", "messages": [], field: "x"})
+
+    def test_every_documented_openrouter_header_refusal_is_enforced(self):
+        # Headers are refused by attribution_from_openrouter, not by the body
+        # converter, so they live in their own card section and are driven
+        # through their own entry point.
+        for name in self.portability["openrouter"]["unsupported_refused_headers"]:
+            if name == "note":
+                continue
+            with self.assertRaises(ConiferPortabilityError, msg=f"openrouter header {name}"):
+                attribution_from_openrouter({name: "x"})
 
     def test_every_documented_helicone_refusal_is_enforced_here_too(self):
         for field in self.portability["helicone"]["unsupported_refused"]:
@@ -1412,6 +1423,79 @@ class EmptyCompletions(unittest.TestCase):
 
         # The shape a deferred 202 used to be coerced into. Point at the fix.
         self.assertIn("defer()", self._completion([]).empty_reason)
+
+
+#: OpenRouter's OWN request-field list, transcribed from their published schema
+#: on 2026-08-27. Not ours — that is the entire point: every other portability
+#: test checks the shim against OUR card, which cannot catch the failure that
+#: actually happened (the vendor's API grew fields our card never heard of, and
+#: the converter dropped each one without a word).
+OPENROUTER_REQUEST_FIELDS = (
+    # Converted to a real Conifer input.
+    "messages", "model", "response_format", "stop", "stream", "max_tokens",
+    "temperature", "tools", "tool_choice", "top_p", "models", "user",
+    # Refused: a server feature Conifer does not have.
+    "prompt", "plugins", "route", "provider",
+    # Unmodelled: forwarded only under an explicit opt-in.
+    "seed", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty",
+    "logit_bias", "top_logprobs", "min_p", "top_a", "prediction", "debug",
+)
+
+
+class OpenRouterDrift(unittest.TestCase):
+    """The anti-drift gate. Twin of the same test in portability.test.ts.
+
+    Five fields were being silently dropped until this list was checked against
+    the vendor's schema: frequency_penalty, presence_penalty, top_logprobs,
+    prediction and debug. Silent dropping violates the first law on the
+    portability card, and a suite that only asks our own documents cannot see it.
+    """
+
+    def test_no_openrouter_request_field_is_silently_dropped(self):
+        structural = {"messages", "model", "stream"}
+        def sample(field):
+            if field == "models":
+                return ["b"]
+            if field == "logit_bias":
+                return {1: 1}
+            return "x"
+
+        for field in OPENROUTER_REQUEST_FIELDS:
+            if field in structural:
+                continue
+            request = {"model": "m", "messages": [], field: sample(field)}
+            try:
+                converted = from_openrouter(
+                    request, allow_client_fallback=True, passthrough_unknown=True
+                )
+            except ConiferPortabilityError:
+                continue  # refused loudly: one of the three acceptable outcomes
+            # Otherwise it must be VISIBLE somewhere in the result.
+            survived = (
+                sample(field) in converted.__dict__.values()
+                or field in (converted.extra_body or {})
+                or converted.client == sample(field)
+                or converted.fallback_models == sample(field)
+            )
+            self.assertTrue(
+                survived,
+                f"OpenRouter's `{field}` was accepted and then SILENTLY DROPPED. Refuse it, "
+                "or add it to _UNMODELLED — the one thing the card forbids is losing it "
+                "quietly.",
+            )
+
+    def test_a_marketplace_only_header_refuses_instead_of_vanishing(self):
+        # Conifer has no marketplace, so there is nothing for it to become —
+        # and a lenient reading would return it as the app NAME, mislabelling
+        # every turn's attribution.
+        with self.assertRaises(ConiferPortabilityError):
+            attribution_from_openrouter({"X-OpenRouter-Categories": "roleplay"})
+        # The title headers DO have an equivalent, under either spelling.
+        self.assertEqual(attribution_from_openrouter({"X-OpenRouter-Title": "a"}), "a")
+        self.assertEqual(attribution_from_openrouter({"X-Title": "a"}), "a")
+        self.assertEqual(
+            attribution_from_openrouter({"HTTP-Referer": "https://x.com"}), "https://x.com"
+        )
 
 
 if __name__ == "__main__":

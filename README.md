@@ -444,10 +444,10 @@ Verified from a real `npm i`: an ES2022 consumer typechecks clean under
 
 ```bash
 npm run build     # emit dist/ (ESM + .d.ts)
-npm test          # 135 tests, offline
+npm test          # 138 tests, offline
 npm run typecheck
 
-cd python && python3 -m pytest -q   # 89 tests, offline
+cd python && python3 -m pytest -q   # 92 tests, offline
 ```
 
 Most assertions run with an injected transport: no network, no mock framework,

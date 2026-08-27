@@ -43,7 +43,35 @@ _OPENROUTER_REFUSALS: Dict[str, str] = {
     ),
 }
 
-_UNMODELLED = ("top_k", "min_p", "top_a", "repetition_penalty", "logit_bias", "seed")
+#: OpenRouter fields Conifer's request card does not model.
+#:
+#: NOT refusals: the gateway forwards unknown body fields rather than rejecting
+#: them (verified live 2026-08-27 — seed, frequency_penalty, presence_penalty,
+#: top_logprobs, user, prediction and even an invented field all return 200).
+#: Whether the UPSTREAM honors any of them is the provider's business and
+#: varies by model, which is why the SDK will not quietly pass them along as
+#: though they were guaranteed. They throw by default and forward under
+#: ``passthrough_unknown=True``, so the caller opts in with eyes open.
+#:
+#: KEEPING THIS LIST HONEST IS THE JOB. A field neither refused nor listed here
+#: is SILENTLY DROPPED, violating the first law on the portability card. Five
+#: were being dropped exactly that way until this was checked against
+#: OpenRouter's current published schema rather than against our own card.
+_UNMODELLED = (
+    "top_k",
+    "min_p",
+    "top_a",
+    "repetition_penalty",
+    "logit_bias",
+    "seed",
+    # Added 2026-08-27 from OpenRouter's current schema. Each was previously
+    # accepted and then dropped without a word.
+    "frequency_penalty",
+    "presence_penalty",
+    "top_logprobs",
+    "prediction",
+    "debug",
+)
 
 
 def from_openrouter(
@@ -98,6 +126,31 @@ def from_openrouter(
         allow_client_fallback=allow_client_fallback,
         extra_body=extra_body,
     )
+
+
+
+def attribution_from_openrouter(headers: Mapping[str, str]) -> Optional[str]:
+    """OpenRouter's app-attribution headers -> the Conifer caller tag.
+
+    ``HTTP-Referer`` and ``X-Title`` exist to rank your app on OpenRouter's
+    public board. Conifer has no such board, so they become usage attribution
+    only. Twin of ``attributionFromOpenRouter`` in the TypeScript SDK, which
+    Python was missing entirely.
+    """
+    lower = {key.lower(): value for key, value in headers.items()}
+    # `X-OpenRouter-Categories` assigns MARKETPLACE categories on openrouter.ai.
+    # Conifer runs no marketplace and no public leaderboard, so there is nothing
+    # for it to become. Refusing beats returning it as an app name — which is
+    # what a lenient reading would do, mislabelling every turn's attribution.
+    if "x-openrouter-categories" in lower:
+        raise ConiferPortabilityError(
+            "X-OpenRouter-Categories",
+            "this header assigns categories in OpenRouter's public model marketplace. "
+            "Conifer has no marketplace or leaderboard to list your app on, so there is no "
+            "equivalent. Drop it; x-conifer-client carries the app NAME for your own usage "
+            "attribution.",
+        )
+    return lower.get("x-openrouter-title") or lower.get("x-title") or lower.get("http-referer")
 
 
 # -------------------------------------------------------------------- Helicone
