@@ -72,6 +72,13 @@
     "now_served": {
       "note": "Surfaces that USED to be refused here and are now served. A shim that refuses a door the gateway actually serves is as wrong as one that admits a door it does not, so this list is part of the contract.",
       "POST /embeddings": "SHIPPED 2026-08-26. Served by the SDK directly: `conifer.embeddings.create()` (TS) / `client.embed()` (Python). The shim must NOT refuse it."
+    },
+    "gateway_controls": {
+      "note": "Every providerOptions.gateway key is CONVERTED or REFUSED. Never dropped — an earlier version refused only `order`/`only`, converted `models`, and let the rest fall out unremarked.",
+      "converted": "models → fallbackModels (needs the allowClientFallback opt-in; it is a client-side chain of separately billed turns).",
+      "refused": "order, only, ignore, sort, allowFallbacks, requireParameters/require_parameters, quantizations, maxPrice, dataCollection, zdr — plus ANY unrecognized key, because we cannot judge whether a control we have never heard of mattered.",
+      "privacy": "dataCollection and zdr are the most consequential drops possible: the request still succeeds, nothing errors, and a promise the caller made to THEIR OWN users has quietly lapsed. Both refuse with a pointer to https://conifer.build/privacy.",
+      "passthrough": "Per-provider blocks other than `gateway` are returned for deliberate placement in extraBody, never auto-merged."
     }
   },
   "helicone": {

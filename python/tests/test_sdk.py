@@ -1498,5 +1498,58 @@ class OpenRouterDrift(unittest.TestCase):
         )
 
 
+class VercelGatewayControls(unittest.TestCase):
+    """The Vercel shim had the same silent-drop flaw as OpenRouter's.
+
+    It refused ``order`` and ``only``, converted ``models``, and let every other
+    ``providerOptions.gateway`` key fall out of the dict unremarked. For routing
+    keys that is a quality regression nobody can trace. For ``zdr`` and
+    ``dataCollection`` it is worse than a bug: those are PRIVACY constraints,
+    the request still succeeds, nothing errors, and a promise the caller made to
+    their own users has quietly stopped being kept.
+    """
+
+    CONTROLS = (
+        "order", "only", "ignore", "sort", "allowFallbacks", "requireParameters",
+        "require_parameters", "quantizations", "maxPrice", "dataCollection", "zdr",
+    )
+
+    def test_every_gateway_control_is_converted_or_refused(self):
+        for key in self.CONTROLS:
+            with self.assertRaises(ConiferPortabilityError, msg=key):
+                from_vercel_provider_options({"gateway": {key: "x"}}, allow_client_fallback=True)
+
+    def test_an_unknown_gateway_control_refuses_rather_than_vanishing(self):
+        # The case that matters most for a shim that must survive the vendor
+        # shipping something new: we cannot judge whether an unrecognized
+        # control mattered, so we must not decide it did not on the caller's
+        # behalf.
+        with self.assertRaises(ConiferPortabilityError) as caught:
+            from_vercel_provider_options({"gateway": {"someFutureControl": True}})
+        self.assertIn("does not recognize", caught.exception.message)
+        self.assertIn("someFutureControl", caught.exception.field)
+
+    def test_the_privacy_controls_name_themselves_as_promises(self):
+        # Wording matters more here than anywhere else in the shim: a reader
+        # who skims must understand this is something they may have told THEIR
+        # users.
+        for key in ("zdr", "dataCollection"):
+            with self.assertRaises(ConiferPortabilityError) as caught:
+                from_vercel_provider_options({"gateway": {key: True}})
+            self.assertIn("MUST NOT be dropped", caught.exception.message)
+            self.assertIn("conifer.build/privacy", caught.exception.message)
+
+    def test_what_the_shim_should_convert_still_converts(self):
+        # A fail-closed rule is only correct if it does not break the paths that
+        # were working.
+        fields, passthrough = from_vercel_provider_options(
+            {"gateway": {"models": ["b"]}, "anthropic": {"thinking": True}},
+            allow_client_fallback=True,
+        )
+        self.assertEqual(fields["fallback_models"], ["b"])
+        self.assertTrue(fields["allow_client_fallback"])
+        self.assertEqual(passthrough, {"anthropic": {"thinking": True}})
+
+
 if __name__ == "__main__":
     unittest.main()

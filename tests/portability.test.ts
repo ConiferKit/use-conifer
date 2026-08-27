@@ -359,3 +359,72 @@ test("a marketplace-only attribution header refuses instead of vanishing", () =>
   assert.equal(attributionFromOpenRouter({ "X-Title": "my-app" }), "my-app");
   assert.equal(attributionFromOpenRouter({ "HTTP-Referer": "https://example.com" }), "https://example.com");
 });
+
+/**
+ * The Vercel gateway shim had the same silent-drop flaw as OpenRouter's.
+ *
+ * It refused `order` and `only`, converted `models`, and let every other
+ * `providerOptions.gateway` key fall out of the object unremarked. For routing
+ * keys that is a quality regression nobody can trace. For `zdr` and
+ * `dataCollection` it is worse than a bug: those are PRIVACY constraints, the
+ * request still succeeds, nothing errors, and a promise the caller made to
+ * their own users has quietly stopped being kept.
+ */
+test("every Vercel gateway control is converted or refused, never dropped", () => {
+  const controls = [
+    "order", "only", "ignore", "sort", "allowFallbacks", "requireParameters",
+    "require_parameters", "quantizations", "maxPrice", "dataCollection", "zdr",
+  ];
+  for (const key of controls) {
+    refuses(`providerOptions.gateway.${key}`, () =>
+      fromVercelProviderOptions({ gateway: { [key]: "x" } }, { allowClientFallback: true }),
+    );
+  }
+});
+
+test("an UNKNOWN Vercel gateway control refuses rather than vanishing", () => {
+  // The case that matters most for a shim that has to survive the vendor
+  // shipping something new: we cannot judge whether an unrecognized control
+  // mattered, so we must not decide on the caller's behalf that it did not.
+  const error = (() => {
+    try {
+      fromVercelProviderOptions({ gateway: { someFutureControl: true } });
+      return undefined;
+    } catch (thrown) {
+      return thrown as ConiferPortabilityError;
+    }
+  })();
+  assert.ok(error instanceof ConiferPortabilityError, "an unknown control must refuse");
+  assert.match(error.message, /does not recognize/);
+  assert.match(error.field, /someFutureControl/);
+});
+
+test("the privacy controls name themselves as promises, not preferences", () => {
+  // Wording matters here more than anywhere else in the shim: a reader who
+  // skims must understand this is something they may have told THEIR users.
+  for (const key of ["zdr", "dataCollection"]) {
+    const error = (() => {
+      try {
+        fromVercelProviderOptions({ gateway: { [key]: true } });
+        return undefined;
+      } catch (thrown) {
+        return thrown as ConiferPortabilityError;
+      }
+    })();
+    assert.match(error?.message ?? "", /MUST NOT be dropped/);
+    assert.match(error?.message ?? "", /conifer\.build\/privacy/);
+  }
+});
+
+test("what the Vercel shim SHOULD convert still converts", () => {
+  // A fail-closed rule is only correct if it does not also break the paths
+  // that were working: `models` becomes an opt-in client-side chain, and other
+  // providers' blocks pass through for deliberate placement in extraBody.
+  const { request, passthrough } = fromVercelProviderOptions(
+    { gateway: { models: ["b"] }, anthropic: { thinking: { type: "enabled" } } },
+    { allowClientFallback: true },
+  );
+  assert.deepEqual(request.fallbackModels, ["b"]);
+  assert.equal(request.allowClientFallback, true);
+  assert.deepEqual(passthrough, { anthropic: { thinking: { type: "enabled" } } });
+});

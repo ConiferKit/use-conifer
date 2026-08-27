@@ -363,23 +363,106 @@ def conifer_openai_compatible_config(
     }
 
 
+#: Every ``providerOptions.gateway`` key Vercel documents, and why it refuses.
+#:
+#: THE FAILURE THIS PREVENTS. An earlier version refused only ``order`` and
+#: ``only``, converted ``models``, and let EVERYTHING ELSE fall out of the dict
+#: unremarked — so a caller who had set ``zdr`` or ``dataCollection`` migrated to
+#: Conifer and silently lost the constraint. That is the exact failure the
+#: portability card's first law forbids, and for the privacy keys it is the most
+#: consequential possible instance: the request still runs, nothing errors, and
+#: a promise the caller made to THEIR users is quietly no longer being kept.
+#:
+#: The rule: a gateway key is converted, or it throws. Never dropped.
+_VERCEL_GATEWAY_REFUSALS: Dict[str, str] = {
+    "order": (
+        "provider pinning has no Conifer equivalent: the gateway picks the host for the "
+        "admitted model by price and health, and the model you named is always the model "
+        "you are charged for. Use max_cost_nano_usd if the goal was cost control."
+    ),
+    "only": (
+        "restricting which providers may serve a model has no Conifer equivalent — the "
+        "gateway admits the model, then chooses the host itself. Use max_cost_nano_usd if "
+        "the goal was cost control."
+    ),
+    "ignore": (
+        "excluding specific providers has no Conifer equivalent: host selection is the "
+        "gateway's, and it is not overridable per request."
+    ),
+    "sort": (
+        "Conifer does not expose a provider sort order. The gateway already selects by "
+        "price and health for the model you named; there is no second ranking to override."
+    ),
+    "allowFallbacks": (
+        "server-side provider fallback has no Conifer equivalent — the gateway admits "
+        "exactly the model you name. Use fallback_models with allow_client_fallback=True "
+        "for an explicit CLIENT-side chain of separately billed turns."
+    ),
+    "requireParameters": (
+        "Conifer does not filter hosts by which sampling parameters they implement. Send "
+        "the parameters you need; an upstream that ignores one is the upstream's behavior."
+    ),
+    "require_parameters": (
+        "Conifer does not filter hosts by which sampling parameters they implement. Send "
+        "the parameters you need; an upstream that ignores one is the upstream's behavior."
+    ),
+    "quantizations": (
+        "Conifer does not let a caller select a host by weight quantization. The catalog "
+        "entry you name is the one served."
+    ),
+    "maxPrice": (
+        "a per-token price ceiling has no direct equivalent, and silently approximating "
+        "one would be worse than refusing. Use max_cost_nano_usd, a HARD ceiling on the "
+        "whole turn's worst case, enforced before any upstream call."
+    ),
+    # PRIVACY constraints. Dropping either is the worst case in this file: the
+    # turn still succeeds, so nothing surfaces, while a commitment the caller
+    # made to their own users has quietly lapsed.
+    "dataCollection": (
+        "Conifer has no per-request data-collection toggle, so this cannot be honored and "
+        "MUST NOT be dropped — it is a promise you may have made to your own users. See "
+        "https://conifer.build/privacy for what the gateway retains."
+    ),
+    "zdr": (
+        "zero-data-retention is not a per-request flag on Conifer, so this cannot be "
+        "honored and MUST NOT be dropped — it is a promise you may have made to your own "
+        "users. See https://conifer.build/privacy for what the gateway retains."
+    ),
+}
+
+
 def from_vercel_provider_options(
     provider_options: Mapping[str, Any], allow_client_fallback: bool = False
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """``providerOptions`` -> (Conifer request fields, passthrough options)."""
+    """``providerOptions`` -> (Conifer request fields, passthrough options).
+
+    Keys under ``gateway`` are Vercel-specific routing controls, and every one
+    is either converted or refused. Keys for OTHER providers are returned for
+    you to place in ``extra_body`` deliberately.
+    """
     gateway = provider_options.get("gateway") or {}
-    if gateway.get("order") is not None or gateway.get("only") is not None:
-        raise ConiferPortabilityError(
-            "providerOptions.gateway.order",
-            "provider pinning has no Conifer equivalent: the gateway picks the host for "
-            "the admitted model by price and health, and the model you named is always "
-            "the model you are charged for. Use max_cost_nano_usd if the goal was cost "
-            "control.",
-        )
+    for key, why in _VERCEL_GATEWAY_REFUSALS.items():
+        if gateway.get(key) is not None:
+            raise ConiferPortabilityError(f"providerOptions.gateway.{key}", why)
     fields: Dict[str, Any] = {}
     if gateway.get("models") is not None:
         fields["fallback_models"] = list(gateway["models"])
         fields["allow_client_fallback"] = allow_client_fallback
+    # Anything left is a control we have never heard of. NOT safe to ignore:
+    # an unknown key is exactly the case where we cannot judge whether it
+    # mattered, and the whole point is that a constraint cannot go missing.
+    unknown = [k for k, v in gateway.items() if k != "models" and v is not None]
+    if unknown:
+        joined = "`, `".join(unknown)
+        raise ConiferPortabilityError(
+            f"providerOptions.gateway.{unknown[0]}",
+            f"`{joined}` "
+            f"{'is a Vercel gateway control' if len(unknown) == 1 else 'are Vercel gateway controls'} "
+            "this shim does not recognize. It is refused rather than ignored, because a "
+            "routing or privacy constraint that vanishes in migration is the one failure "
+            "this shim exists to prevent. Remove it, or open an issue if Conifer should "
+            "honor it.",
+        )
     passthrough = {k: v for k, v in provider_options.items() if k != "gateway"}
     return fields, passthrough
 
