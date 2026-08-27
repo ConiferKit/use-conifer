@@ -466,7 +466,7 @@ Verified from a real `npm i`: an ES2022 consumer typechecks clean under
 
 ```bash
 npm run build     # emit dist/ (ESM + .d.ts)
-npm test          # 145 tests, offline
+npm test          # 162 tests, offline
 npm run typecheck
 
 cd python && python3 -m pytest -q   # 105 tests, offline
