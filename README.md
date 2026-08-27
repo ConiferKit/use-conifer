@@ -244,7 +244,7 @@ package as a CONSUMER receives it, because that is where two real defects hid
 
 Stated here so you find out now rather than mid-migration:
 
-- **No embeddings door and no image generation.** `assertSupportedVercelSurface` throws on both rather than letting you discover it as a 404.
+- **No image generation.** `assertSupportedVercelSurface` throws rather than letting you discover it as a 404. (Embeddings WERE listed here; the gateway shipped `/v1/embeddings` on 2026-08-26 and the shim no longer refuses it.)
 - **No provider pinning.** The gateway chooses the host for the model you named, by price and health. The model is never substituted.
 - **No server-side prompt compression, moderation, injection scanning, or prompt registry.**
 - **No mid-stream fallback.** The first token commits the turn, so a chain cannot be attached to a stream.

@@ -242,10 +242,6 @@ def ceiling_from_policy(policy: str) -> int:
 # ---------------------------------------------------------------------- Vercel
 
 _VERCEL_UNSUPPORTED: Dict[str, str] = {
-    "embeddings": (
-        "Conifer serves no /v1/embeddings door. Keep embeddings on your current provider, "
-        "or open the request for one — this is a gateway gap, not a client one."
-    ),
     "image-generation": (
         "Conifer serves no image-output door. Keep image generation on your current provider."
     ),

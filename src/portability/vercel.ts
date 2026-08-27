@@ -6,7 +6,9 @@
 //
 //   · `providerOptions.gateway` (order, models) — provider pinning and
 //     server-side fallbacks, neither of which Conifer's admission model has.
-//   · `/embeddings` and image generation — doors Conifer does not serve at all.
+//   · image generation — a door Conifer does not serve at all. (`/embeddings`
+//     WAS listed here; the gateway shipped it on 2026-08-26, so the shim no
+//     longer refuses that surface.)
 //
 // Both throw. See cards/portability.card.json.
 
@@ -88,8 +90,6 @@ export function fromVercelProviderOptions(
 /** Doors Conifer does not serve. Named so a migration fails at the call site. */
 export function assertSupportedVercelSurface(surface: string): void {
   const unsupported: Record<string, string> = {
-    embeddings:
-      "Conifer serves no /v1/embeddings door. Keep embeddings on your current provider, or open the request for one — this is a gateway gap, not a client one.",
     "image-generation":
       "Conifer serves no image-output door. Keep image generation on your current provider.",
     oidc:

@@ -485,7 +485,8 @@ class PortabilityTests(unittest.TestCase):
         self.assertEqual(fields["fallback_models"], ["b"])
         self.assertEqual(passthrough, {"anthropic": {"thinking": True}})
 
-        self.refuses("embeddings", lambda: assert_supported_vercel_surface("embeddings"))
+        # /v1/embeddings SHIPPED on 2026-08-26 — the shim must not refuse it.
+        assert_supported_vercel_surface("embeddings")
         self.refuses("oidc", lambda: assert_supported_vercel_surface("oidc"))
 
 

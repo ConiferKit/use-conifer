@@ -58,7 +58,6 @@
       "providerOptions.gateway.models": "model fallbacks — same treatment as OpenRouter's `models`: client-side chain, opt-in."
     },
     "unsupported_refused": {
-      "POST /embeddings": "the gateway serves no embeddings door today. Throws with that sentence, rather than 404-ing from inside the OpenAI client.",
       "image generation": "no image-output door. Throws.",
       "OIDC auto-auth": "there is no Conifer OIDC exchange; supply CONIFER_API_KEY."
     }

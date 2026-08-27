@@ -194,8 +194,11 @@ test("gateway provider pinning refuses; gateway model fallbacks convert", () => 
 });
 
 test("doors Conifer does not serve fail at the call site, not at a 404", () => {
-  refuses("embeddings", () => assertSupportedVercelSurface("embeddings"));
   refuses("image-generation", () => assertSupportedVercelSurface("image-generation"));
   refuses("oidc", () => assertSupportedVercelSurface("oidc"));
   assert.doesNotThrow(() => assertSupportedVercelSurface("chat"));
+  // The gateway shipped /v1/embeddings on 2026-08-26, so the shim must NOT
+  // refuse it any more — a client that keeps throwing here would send people
+  // to another provider for a door Conifer now serves.
+  assert.doesNotThrow(() => assertSupportedVercelSurface("embeddings"));
 });
