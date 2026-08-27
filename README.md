@@ -249,6 +249,49 @@ Stated here so you find out now rather than mid-migration:
 
 ## Verified against the live gateway
 
+The offline suites (injected transports, no network) are backed by end-to-end
+runs against production: real completions with exact itemized receipts, the
+cost ceiling refusing before any spend, streaming with the terminal usage
+chunk, model-not-found behavior, and the MCP server over stdio from a fresh
+install. Both languages, same results.
+
+## TypeScript consumers
+
+Target **ES2018 or later** (`"target": "ES2018"`, or `"lib": ["ES2018"]`). The
+stream type is an `AsyncIterable`, whose name only exists in `lib.es2018`, so an
+older target reports `TS2583` pointing into our declarations. The official
+`openai` package has the same requirement for the same reason — async iteration
+cannot be described without the names that describe it.
+
+Verified from a real `npm i`: an ES2022 consumer typechecks clean under
+`strict` with **no** `skipLibCheck`, and CommonJS `require()` works on Node 22,
+24 and 26.
+
+## Tests
+
+```bash
+npm run build                                            # emit dist/ (ESM + .d.ts)
+node --experimental-strip-types --test tests/*.test.ts   # 70 tests
+cd python && python3 -m unittest discover -s tests       # 35 tests
+```
+
+Most assertions run with an injected transport: no network, no mock framework,
+and every one is about bytes that would go on the wire or values handed back.
+`tests/packaging.test.ts` is the exception and the important one — it checks the
+package as a CONSUMER receives it, because that is where two real defects hid
+(see below).
+
+## What Conifer does not do
+
+Stated here so you find out now rather than mid-migration:
+
+- **No embeddings door and no image generation.** `assertSupportedVercelSurface` throws on both rather than letting you discover it as a 404.
+- **No provider pinning.** The gateway chooses the host for the model you named, by price and health. The model is never substituted.
+- **No server-side prompt compression, moderation, injection scanning, or prompt registry.**
+- **No mid-stream fallback.** The first token commits the turn, so a chain cannot be attached to a stream.
+
+## Verified against the live gateway
+
 The suites above run offline. The package was also exercised against production
 (`api.conifer.build`, 83-model catalog), which is what caught the two bugs worth
 recording here:
