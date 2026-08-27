@@ -1,5 +1,0 @@
-Metadata-Version: 2.4
-Name: conifer-sdk
-Version: 0.1.0
-Summary: The Conifer gateway SDK: one client, exact per-turn cost receipts, and honest migration shims from OpenRouter, Vercel AI Gateway, and Helicone.
-Requires-Python: >=3.10
