@@ -28,6 +28,9 @@ from conifer_sdk import (  # noqa: E402
     ConiferPortabilityError,
     ConiferRateLimitError,
     ConiferTimeoutError,
+    ReceiptCollector,
+    SpendBudget,
+    SpendBudgetExceeded,
     EmbeddingsRequest,
     MIN_DEFER_WINDOW_SECONDS,
     TERMINAL_JOB_STATUSES,
@@ -1114,6 +1117,146 @@ class DeferredJobs(unittest.TestCase):
         self.assertEqual(job.poll_url, "/v1/deferred/job-gw-abc")
         # Nothing the gateway said is dropped behind our field names.
         self.assertEqual(job.raw["surprise_field"], 1)
+
+
+class Receipts(unittest.TestCase):
+    """Receipts for the client you ALREADY use. Twin of tests/receipts.test.ts.
+
+    The exact per-turn cost is the one thing Conifer has that other gateways do
+    not, and it rides the RESPONSE HEADERS — which every mainstream client
+    throws away. This collector reads them off any response-like object, so a
+    team keeps their existing ``openai`` client and still sees the money.
+    """
+
+    #: The receipt headers a real chat turn carries, measured 2026-08-27.
+    RECEIPT = {
+        "x-conifer-effective-model": "claude-fable-5",
+        "x-conifer-cost-nanousd": "580000",
+        "x-conifer-cost-components-nanousd": "fresh=80000,cache_write=0,cache_read=0,output=500000",
+        "x-conifer-request-id": "gw-1",
+    }
+
+    class FakeResponse:
+        """Duck-typed like httpx.Response: headers + url, and NO body access."""
+
+        def __init__(self, headers, url="https://api.conifer.build/v1/chat/completions"):
+            self.headers = headers
+            self.url = url
+
+    def test_the_receipt_is_captured_off_headers_alone(self):
+        rc = ReceiptCollector()
+        rc.httpx_hook(self.FakeResponse(self.RECEIPT))
+        self.assertEqual(rc.last.cost_nano_usd, 580_000)
+        self.assertEqual(rc.last.effective_model, "claude-fable-5")
+        self.assertEqual(rc.last.receipt.cost_components_nano_usd.fresh, 80_000)
+        self.assertEqual(rc.last.url, "https://api.conifer.build/v1/chat/completions")
+
+    def test_a_response_with_no_receipt_is_ignored_not_counted_as_free(self):
+        # Not every call through a wrapped client is an inference turn — a
+        # /models read, a health check. Counting those as zero-cost turns would
+        # quietly deflate the average cost per turn.
+        rc = ReceiptCollector()
+        self.assertIsNone(rc.observe({"content-type": "application/json"}))
+        self.assertEqual(rc.total.turns, 0)
+        self.assertIsNone(rc.last)
+
+    def test_the_total_sums_exactly_in_integers(self):
+        rc = ReceiptCollector()
+        rc.observe({**self.RECEIPT, "x-conifer-cost-nanousd": "580000"})
+        rc.observe({**self.RECEIPT, "x-conifer-cost-nanousd": "590000"})
+        total = rc.total
+        self.assertEqual(total.turns, 2)
+        # Integer nanodollars, never floating dollars: 0.00058 + 0.00059 in
+        # floats is not 0.00117, and money that does not add up is worse than
+        # no money.
+        self.assertEqual(total.cost_nano_usd, 1_170_000)
+        self.assertEqual(total.cost_usd, "0.001170000")
+
+    def test_the_counterfactual_is_summed_over_its_own_subset(self):
+        # The gateway omits this header unless the routed predicate holds, so a
+        # naive sum invites comparing it against a cost drawn from more turns
+        # and reporting a savings number that was never true.
+        rc = ReceiptCollector()
+        rc.observe({**self.RECEIPT, "x-conifer-counterfactual-nanousd": "900000"})
+        rc.observe(self.RECEIPT)
+        total = rc.total
+        self.assertEqual(total.turns, 2)
+        self.assertEqual(total.counterfactual_turns, 1, "the subset size must be visible")
+        self.assertEqual(total.counterfactual_nano_usd, 900_000)
+
+    def test_the_total_stays_exact_after_the_retention_cap_drops_receipts(self):
+        # A spend figure that quietly stopped counting would be worse than none.
+        rc = ReceiptCollector(retain=2)
+        for _ in range(4):
+            rc.observe(self.RECEIPT)
+        self.assertEqual(len(rc.all), 2, "the retained tail is bounded")
+        self.assertEqual(rc.total.turns, 4, "but the count is of every turn")
+        self.assertEqual(rc.total.cost_nano_usd, 4 * 580_000)
+
+    def test_a_throwing_callback_cannot_corrupt_the_total(self):
+        # The caller already paid for that turn. Their bad metrics hook must
+        # not turn a successful, billed inference call into a failure.
+        def explode(_):
+            raise RuntimeError("the caller's metrics backend is down")
+
+        rc = ReceiptCollector(on_receipt=explode)
+        rc.observe(self.RECEIPT)  # must not raise
+        self.assertEqual(rc.total.cost_nano_usd, 580_000)
+
+    def test_reset_clears_the_tail_and_the_total(self):
+        rc = ReceiptCollector()
+        rc.observe(self.RECEIPT)
+        rc.reset()
+        self.assertEqual(len(rc.all), 0)
+        self.assertEqual(rc.total.turns, 0)
+        self.assertEqual(rc.total.cost_nano_usd, 0)
+
+    def test_the_collector_is_thread_safe(self):
+        # An `openai` client is routinely shared across threads, and a spend
+        # total that silently loses increments under concurrency would be
+        # worse than no total at all.
+        import threading
+
+        rc = ReceiptCollector(retain=0)
+        def hammer():
+            for _ in range(200):
+                rc.observe(self.RECEIPT)
+
+        threads = [threading.Thread(target=hammer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(rc.total.turns, 1600)
+        self.assertEqual(rc.total.cost_nano_usd, 1600 * 580_000)
+
+    def test_a_spend_budget_refuses_the_next_call_once_spent(self):
+        budget = SpendBudget(1_000_000)
+        self.assertEqual(budget.remaining_nano_usd, 1_000_000)
+        budget.check()  # under budget: fine
+
+        budget.collector.observe(self.RECEIPT)  # 580000
+        self.assertEqual(budget.remaining_nano_usd, 420_000)
+        self.assertFalse(budget.exhausted)
+        budget.check()  # still fine
+
+        # The second turn crosses the line. It is NOT refused — the cost is
+        # only known once it settles, which is why the worst case is
+        # budget + one turn.
+        budget.collector.observe(self.RECEIPT)
+        self.assertTrue(budget.exhausted)
+        self.assertEqual(budget.remaining_nano_usd, 0, "clamped, never negative")
+        with self.assertRaises(SpendBudgetExceeded) as caught:
+            budget.check()
+        # The message must say the refusal was ours, or a reader will hunt for
+        # a gateway 402 that never happened.
+        self.assertIn("CLIENT-SIDE", str(caught.exception))
+
+    def test_a_fractional_or_negative_budget_is_refused(self):
+        with self.assertRaises(ValueError):
+            SpendBudget(1.5)
+        with self.assertRaises(ValueError):
+            SpendBudget(-1)
 
 
 if __name__ == "__main__":

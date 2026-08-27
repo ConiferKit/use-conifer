@@ -50,6 +50,13 @@ from .portability import (
     from_vercel_provider_options,
     parse_fallbacks,
 )
+from .receipts import (
+    ObservedReceipt,
+    ReceiptCollector,
+    ReceiptTotal,
+    SpendBudget,
+    SpendBudgetExceeded,
+)
 from .types import (
     Balance,
     DeferredJob,
@@ -71,6 +78,11 @@ __all__ = [
     "resolve_base_url",
     "parse_frame",
     "decode_vector",
+    "ReceiptCollector",
+    "ObservedReceipt",
+    "ReceiptTotal",
+    "SpendBudget",
+    "SpendBudgetExceeded",
     "MIN_DEFER_WINDOW_SECONDS",
     "DeferredJob",
     "TERMINAL_JOB_STATUSES",

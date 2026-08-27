@@ -71,6 +71,11 @@ export {
   errorFrom,
 } from "./errors.ts";
 
+// Receipts for the client you ALREADY use: an injected fetch that reads the
+// x-conifer-* disclosure every mainstream client throws away.
+export { ReceiptCollector, SpendBudget } from "./receipts.ts";
+export type { ObservedReceipt, ReceiptTotal } from "./receipts.ts";
+
 export { Transport, backoffMs } from "./transport.ts";
 export type { FetchLike, RequestSpec, TransportOptions } from "./transport.ts";
 

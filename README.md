@@ -151,6 +151,65 @@ answer = conifer.jobs_wait(job.job_id)       # or job_status / job_result
   *without cancelling* — killing work you already paid for because a
   client-side clock ran out is not a decision an SDK should make for you.
 
+## Keep your client. Get the receipts anyway.
+
+The exact per-turn cost is the thing Conifer has that other gateways do not, and
+it arrives on the **response headers** — which `openai`, `@anthropic-ai/sdk`,
+LangChain, LiteLLM and the Vercel AI SDK all throw away. So pointing an existing
+client at Conifer works perfectly and makes the whole differentiator invisible.
+
+You do not have to rewrite anything to fix that. Every one of those clients takes
+an injected `fetch` (or an `http_client`), so hand it one that reads the receipt
+on the way past:
+
+```ts
+import OpenAI from "openai";
+import { ReceiptCollector } from "@conifer/sdk";
+
+const receipts = new ReceiptCollector();
+const openai = new OpenAI({
+  baseURL: "https://api.conifer.build/v1",
+  apiKey: process.env.CONIFER_API_KEY,
+  fetch: receipts.fetch,          // the only line that changes
+});
+
+await openai.chat.completions.create({ model: "claude-fable-5", messages });
+
+receipts.last.costNanoUsd;   // 580000 — that exact call
+receipts.total.costUsd;      // "0.001170000" — the whole session
+```
+
+```python
+import httpx
+from openai import OpenAI
+from conifer_sdk import ReceiptCollector
+
+receipts = ReceiptCollector()
+openai = OpenAI(
+    base_url="https://api.conifer.build/v1",
+    api_key=os.environ["CONIFER_API_KEY"],
+    http_client=httpx.Client(event_hooks={"response": [receipts.httpx_hook]}),
+)
+```
+
+It never reads the response **body**. A body is a single-use stream that belongs
+to the caller: consuming it to find a cost would break streaming and double
+memory for everyone, and it would fail far from where it was caused. Headers are
+already materialized, so observing them costs nothing and changes nothing —
+the same response object is handed straight back.
+
+`SpendBudget` answers the other question, the one no single request can:
+
+```ts
+const budget = new SpendBudget(5_000_000_000);   // $5 for this whole job
+const openai = new OpenAI({ /* … */ fetch: budget.fetch });
+```
+
+It refuses the *next* call once the budget is gone. It cannot refund the one that
+crossed the line, because a turn's cost is only known after it settles — so the
+true worst case is `budget + one turn`. Pair it with a per-request
+`maxCostNanoUsd` and that overshoot is bounded rather than open-ended.
+
 ## Why this exists when the OpenAI SDK already works
 
 It still does, and it remains the right choice for a plain drop-in. This package
