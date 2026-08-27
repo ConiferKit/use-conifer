@@ -7,6 +7,20 @@ requires-python = ">=3.10"
 # locked-down build image without a package tree to audit.
 dependencies = []
 license = "Apache-2.0"
+# A SYMLINK to the repo README one directory up (see python/README.md).
+#
+# Symlinked rather than copied because two copies of a 400-line document drift,
+# and the stale one is always the one a user reads on PyPI. Symlinked rather
+# than referenced as `../README.md` because setuptools refuses to read anything
+# outside the package root — it fails the build loudly, which is how this was
+# confirmed.
+#
+# This was silently BROKEN before: the file did not exist here at all, and
+# setuptools resolved it to nothing WITHOUT a warning, so the wheel's METADATA
+# carried `Description-Content-Type: text/markdown` and an EMPTY body — a blank
+# PyPI project page for the launch. Caught by inspecting the built artifact
+# rather than trusting the build's exit code. `sdist_contains_readme` in the
+# packaging test now pins it.
 readme = "README.md"
 authors = [{ name = "Conifer" }]
 keywords = ["conifer", "llm", "openai", "anthropic", "gateway", "ai", "sdk"]

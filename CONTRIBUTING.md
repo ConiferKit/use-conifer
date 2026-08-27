@@ -96,6 +96,13 @@ revoking API keys happens at
 [the console](https://conifer.build/console#/keys); the SDK only ever reads a
 key you already hold from `CONIFER_API_KEY`.
 
+## Releasing
+
+Not on npm or PyPI yet; installation is from source, and the README says so.
+When that changes, [RELEASING.md](RELEASING.md) is the checklist — including
+the two gates that caught real defects here (the live QA harness, and
+installing the built artifacts into a clean project as a consumer would).
+
 ## Security
 
 Do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).
