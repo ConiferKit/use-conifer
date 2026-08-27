@@ -39,6 +39,18 @@ test("the engines floor is honest about what it can run", () => {
   assert.equal(pkg.engines.node, ">=18");
 });
 
+test("installing from a clone builds dist, not just packing", () => {
+  // dist/ is gitignored, so a clone has no entry point until something builds
+  // it. `prepack` alone does NOT do that: it runs on pack/publish, while
+  // `npm i ./use-conifer` and `npm i <git-url>` run `prepare`. Until the
+  // registry release those two ARE how everyone installs this package, and
+  // without `prepare` the install silently lands a directory with no
+  // dist/src/index.js — MODULE_NOT_FOUND on first require, which is exactly
+  // what the README and llms.txt tell people to do. Caught on 2026-08-26 by
+  // following our own published instructions.
+  assert.equal(pkg.scripts.prepare, "npm run build");
+});
+
 test("everything package.json points at is inside `files`", () => {
   const shipped: string[] = pkg.files;
   const referenced = [
