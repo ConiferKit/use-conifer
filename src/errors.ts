@@ -105,7 +105,38 @@ export class ConiferBadRequestError extends ConiferError {}
  * both render this same refusal. Do not treat it as proof of non-existence.
  */
 export class ConiferModelNotFoundError extends ConiferError {}
-export class ConiferConflictError extends ConiferError {}
+/**
+ * 409. An idempotency key that cannot be answered right now.
+ *
+ * The gateway authors THREE different 409s under this one type, and they do not
+ * mean the same thing (`handlers.rs`, measured live 2026-08-27):
+ *
+ *   - "idempotency key was already used with a different request body" —
+ *     TERMINAL. You reused a key for different bytes. Retrying re-sends the
+ *     same conflict forever; change the key or the body.
+ *   - "this request is already in progress; retry shortly" — TRANSIENT. A first
+ *     attempt is still in flight, possibly on another replica.
+ *   - "this request has no replayable response; retry shortly" — TRANSIENT. The
+ *     key is known but the body lives in another replica's cache, and the
+ *     gateway will not guess between "settled elsewhere" and "still running"
+ *     because either guess can double-charge or wrongly refund.
+ *
+ * The last two are the gateway explicitly asking to be asked again, and
+ * retrying them is SAFE precisely because the key is the same — that is what
+ * idempotency is for. So `retryable` is decided by the gateway's own wording
+ * rather than by the status code, which cannot tell these apart.
+ *
+ * This was found by the live QA harness: a Python run hit
+ * `replayed_no_body_unresolved` on a first call, and the SDK surfaced a hard
+ * failure for a turn the gateway was willing to serve on a second ask.
+ */
+export class ConiferConflictError extends ConiferError {
+  readonly retryable: boolean;
+  constructor(init: ConiferErrorInit) {
+    super(init);
+    this.retryable = /retry shortly/i.test(init.message);
+  }
+}
 export class ConiferByokKeyError extends ConiferError {}
 
 export class ConiferRateLimitError extends ConiferError {

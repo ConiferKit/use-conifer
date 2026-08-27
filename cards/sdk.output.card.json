@@ -55,7 +55,7 @@
     "ConiferCostCeilingError": "402 cost_ceiling_exceeded — carries projectedNanoUsd / ceilingNanoUsd",
     "ConiferBadRequestError": "400 — type invalid_request_error with no auth/model code (retired: invalid_request)",
     "ConiferModelNotFoundError": "404 model_not_found or job_not_found — indistinguishable from 'not visible to you', by design",
-    "ConiferConflictError": "409 request_in_progress",
+    "ConiferConflictError": "409 request_in_progress — THREE different meanings under one type, so `retryable` is decided by the gateway's WORDING, not the status. 'already used with a different request body' is TERMINAL (the same bytes refuse forever). 'already in progress; retry shortly' and 'no replayable response; retry shortly' are TRANSIENT — the gateway asking to be asked again, which is safe because the retry carries the SAME idempotency key and so cannot bill twice. Found live 2026-08-27 by the QA harness, on a FIRST call.",
     "ConiferByokKeyError": "422 byok_key_rejected",
     "ConiferRateLimitError": "429 rate_limit_error — carries retryAfterSeconds when the gateway sent one (retired: rate_limited)",
     "ConiferUpstreamError": "422/502 upstream_error or wire_upstream_mismatch",

@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import {
   Conifer,
+  ConiferConflictError,
   ConiferCostCeilingError,
   ConiferModelNotFoundError,
   ConiferPaymentError,
@@ -519,4 +520,70 @@ test("the embeddings door resolves the same identity the same way", async () => 
     requestId: "trace-9",
   });
   assert.equal(calls[0]?.init.headers["idempotency-key"], "trace-9");
+});
+
+/**
+ * A transient 409 is retried, with the SAME key — which is what makes it safe.
+ *
+ * The gateway answers "this request has no replayable response; retry shortly"
+ * when a key is known but its settled body lives in another replica's cache. It
+ * will not guess between "settled elsewhere" and "still running", because
+ * either guess can double-charge or wrongly refund. Re-asking with the same
+ * idempotency key is exactly how that resolves: the gateway either replays the
+ * settled response or serves the turn once.
+ *
+ * Found live, not by inspection: a QA run hit this on a FIRST call and the SDK
+ * surfaced a hard failure for a turn the gateway was willing to serve.
+ */
+test("a 409 that asks to be retried IS retried, reusing the idempotency key", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse(
+      {
+        error: {
+          type: "request_in_progress",
+          message: "this request has no replayable response; retry shortly",
+        },
+      },
+      { status: 409 },
+    ),
+    jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS }),
+  ]);
+  const answer = await new Conifer({ apiKey: "k", fetch: fetchImpl }).chat({
+    model: "m",
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  assert.equal(calls.length, 2, "the transient conflict should have been retried");
+  // THE safety property: the same key both times, so the retry cannot bill a
+  // second turn even if the first one had actually settled.
+  assert.equal(
+    calls[0]?.init.headers["idempotency-key"],
+    calls[1]?.init.headers["idempotency-key"],
+  );
+  assert.equal(textOf(answer), "pinecone");
+});
+
+test("a 409 for a REUSED key with different bytes is not retried", async () => {
+  // Terminal by construction: the same request refuses identically forever, so
+  // retrying is pure latency and burnt rate limit.
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse(
+      {
+        error: {
+          type: "request_in_progress",
+          message: "idempotency key was already used with a different request body",
+        },
+      },
+      { status: 409 },
+    ),
+  ]);
+  await assert.rejects(
+    () =>
+      new Conifer({ apiKey: "k", fetch: fetchImpl }).chat({
+        model: "m",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    ConiferConflictError,
+  );
+  assert.equal(calls.length, 1, "a body conflict must not be retried");
 });

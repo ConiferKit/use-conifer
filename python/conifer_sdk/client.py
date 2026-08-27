@@ -52,7 +52,18 @@ DEFAULT_TIMEOUT_SECONDS = 300.0
 #: quietly served synchronously at a different price.
 MIN_DEFER_WINDOW_SECONDS = 86_400
 
-_RETRYABLE_STATUS = {429, 502, 503, 504}
+#: Statuses a retry can plausibly fix.
+#:
+#: 409 is here for ONE narrow reason, and only in combination with the error's
+#: own ``retryable``: the gateway authors two 409s that literally say "retry
+#: shortly" (a first attempt still in flight, or a settled body cached on
+#: another replica). Those are the gateway asking to be asked again, and asking
+#: again is safe precisely because the retry carries the SAME idempotency key —
+#: so it either replays the settled response or waits its turn, but cannot bill
+#: twice. The third 409, "already used with a different request body", is
+#: terminal and ConiferConflictError marks it non-retryable, so it never
+#: reaches this set's permission.
+_RETRYABLE_STATUS = {409, 429, 502, 503, 504}
 
 #: (status, headers, body-text)
 TransportResult = Tuple[int, Dict[str, str], str]

@@ -727,6 +727,84 @@ class ErrorVocabulary(unittest.TestCase):
             error_from(500, {"error": {"type": "some_future_type", "message": "x"}}, {}).retryable
         )
 
+    def test_a_409_that_says_retry_shortly_is_retryable(self):
+        """The three 409s, and why one must NOT be retried.
+
+        Found by the live QA harness rather than by reading: a run hit
+        ``replayed_no_body_unresolved`` on a FIRST call and the SDK reported a
+        hard failure, for a turn the gateway had explicitly invited it to
+        re-ask. The status code cannot separate these cases — only the
+        gateway's own wording can.
+        """
+        for message in (
+            "this request is already in progress; retry shortly",
+            "this request has no replayable response; retry shortly",
+        ):
+            error = error_from(
+                409, {"error": {"type": "request_in_progress", "message": message}}, {}
+            )
+            self.assertIsInstance(error, ConiferConflictError)
+            self.assertTrue(error.retryable, message)
+
+        # Reusing a key for DIFFERENT bytes is terminal: the same request will
+        # be refused identically forever, so retrying is pure latency.
+        terminal = error_from(
+            409,
+            {
+                "error": {
+                    "type": "request_in_progress",
+                    "message": "idempotency key was already used with a different request body",
+                }
+            },
+            {},
+        )
+        self.assertIsInstance(terminal, ConiferConflictError)
+        self.assertFalse(terminal.retryable)
+
+    def test_a_transient_409_is_retried_reusing_the_idempotency_key(self):
+        calls, transport = scripted(
+            (
+                409,
+                {},
+                {
+                    "error": {
+                        "type": "request_in_progress",
+                        "message": "this request has no replayable response; retry shortly",
+                    }
+                },
+            ),
+            (200, RECEIPT_HEADERS, COMPLETION),
+        )
+        answer = Conifer(api_key="k", transport=transport, max_retries=2).chat(
+            ChatRequest(model="m", messages=[])
+        )
+        self.assertEqual(len(calls), 2, "the transient conflict should have been retried")
+        # THE safety property: the same key both times, so the retry cannot
+        # bill a second turn even if the first had actually settled.
+        self.assertEqual(
+            calls[0]["headers"]["idempotency-key"], calls[1]["headers"]["idempotency-key"]
+        )
+        self.assertEqual(answer.text, "pinecone")
+
+    def test_a_body_conflict_409_is_not_retried(self):
+        calls, transport = scripted(
+            (
+                409,
+                {},
+                {
+                    "error": {
+                        "type": "request_in_progress",
+                        "message": "idempotency key was already used with a different request body",
+                    }
+                },
+            )
+        )
+        with self.assertRaises(ConiferConflictError):
+            Conifer(api_key="k", transport=transport, max_retries=3).chat(
+                ChatRequest(model="m", messages=[])
+            )
+        self.assertEqual(len(calls), 1, "a body conflict must not be retried")
+
     def test_both_languages_agree_on_the_class_for_every_contract_type(self):
         """Parity, checked against the TypeScript names rather than assumed.
 
@@ -1257,7 +1335,6 @@ class Receipts(unittest.TestCase):
             SpendBudget(1.5)
         with self.assertRaises(ValueError):
             SpendBudget(-1)
-
 
 if __name__ == "__main__":
     unittest.main()

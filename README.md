@@ -111,6 +111,13 @@ Three things worth knowing, because they are decisions rather than defaults:
   door, not an opaque upstream 404 charged to you; token-id input is refused
   client-side before any spend, because the gateway cannot price token ids it
   did not tokenize.
+- **Some models are not deterministic, and that is upstream of us.** Measured
+  2026-08-27: six identical `bge-m3` calls returned four distinct vectors,
+  differing by up to 2.2e-4, while `text-embedding-3-small` returned the same
+  bytes every time. Batched GPU inference reorders float accumulation depending
+  on what else shares the batch. It is far below anything that changes a
+  ranking, but if you are diffing stored vectors or asserting on exact values in
+  a test, compare with a tolerance rather than `==`.
 
 `conifer.cheapestFor(["embeddings"])` picks the cheapest embedding seat the
 catalog actually declares.
@@ -371,9 +378,11 @@ Verified from a real `npm i`: an ES2022 consumer typechecks clean under
 ## Tests
 
 ```bash
-npm run build                                            # emit dist/ (ESM + .d.ts)
-node --experimental-strip-types --test tests/*.test.ts   # 70 tests
-cd python && python3 -m unittest discover -s tests       # 35 tests
+npm run build     # emit dist/ (ESM + .d.ts)
+npm test          # 129 tests, offline
+npm run typecheck
+
+cd python && python3 -m pytest -q   # 84 tests, offline
 ```
 
 Most assertions run with an injected transport: no network, no mock framework,
@@ -381,6 +390,27 @@ and every one is about bytes that would go on the wire or values handed back.
 `tests/packaging.test.ts` is the exception and the important one — it checks the
 package as a CONSUMER receives it, because that is where two real defects hid
 (see below).
+
+### The live QA harness
+
+Offline tests can only confirm what we already believed. Four defects in this
+SDK were invisible to a suite that mocked the server and obvious against the
+real one, including three error classes that were unreachable in production and
+a deferred turn that was billed and returned nothing readable. So there is a
+second, deliberate gate:
+
+```bash
+CONIFER_API_KEY=sk-… npm run qa:live                     # 16 checks
+CONIFER_API_KEY=sk-… node scripts/live-qa.mjs --include-deferred   # 18
+
+cd python && CONIFER_API_KEY=sk-… python3 scripts/live_qa.py --include-deferred
+```
+
+It exercises every surface — catalog, chat, streaming, embeddings, receipts,
+budgets, deferred jobs, and each refusal — against `api.conifer.build`, in both
+languages, and prints the real cost of what it just did. It **spends real
+money** (a few tenths of a cent), which is exactly why it is not part of
+`npm test`: run it before a release, on purpose.
 
 ## What Conifer does not do
 
