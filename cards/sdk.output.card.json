@@ -47,15 +47,17 @@
     "creditsRemainingNanoUsd": "purchased-credit portion left"
   },
   "errors": {
-    "note": "One error class per gateway `error.type`, so a consumer branches on a name rather than a status number. Every error carries `status`, `type`, `message`, `requestId`, and `retryable`.",
-    "ConiferAuthError": "401 unauthorized",
+    "note": "One error class per gateway refusal, so a consumer branches on a name rather than a status number. Every error carries `status`, `type`, `code`, `message`, `requestId`, and `retryable`.",
+    "discriminator": "(type, code, status), in that order of authority. The gateway speaks the INDUSTRY error vocabulary, not a private schema: `invalid_request_error` covers 401 AND 400 AND an unknown URL, and `rate_limit_error` is the 429. So `type` alone cannot pick the class \u2014 `error.code` (`invalid_api_key`, `model_not_found`, \u2026) disambiguates where the gateway sends one, and the STATUS settles it where it does not. Mapping on `type` alone is exactly the bug this line exists to prevent: it made ConiferAuthError, ConiferBadRequestError and ConiferRateLimitError unreachable against the live gateway (found 2026-08-27).",
+    "retired_types": "The gateway's older private names \u2014 `unauthorized`, `invalid_request`, `rate_limited` \u2014 are still accepted so an older deploy or a recorded fixture maps to the same class. They are NOT what the live gateway sends.",
+    "ConiferAuthError": "401/403 \u2014 type invalid_request_error, code invalid_api_key (retired: unauthorized)",
     "ConiferPaymentError": "402 insufficient_allowance \u2014 carries requiredNanoUsd / balanceNanoUsd",
     "ConiferCostCeilingError": "402 cost_ceiling_exceeded \u2014 carries projectedNanoUsd / ceilingNanoUsd",
-    "ConiferBadRequestError": "400 invalid_request",
-    "ConiferModelNotFoundError": "404 model_not_found \u2014 indistinguishable from 'not visible to you', by design",
+    "ConiferBadRequestError": "400 \u2014 type invalid_request_error with no auth/model code (retired: invalid_request)",
+    "ConiferModelNotFoundError": "404 model_not_found or job_not_found \u2014 indistinguishable from 'not visible to you', by design",
     "ConiferConflictError": "409 request_in_progress",
     "ConiferByokKeyError": "422 byok_key_rejected",
-    "ConiferRateLimitError": "429 rate_limited \u2014 carries retryAfterSeconds when the gateway sent one",
+    "ConiferRateLimitError": "429 rate_limit_error \u2014 carries retryAfterSeconds when the gateway sent one (retired: rate_limited)",
     "ConiferUpstreamError": "422/502 upstream_error or wire_upstream_mismatch",
     "ConiferUnavailableError": "503 service_available=false",
     "ConiferTimeoutError": "client-side abort \u2014 no gateway verdict, so no billing claim is made either way"

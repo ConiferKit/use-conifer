@@ -10,6 +10,16 @@ export interface ConiferErrorInit {
   status: number;
   type: string;
   message: string;
+  /**
+   * The OpenAI-compatible `error.code`, when the gateway sent one.
+   *
+   * This is not decoration: the gateway speaks the INDUSTRY vocabulary, in
+   * which `type` collapses a 401 and a 400 into one `invalid_request_error`.
+   * `code` is what separates them (`invalid_api_key`, `model_not_found`,
+   * `context_length_exceeded`, `unsupported_parameter`, `unknown_url`, …), and
+   * it is the field LangChain, LiteLLM and openai-python already branch on.
+   */
+  code?: string;
   requestId?: string;
   /** Raw envelope, so nothing the gateway said is lost behind our class names. */
   body?: unknown;
@@ -18,6 +28,8 @@ export interface ConiferErrorInit {
 export class ConiferError extends Error {
   readonly status: number;
   readonly type: string;
+  /** The OpenAI-compatible `error.code`. See {@link ConiferErrorInit.code}. */
+  readonly code?: string;
   readonly requestId?: string;
   readonly body?: unknown;
   /**
@@ -33,6 +45,7 @@ export class ConiferError extends Error {
     this.name = new.target.name;
     this.status = init.status;
     this.type = init.type;
+    this.code = init.code;
     this.requestId = init.requestId;
     this.body = init.body;
   }
@@ -65,6 +78,25 @@ export class ConiferCostCeilingError extends ConiferError {
     this.ceilingNanoUsd = ceiling;
   }
 }
+
+/**
+ * 402: this API KEY's own lifetime spend cap is exhausted.
+ *
+ * The THIRD distinct 402, and the reason branching on status is not enough.
+ * The three have three different remedies and it matters which you got:
+ *
+ *   - `ConiferPaymentError`      — the ACCOUNT is out of credit. Add funds.
+ *   - `ConiferCostCeilingError`  — YOUR per-request `maxCostNanoUsd` refused
+ *                                  this turn. Raise it, or send less.
+ *   - `ConiferKeySpendCapError`  — the KEY you are holding has spent its
+ *                                  lifetime cap. The account may be fully
+ *                                  funded and every other key still works;
+ *                                  the fix is a new key or a raised cap, and
+ *                                  adding credit does nothing at all.
+ *
+ * Nothing is charged for a refusal on any of the three.
+ */
+export class ConiferKeySpendCapError extends ConiferError {}
 
 export class ConiferBadRequestError extends ConiferError {}
 /**
@@ -144,7 +176,43 @@ function twoIntegers(message: string): [number | undefined, number | undefined] 
   return [num(0), num(1)];
 }
 
-/** Map a gateway refusal onto its class. Unknown types stay a plain ConiferError. */
+/** A 429 under either the industry name or the retired one, with its hint. */
+function rateLimit(
+  init: ConiferErrorInit,
+  headers: { get(name: string): string | null },
+): ConiferRateLimitError {
+  const raw = headers.get("retry-after");
+  const parsed = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+  return new ConiferRateLimitError({
+    ...init,
+    retryAfterSeconds: Number.isFinite(parsed) ? parsed : undefined,
+  });
+}
+
+/**
+ * Map a gateway refusal onto its class. Unknown types stay a plain ConiferError.
+ *
+ * THE `invalid_request_error` COLLAPSE (measured live 2026-08-27). The gateway
+ * deliberately speaks the INDUSTRY error vocabulary rather than a third schema
+ * of its own: a 401 and a 400 both render `type: "invalid_request_error"`, and
+ * a 429 renders `rate_limit_error`, because that is what OpenAI, Groq, Together,
+ * Fireworks, DeepSeek and xAI all send and therefore what every existing client
+ * already branches on.
+ *
+ * That collapse is good for portability and fatal for a switch on `type` alone.
+ * An earlier version of this function switched on the gateway's older private
+ * names (`unauthorized`, `invalid_request`, `rate_limited`), which the gateway
+ * has since retired — so `ConiferAuthError`, `ConiferBadRequestError` and
+ * `ConiferRateLimitError` were UNREACHABLE against the live gateway and every
+ * 401 and 400 arrived as a bare `ConiferError`. Worse, a 429 fell to the
+ * status-based default and lost its `retry-after`.
+ *
+ * So the discriminator is (type, code, status), in that order of authority:
+ * `error.code` disambiguates the collapsed type where the gateway sends one
+ * (`invalid_api_key` for the 401), and the STATUS settles it where it does not.
+ * The retired names are still accepted so an older gateway deploy, or a
+ * recorded fixture, keeps mapping to the same class.
+ */
 export function errorFrom(
   status: number,
   body: unknown,
@@ -155,21 +223,44 @@ export function errorFrom(
       ? ((body as { error: unknown }).error as Record<string, unknown>)
       : undefined;
   const type = typeof envelope?.type === "string" ? envelope.type : `http_${status}`;
+  const code = typeof envelope?.code === "string" ? envelope.code : undefined;
   const message =
     typeof envelope?.message === "string"
       ? envelope.message
       : `the gateway refused with HTTP ${status}`;
   const requestId =
     headers.get("x-conifer-request-id") ?? headers.get("x-request-id") ?? undefined;
-  const init: ConiferErrorInit = { status, type, message, requestId, body };
+  const init: ConiferErrorInit = { status, type, code, message, requestId, body };
+
+  // The industry-vocabulary types, resolved by code then status.
+  if (type === "invalid_request_error") {
+    if (code === "invalid_api_key" || status === 401 || status === 403) {
+      return new ConiferAuthError(init);
+    }
+    if (code === "model_not_found" || status === 404) {
+      return new ConiferModelNotFoundError(init);
+    }
+    return new ConiferBadRequestError(init);
+  }
+  if (type === "rate_limit_error") {
+    return rateLimit(init, headers);
+  }
 
   switch (type) {
+    // Retired private name, kept so an older deploy maps identically.
     case "unauthorized":
       return new ConiferAuthError(init);
     case "insufficient_allowance":
       return new ConiferPaymentError(init);
     case "cost_ceiling_exceeded":
       return new ConiferCostCeilingError(init);
+    case "key_spend_cap_exceeded":
+      return new ConiferKeySpendCapError(init);
+    // 404. A BYOK provider name the gateway does not serve — a caller-side
+    // typo in the same family as a model that does not exist, so it shares
+    // the class a caller already handles for "that name is not a thing here".
+    case "unknown_provider":
+      return new ConiferModelNotFoundError(init);
     case "invalid_request":
       return new ConiferBadRequestError(init);
     case "model_not_found":
@@ -180,12 +271,8 @@ export function errorFrom(
     case "byok_key_rejected":
       return new ConiferByokKeyError(init);
     case "rate_limited": {
-      const raw = headers.get("retry-after");
-      const parsed = raw === null ? Number.NaN : Number.parseInt(raw, 10);
-      return new ConiferRateLimitError({
-        ...init,
-        retryAfterSeconds: Number.isFinite(parsed) ? parsed : undefined,
-      });
+      // Retired private name; `rate_limit_error` is handled above.
+      return rateLimit(init, headers);
     }
     case "service_unavailable":
       return new ConiferUnavailableError(init);
