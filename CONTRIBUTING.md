@@ -20,11 +20,16 @@ make sense, say so and we will find another way.
 
 ## Running the suites
 
+**Node 22 or newer is required to run the TypeScript suite**, which executes
+the `.ts` sources directly through `--experimental-strip-types`. That is a
+contributor requirement only: the published package is compiled ESM and
+supports Node 18 and up, which CI proves on every push.
+
 ```bash
 git clone https://github.com/ConiferKit/use-conifer
 cd use-conifer
 
-npm install
+npm ci
 npm test            # TypeScript
 npm run typecheck
 
