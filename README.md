@@ -256,6 +256,32 @@ crossed the line, because a turn's cost is only known after it settles — so th
 true worst case is `budget + one turn`. Pair it with a per-request
 `maxCostNanoUsd` and that overshoot is bounded rather than open-ended.
 
+### This works on all three wires
+
+The gateway serves three request shapes, and the receipt headers are identical
+on every one. Verified against the real vendor SDKs, unmodified:
+
+| wire | client | verified |
+| --- | --- | --- |
+| `POST /v1/chat/completions` | `openai` → `.chat.completions` | ✅ receipts, streaming |
+| `POST /v1/responses` | `openai` → `.responses` (the only wire Codex ≥ 0.145 speaks) | ✅ receipts |
+| `POST /v1/messages` | `anthropic` → `.messages` | ✅ receipts, streaming |
+
+```python
+import anthropic
+client = anthropic.Anthropic(
+    base_url="https://api.conifer.build",     # note: no /v1 on the Anthropic door
+    api_key=os.environ["CONIFER_API_KEY"],
+    http_client=httpx.Client(event_hooks={"response": [receipts.httpx_hook]}),
+)
+```
+
+This SDK deliberately does **not** reimplement the Responses or Messages wires.
+Your vendor SDK already speaks them correctly, the gateway relays them
+faithfully, and a third implementation of someone else's wire is a liability,
+not a feature. `ReceiptCollector` is the piece that was missing, and it is
+wire-agnostic because it reads headers.
+
 ## Why this exists when the OpenAI SDK already works
 
 It still does, and it remains the right choice for a plain drop-in. This package
@@ -439,8 +465,8 @@ a deferred turn that was billed and returned nothing readable. So there is a
 second, deliberate gate:
 
 ```bash
-CONIFER_API_KEY=sk-… npm run qa:live                     # 17 checks
-CONIFER_API_KEY=sk-… node scripts/live-qa.mjs --include-deferred   # 19
+CONIFER_API_KEY=sk-… npm run qa:live                     # 18 checks
+CONIFER_API_KEY=sk-… node scripts/live-qa.mjs --include-deferred   # 20
 
 cd python && CONIFER_API_KEY=sk-… python3 scripts/live_qa.py --include-deferred
 ```
@@ -469,7 +495,7 @@ Stated here so you find out now rather than mid-migration:
 The offline suites use injected transports and no network, so they can only
 confirm what we already believed. Every claim in this README is also checked
 against production by `scripts/live-qa.mjs` and `python/scripts/live_qa.py`
-(17 checks each, 19 with `--include-deferred`), in both languages, plus a
+(18 TS / 17 Python checks, plus 2 more with `--include-deferred`), in both languages, plus a
 fresh-install pass that installs the packed tarball and the Python package into
 clean projects and uses them as a consumer does.
 

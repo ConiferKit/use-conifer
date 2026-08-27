@@ -379,6 +379,47 @@ await check("SpendBudget refuses the next call once spent", async () => {
   throw new Error("the budget did not refuse the second call");
 });
 
+// ------------------------------------------------------------ other wires
+
+console.log("\nalternate wires");
+
+await check("the Responses and Anthropic doors carry the SAME receipt headers", async () => {
+  // The SDK deliberately does not reimplement these wires — the vendor SDKs
+  // already speak them and the gateway relays them faithfully. What MUST hold
+  // is that the receipt is identical on all three, because that is the whole
+  // basis for telling people to keep their client and add a ReceiptCollector.
+  // If a door ever stopped disclosing cost, that advice would silently become
+  // false for everyone using it.
+  const key = resolveKey();
+  const post = (path, body) =>
+    fetch(`${conifer.transport.baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${key}`,
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(body),
+    });
+
+  const doors = [
+    ["/v1/responses", { model: chatModel, input: "hi", max_output_tokens: 200 }],
+    ["/v1/messages", { model: chatModel, max_tokens: 200, messages: [{ role: "user", content: "hi" }] }],
+  ];
+  const seen = [];
+  for (const [path, body] of doors) {
+    const response = await post(path, body);
+    if (!response.ok) throw new Error(`${path} answered ${response.status}`);
+    // Read it with the SAME collector a user would attach to their own client.
+    const receipts = new ReceiptCollector({ fetch: async () => response });
+    await receipts.fetch(path, { method: "POST", headers: {} });
+    const cost = receipts.last?.costNanoUsd;
+    if (typeof cost !== "number") throw new Error(`${path} disclosed no cost`);
+    seen.push(`${path.replace("/v1/", "")}=${cost}`);
+  }
+  return seen.join(" ");
+});
+
 // --------------------------------------------------------------- deferred
 
 console.log("\ndeferred jobs");
