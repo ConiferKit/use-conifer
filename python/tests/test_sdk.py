@@ -17,7 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from conifer_sdk import (  # noqa: E402
     Conifer,
+    ConiferAuthError,
+    ConiferBadRequestError,
     ConiferCostCeilingError,
+    ConiferError,
+    ConiferKeySpendCapError,
     ConiferModelNotFoundError,
     ConiferPaymentError,
     ConiferPortabilityError,
@@ -39,6 +43,7 @@ from conifer_sdk.client import (  # noqa: E402
     pick_cheapest,
     resolve_chain,
 )
+from conifer_sdk.errors import error_from  # noqa: E402
 from conifer_sdk.portability import assert_supported_vercel_surface  # noqa: E402
 from conifer_sdk.receipt import parse_cost_components  # noqa: E402
 from conifer_sdk.types import CatalogModel, ChatRequest  # noqa: E402
@@ -524,6 +529,160 @@ class ParityTests(unittest.TestCase):
             ).read_text()
         )
         self.assertEqual(DEFAULT_TIMEOUT_SECONDS, contract["timeouts_secs"]["edge_silent_cut"])
+
+
+def _contract() -> dict:
+    """The vendored gateway wire contract. Same bytes both languages read."""
+    return json.loads(
+        (Path(__file__).resolve().parents[2] / "contracts/gateway-contract.json").read_text()
+    )
+
+
+class ErrorVocabulary(unittest.TestCase):
+    """The error vocabulary is a wire contract, so it is pinned to the
+    gateway's LIVE names rather than to our hopes. Twin of tests/errors.test.ts.
+
+    WHY THIS EXISTS. v0.1.0 mapped refusals by looking up ``error.type`` alone,
+    keyed on the gateway's ORIGINAL private names (``unauthorized``,
+    ``invalid_request``, ``rate_limited``). The gateway has since moved to the
+    INDUSTRY vocabulary — ``invalid_request_error`` for both a 401 and a 400,
+    ``rate_limit_error`` for a 429 — which is right for portability and which
+    silently broke the mapping: measured live against api.conifer.build on
+    2026-08-27, a 401 and a 400 both arrived as a bare ``ConiferError`` and a
+    429 lost its ``retry-after``. Three error classes were unreachable.
+
+    The old fixtures used the retired names too, so code and test were wrong
+    together. These drive the fixtures FROM the contract instead.
+    """
+
+    def test_a_live_401_is_an_auth_error(self):
+        # The exact body a bogus bearer token returned on 2026-08-27.
+        error = error_from(
+            401,
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Incorrect API key provided",
+                    "code": "invalid_api_key",
+                }
+            },
+            {},
+        )
+        self.assertIsInstance(error, ConiferAuthError)
+        self.assertEqual(error.code, "invalid_api_key")
+        self.assertFalse(error.retryable)
+
+    def test_a_400_under_the_same_collapsed_type_is_a_bad_request(self):
+        error = error_from(400, {"error": {"type": "invalid_request_error", "message": "bad"}}, {})
+        self.assertIsInstance(error, ConiferBadRequestError)
+        self.assertFalse(error.retryable)
+
+    def test_a_429_keeps_its_class_and_the_servers_retry_after(self):
+        # Under the old mapping this fell to the status-based default, which is
+        # still retryable — so the bug was invisible in aggregate while throwing
+        # away the server's own hint and backing off on a blind guess instead.
+        error = error_from(
+            429,
+            {"error": {"type": "rate_limit_error", "message": "slow down"}},
+            {"retry-after": "7"},
+        )
+        self.assertIsInstance(error, ConiferRateLimitError)
+        self.assertEqual(error.retry_after_seconds, 7)
+        self.assertTrue(error.retryable)
+
+    def test_the_three_402s_are_three_classes_with_three_remedies(self):
+        account = error_from(402, {"error": {"type": "insufficient_allowance", "message": "x"}}, {})
+        request = error_from(402, {"error": {"type": "cost_ceiling_exceeded", "message": "x"}}, {})
+        key = error_from(402, {"error": {"type": "key_spend_cap_exceeded", "message": "x"}}, {})
+
+        self.assertIsInstance(account, ConiferPaymentError)
+        self.assertIsInstance(request, ConiferCostCeilingError)
+        self.assertIsInstance(key, ConiferKeySpendCapError)
+        # None is a sibling of another, so an isinstance check cannot confuse
+        # "the account is empty" with "this key is done".
+        self.assertNotIsInstance(key, ConiferPaymentError)
+        self.assertNotIsInstance(key, ConiferCostCeilingError)
+        self.assertNotIsInstance(account, ConiferKeySpendCapError)
+        for error in (account, request, key):
+            self.assertFalse(error.retryable)
+
+    def test_every_error_type_in_the_contract_maps_to_a_specific_class(self):
+        # `internal_error` is deliberately NOT given a bespoke class: a 500 is
+        # the gateway's bug, and the only correct client behavior is the retry
+        # the status-based default already provides.
+        exempt = {"internal_error"}
+        status_for = {
+            "invalid_request_error": 400,
+            "rate_limit_error": 429,
+            "model_not_found": 404,
+            "job_not_found": 404,
+            "insufficient_allowance": 402,
+            "cost_ceiling_exceeded": 402,
+            "key_spend_cap_exceeded": 402,
+            "request_in_progress": 409,
+            "unknown_provider": 404,
+            "byok_key_rejected": 422,
+            "service_unavailable": 503,
+            "upstream_error": 502,
+            "wire_upstream_mismatch": 422,
+        }
+        for type_ in _contract()["error_envelope"]["types"]:
+            if type_ in exempt:
+                continue
+            self.assertIn(type_, status_for, f"contract type {type_} has no status here")
+            error = error_from(status_for[type_], {"error": {"type": type_, "message": "x"}}, {})
+            self.assertIsNot(
+                type(error),
+                ConiferError,
+                f"{type_} fell through to the bare ConiferError — class it or exempt it",
+            )
+            # The gateway's own word survives our class names.
+            self.assertEqual(error.type, type_)
+
+    def test_the_retired_type_names_still_map_to_the_same_classes(self):
+        # An older deploy, or a recorded fixture, must not change meaning.
+        self.assertIsInstance(
+            error_from(401, {"error": {"type": "unauthorized", "message": "x"}}, {}),
+            ConiferAuthError,
+        )
+        self.assertIsInstance(
+            error_from(400, {"error": {"type": "invalid_request", "message": "x"}}, {}),
+            ConiferBadRequestError,
+        )
+        limited = error_from(
+            429, {"error": {"type": "rate_limited", "message": "x"}}, {"retry-after": "3"}
+        )
+        self.assertIsInstance(limited, ConiferRateLimitError)
+        self.assertEqual(limited.retry_after_seconds, 3)
+
+    def test_an_unrecognized_type_keeps_the_gateways_words(self):
+        future = error_from(400, {"error": {"type": "some_future_type", "message": "new"}}, {})
+        self.assertEqual(future.type, "some_future_type")
+        self.assertEqual(future.message, "new")
+        self.assertFalse(future.retryable)
+        # A 5xx we have no name for is still worth one retry.
+        self.assertTrue(
+            error_from(500, {"error": {"type": "some_future_type", "message": "x"}}, {}).retryable
+        )
+
+    def test_both_languages_agree_on_the_class_for_every_contract_type(self):
+        """Parity, checked against the TypeScript names rather than assumed.
+
+        The "one SDK, two languages" claim is only real if a Python service and
+        a TypeScript app get the SAME class for the same refusal. The card names
+        the classes; this checks Python actually produces those names.
+        """
+        card = json.loads(
+            (Path(__file__).resolve().parents[2] / "cards/sdk.output.card.json").read_text()
+        )
+        documented = {
+            name for name in card["errors"] if name.startswith("Conifer")
+        }
+        for name in documented:
+            self.assertTrue(
+                hasattr(sys.modules["conifer_sdk"], name),
+                f"{name} is documented in the output card but not exported from conifer_sdk",
+            )
 
 
 if __name__ == "__main__":
