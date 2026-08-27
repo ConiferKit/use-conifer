@@ -29,7 +29,7 @@
 // settled nanodollar receipt in the tool result. An agent that can see what its
 // last call cost can be told to spend less; one that cannot, cannot.
 
-import { Conifer } from "../src/index.ts";
+import { Conifer, emptyReason } from "../src/index.ts";
 import { ConiferError } from "../src/errors.ts";
 import type { CatalogModel, Message } from "../src/types.ts";
 
@@ -136,6 +136,14 @@ export const TOOLS: ToolDefinition[] = [
       );
       return {
         text: completion.choices[0]?.message?.content ?? "",
+        // WHY the text is empty, when it is. An agent that receives `text: ""`
+        // and nothing else will usually retry — spending the caller's money a
+        // second time on a turn that will fail the same way. The single most
+        // common cause is a reasoning model spending `max_tokens` on its
+        // thinking block before reaching the visible answer, which is a
+        // budget problem the agent can actually fix. Absent when there is
+        // text, and absent for a tool call, where empty text is correct.
+        empty_reason: emptyReason(completion),
         // Vendor reasoning trace, when the model emitted one. Absent otherwise.
         reasoning:
           completion.choices[0]?.message?.reasoning ??
@@ -194,6 +202,7 @@ export const TOOLS: ToolDefinition[] = [
               ...(text === "" && {
                 note: "empty answer: the model spent its max_tokens on reasoning; raise max_tokens or set reasoning_effort on conifer_complete",
               }),
+              empty_reason: emptyReason(completion),
               cost_nanousd: completion.receipt.costNanoUsd,
               cost_usd: completion.receipt.costUsd,
               usage: completion.usage,
