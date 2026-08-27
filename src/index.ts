@@ -22,6 +22,7 @@ export {
   resolveChain,
   toCatalogModel,
   toDeferredJob,
+  withCost,
   turnIdentity,
   parseFrame,
 } from "./client.ts";

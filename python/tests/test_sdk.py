@@ -36,6 +36,7 @@ from conifer_sdk import (  # noqa: E402
     TERMINAL_JOB_STATUSES,
     is_terminal_job,
     to_deferred_job,
+    with_cost,
     vector_of,
     ceiling_from_policy,
     conifer_openai_compatible_config,
@@ -1599,6 +1600,60 @@ class HeliconeHeaderCoverage(unittest.TestCase):
         # Properties are handed BACK, not stored: Conifer keeps no property
         # index and the shim will not pretend it does.
         self.assertEqual(properties, {"app": "my-app"})
+
+
+class CostOnTheBody(unittest.TestCase):
+    """The settled cost rides the BODY as well as the headers.
+
+    OpenRouter puts cost in ``usage.cost``; Conifer's is on
+    ``x-conifer-cost-nanousd``. Every logging pipeline, request recorder,
+    LangChain/LiteLLM callback and JSON-dumping debug line keeps the body and
+    discards the headers — so a team migrating from OpenRouter loses their cost
+    column and the fix is somewhere they are not looking.
+
+    It matters more here than elsewhere: a normal caller cannot read their usage
+    history back (``/admin/usage/*`` is owner-only), so the receipt on the turn
+    is their only record of what they spent. Twin of the same tests in
+    client.test.ts.
+    """
+
+    def test_the_cost_is_copied_onto_usage_matching_the_header(self):
+        usage = with_cost(
+            {"prompt_tokens": 8, "completion_tokens": 34},
+            Receipt(cost_nano_usd=1_780_000),
+        )
+        # Integer nanodollars are the authority; `cost` is the
+        # OpenRouter-shaped decimal-USD float existing code already reads.
+        self.assertEqual(usage["cost_nanousd"], 1_780_000)
+        self.assertAlmostEqual(usage["cost"], 0.00178)
+        # Nothing the gateway sent is disturbed.
+        self.assertEqual(usage["prompt_tokens"], 8)
+        self.assertEqual(usage["completion_tokens"], 34)
+
+    def test_no_disclosed_cost_means_no_cost_field(self):
+        # The stream case: the head is sent before the first token, so the cost
+        # headers are genuinely absent. Inventing a 0 would tell every
+        # dashboard the turn was free.
+        usage = with_cost({"prompt_tokens": 8}, Receipt())
+        self.assertNotIn("cost", usage)
+        self.assertNotIn("cost_nanousd", usage)
+        self.assertEqual(usage, {"prompt_tokens": 8})
+        # Absent usage stays absent rather than becoming a cost-only object.
+        self.assertIsNone(with_cost(None, Receipt()))
+
+    def test_a_server_sent_cost_always_wins(self):
+        # Additive only: if the gateway ever sends its own usage.cost, that is
+        # the authoritative number.
+        usage = with_cost({"cost": 0.42}, Receipt(cost_nano_usd=1_780_000))
+        self.assertEqual(usage["cost"], 0.42)
+        self.assertNotIn("cost_nanousd", usage, "no half-overwrite either")
+
+    def test_a_completion_carries_the_cost_in_its_body(self):
+        _, transport = scripted((200, RECEIPT_HEADERS, COMPLETION))
+        answer = client(transport).chat(ChatRequest(model="m", messages=[]))
+        # Same number, two places: whichever half of the response a tool keeps.
+        self.assertEqual(answer.usage["cost_nanousd"], answer.receipt.cost_nano_usd)
+        self.assertEqual(answer.usage["cost_nanousd"], 1_250_000)
 
 
 if __name__ == "__main__":

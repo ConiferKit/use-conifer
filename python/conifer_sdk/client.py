@@ -353,7 +353,7 @@ class Conifer:
                 fallback_index=index,
                 id=payload.get("id"),
                 model=payload.get("model"),
-                usage=payload.get("usage"),
+                usage=with_cost(payload.get("usage"), read_receipt(headers)),
                 raw=payload,
             )
 
@@ -438,7 +438,8 @@ class Conifer:
             fallback_index=0,
             id=payload.get("id"),
             model=payload.get("model"),
-            usage=payload.get("usage"),
+            # A deferred result settles in band too; same bridge. See with_cost.
+            usage=with_cost(payload.get("usage"), read_receipt(headers)),
             raw=payload,
         )
 
@@ -591,7 +592,7 @@ class Conifer:
             receipt=read_receipt(headers),
             model=payload.get("model"),
             object=payload.get("object"),
-            usage=payload.get("usage"),
+            usage=with_cost(payload.get("usage"), read_receipt(headers)),
             raw=payload,
         )
 
@@ -811,6 +812,42 @@ def turn_identity(request: Any) -> str:
     two separately when your ids are not unique per turn.
     """
     return request.idempotency_key or request.request_id or f"idem-{uuid.uuid4()}"
+
+
+def with_cost(usage: Optional[Dict[str, Any]], receipt: Receipt) -> Optional[Dict[str, Any]]:
+    """Copy the settled cost from the receipt HEADERS onto ``usage`` in the BODY.
+
+    WHY THIS IS WORTH DOING. Conifer discloses cost on ``x-conifer-cost-nanousd``,
+    a response header. OpenRouter puts the same information in the response BODY
+    as ``usage.cost``. That difference is invisible until it isn't: every logging
+    pipeline, request recorder, LangChain/LiteLLM callback and JSON-dumping debug
+    statement keeps the body and discards the headers. A team migrating from
+    OpenRouter loses their cost column, and the fix is somewhere they are not
+    looking.
+
+    It matters more here than on other gateways: a normal caller's usage history
+    is not readable back (``/admin/usage/*`` is owner-only), so the receipt on
+    the turn is their ONLY record of what they spent.
+
+    Two rules keep this honest:
+
+    - ADDITIVE ONLY. If the gateway ever sends its own ``usage.cost``, that
+      value wins; this never overwrites the server's number.
+    - ABSENT STAYS ABSENT. On a stream the head carries no cost, so nothing is
+      added — a ``cost`` of 0 would read as "this turn was free".
+
+    The nanodollar integer is the authority and rides alongside as
+    ``cost_nanousd``; ``cost`` is the decimal-USD float OpenRouter-shaped code
+    already reads.
+    """
+    if receipt.cost_nano_usd is None:
+        return usage
+    existing = dict(usage or {})
+    if existing.get("cost") is not None:
+        return usage
+    existing["cost"] = receipt.cost_nano_usd / 1_000_000_000
+    existing["cost_nanousd"] = receipt.cost_nano_usd
+    return existing
 
 
 def backoff_seconds(attempt: int) -> float:

@@ -158,6 +158,7 @@ export class Conifer {
         return {
           ...payload,
           choices: (payload.choices as Completion["choices"]) ?? [],
+          usage: withCost(payload.usage as Completion["usage"], readReceipt(response.headers)),
           receipt: readReceipt(response.headers),
           fallbackIndex: index,
         } as Completion;
@@ -338,7 +339,7 @@ export class Embeddings {
         index: typeof entry.index === "number" ? entry.index : position,
         embedding: decodeVector(entry.embedding),
       })),
-      usage: payload.usage as EmbeddingsResponse["usage"],
+      usage: withCost(payload.usage as Completion["usage"], readReceipt(response.headers)),
       receipt: readReceipt(response.headers),
       raw: payload,
     };
@@ -495,6 +496,9 @@ export class JobsApi {
     return {
       ...payload,
       choices: (payload.choices as Completion["choices"]) ?? [],
+      // A deferred result settles in band too, so the same body/header bridge
+      // applies: see withCost.
+      usage: withCost(payload.usage as Completion["usage"], readReceipt(response.headers)),
       receipt: readReceipt(response.headers),
       fallbackIndex: 0,
     } as Completion;
@@ -589,6 +593,47 @@ export function toDeferredJob(payload: Record<string, unknown>): DeferredJob {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Copy the settled cost from the receipt HEADERS onto `usage` in the BODY.
+ *
+ * WHY THIS IS WORTH DOING. Conifer discloses cost on `x-conifer-cost-nanousd`,
+ * a response header. OpenRouter puts the same information in the response BODY,
+ * as `usage.cost`. That difference is invisible until it isn't: every logging
+ * pipeline, request recorder, LangChain/LiteLLM callback and JSON-dumping debug
+ * statement keeps the body and discards the headers. So a team migrating from
+ * OpenRouter loses their cost column, and the fix — reach for the header — is
+ * somewhere they are not looking.
+ *
+ * It matters more here than on other gateways: a normal caller's usage history
+ * is not readable back (`/admin/usage/*` is owner-only), so the receipt on the
+ * turn is their ONLY record of what they spent. Losing it loses it for good.
+ *
+ * Two rules keep this honest:
+ *
+ *   - ADDITIVE ONLY. If the gateway ever puts a `cost` on `usage` itself, that
+ *     value wins; this never overwrites the server's own number.
+ *   - ABSENT STAYS ABSENT. On a stream the head carries no cost, so nothing is
+ *     added — a `usage.cost` of 0 would read as "this turn was free".
+ *
+ * The nanodollar integer is the authority and is published beside it as
+ * `cost_nanousd`; `cost` is the decimal-USD float OpenRouter-shaped code
+ * already reads. The float is a convenience for that compatibility, and the
+ * receipt remains the thing to reconcile against.
+ */
+export function withCost(
+  usage: Completion["usage"],
+  receipt: { costNanoUsd?: number },
+): Completion["usage"] {
+  if (receipt.costNanoUsd === undefined) return usage;
+  const existing = usage ?? {};
+  if (existing.cost !== undefined) return usage;
+  return {
+    ...existing,
+    cost: receipt.costNanoUsd / 1_000_000_000,
+    cost_nanousd: receipt.costNanoUsd,
+  };
 }
 
 /** BYOK custody. Your provider key lives on your account; callers keep using CONIFER_API_KEY. */

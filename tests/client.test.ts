@@ -26,6 +26,7 @@ import {
   resolveBaseUrl,
   resolveChain,
   textOf,
+  withCost,
 } from "../src/index.ts";
 
 /** Record every call and answer from a scripted queue. */
@@ -675,4 +676,59 @@ test("a content filter and a no-choices body are named for what they are", () =>
   // The shape a deferred 202 used to be coerced into. Point at the fix.
   const empty = { choices: [], receipt: {}, fallbackIndex: 0 } as any;
   assert.match(emptyReason(empty) ?? "", /defer\(\)/);
+});
+
+/**
+ * The cost rides the BODY as well as the headers.
+ *
+ * OpenRouter puts the settled cost in `usage.cost`; Conifer's is on
+ * `x-conifer-cost-nanousd`. Every logging pipeline, request recorder, LangChain
+ * or LiteLLM callback and JSON-dumping debug line keeps the body and discards
+ * the headers — so a team migrating from OpenRouter loses their cost column and
+ * the fix is somewhere they are not looking.
+ *
+ * It matters more here than elsewhere: a normal caller cannot read their usage
+ * history back (`/admin/usage/*` is owner-only), so the receipt on the turn is
+ * their only record of what they spent.
+ */
+test("the settled cost is copied onto usage, matching the header exactly", () => {
+  const usage = withCost({ prompt_tokens: 8, completion_tokens: 34 }, { costNanoUsd: 1_780_000 });
+  // The integer nanodollars are the authority; `cost` is the OpenRouter-shaped
+  // decimal-USD float that existing code already reads.
+  assert.equal(usage?.cost_nanousd, 1_780_000);
+  assert.equal(usage?.cost, 0.00178);
+  // And nothing the gateway sent is disturbed.
+  assert.equal(usage?.prompt_tokens, 8);
+  assert.equal(usage?.completion_tokens, 34);
+});
+
+test("a turn with no disclosed cost gains no cost — 0 would mean 'free'", () => {
+  // The stream case. The response head is sent before the first token, so the
+  // cost headers are genuinely absent; inventing a 0 there would tell every
+  // dashboard the turn was free.
+  const usage = withCost({ prompt_tokens: 8 }, {});
+  assert.equal(usage?.cost, undefined);
+  assert.equal(usage?.cost_nanousd, undefined);
+  assert.deepEqual(usage, { prompt_tokens: 8 });
+  // Absent usage stays absent too, rather than becoming a cost-only object.
+  assert.equal(withCost(undefined, {}), undefined);
+});
+
+test("a server-sent cost always wins over the copied one", () => {
+  // Additive only. If the gateway ever puts `cost` on `usage` itself, that is
+  // the authoritative number and this must not overwrite it.
+  const usage = withCost({ cost: 0.42 }, { costNanoUsd: 1_780_000 });
+  assert.equal(usage?.cost, 0.42);
+  assert.equal(usage?.cost_nanousd, undefined, "no half-overwrite either");
+});
+
+test("a completion carries the cost in its body, not only its receipt", async () => {
+  const { fetchImpl } = stubFetch([jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS })]);
+  const answer = await new Conifer({ apiKey: "k", fetch: fetchImpl }).chat({
+    model: "m",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  // Same number, two places: whichever half of the response a tool keeps.
+  assert.equal(answer.usage?.cost_nanousd, answer.receipt.costNanoUsd);
+  assert.equal(answer.usage?.cost_nanousd, 1_250_000);
 });

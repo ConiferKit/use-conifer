@@ -75,6 +75,25 @@ for chunk in conifer.stream(ChatRequest(model="claude-haiku-4-5", messages=[...]
 print(conifer.stream_receipt.effective_model)   # routing arrives with the head
 ```
 
+The cost is on the **body too**, not only the headers:
+
+```ts
+answer.usage.cost;          // 0.00178  — decimal USD, the field OpenRouter uses
+answer.usage.cost_nanousd;  // 1780000  — the exact integer the gateway billed
+answer.receipt.costNanoUsd; // the same number; the receipt stays the authority
+```
+
+That duplication is deliberate. Conifer discloses cost on a response *header*,
+and OpenRouter puts it in `usage.cost` — so every logging pipeline, request
+recorder, LangChain/LiteLLM callback and JSON dump keeps the body and throws the
+headers away. A team migrating would lose their cost column and never see why.
+It matters more here than elsewhere: a normal caller cannot read their usage
+history back, so the receipt on the turn is their only record of what they
+spent.
+
+It is additive only — a `cost` the gateway sends itself always wins — and it is
+**absent** where the cost is unknown, because a `0` would read as "free".
+
 On a **streamed** turn the cost headers are absent in both languages, and that
 is the wire being honest rather than a gap: the response head is sent before the
 first token and the money settles after the last. Reconcile a stream from its
@@ -447,7 +466,7 @@ npm run build     # emit dist/ (ESM + .d.ts)
 npm test          # 145 tests, offline
 npm run typecheck
 
-cd python && python3 -m pytest -q   # 99 tests, offline
+cd python && python3 -m pytest -q   # 103 tests, offline
 ```
 
 Most assertions run with an injected transport: no network, no mock framework,
@@ -465,8 +484,8 @@ a deferred turn that was billed and returned nothing readable. So there is a
 second, deliberate gate:
 
 ```bash
-CONIFER_API_KEY=sk-… npm run qa:live                     # 18 checks
-CONIFER_API_KEY=sk-… node scripts/live-qa.mjs --include-deferred   # 20
+CONIFER_API_KEY=sk-… npm run qa:live                     # 19 checks
+CONIFER_API_KEY=sk-… node scripts/live-qa.mjs --include-deferred   # 21
 
 cd python && CONIFER_API_KEY=sk-… python3 scripts/live_qa.py --include-deferred
 ```
@@ -495,7 +514,7 @@ Stated here so you find out now rather than mid-migration:
 The offline suites use injected transports and no network, so they can only
 confirm what we already believed. Every claim in this README is also checked
 against production by `scripts/live-qa.mjs` and `python/scripts/live_qa.py`
-(18 TS / 17 Python checks, plus 2 more with `--include-deferred`), in both languages, plus a
+(19 TS / 18 Python checks, plus 2 more with `--include-deferred`), in both languages, plus a
 fresh-install pass that installs the packed tarball and the Python package into
 clean projects and uses them as a consumer does.
 
