@@ -50,13 +50,12 @@ export CONIFER_API_KEY='sk-conifer-…'   # mint one at https://conifer.build/co
 ```
 
 > ```bash
-> npm i conifer-sdk                 # TypeScript — live on npm
+> npm i conifer-sdk                 # TypeScript
 > pip install "conifer-sdk[tls]"    # Python — keep the [tls] extra
 > ```
 >
-> The Python package is not on PyPI yet; until it is, install it from this
-> repository with `pip install "./use-conifer/python[tls]"` after
-> `git clone https://github.com/ConiferKit/use-conifer`.
+> Both are live: `conifer-sdk` on npm and on PyPI. The npm package is
+> UNSCOPED — `@conifer/sdk` is not ours and does not exist.
 >
 > On macOS, `[tls]` is what keeps a fresh python.org venv from failing its first
 > call with `CERTIFICATE_VERIFY_FAILED`. [Why it is an extra rather than a

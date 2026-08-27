@@ -267,9 +267,8 @@ test("the README does not claim a registry that has no package", () => {
   // is the kind of small dishonesty that costs trust on the day it matters.
   // RELEASING.md makes updating it a step; this makes forgetting it visible.
   //
-  // The two ecosystems are checked SEPARATELY because they are genuinely in
-  // different states: npm has conifer-sdk as of 2026-08-27, PyPI does not.
-  // A single combined flag cannot express that and read as honest.
+  // Both ecosystems shipped 2026-08-27 (npm, then PyPI), so both halves now
+  // assert the same shape: show the install, do not deny the package exists.
   const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
 
   const claimsNotOnNpm = /not on npm/i.test(readme);
@@ -282,7 +281,7 @@ test("the README does not claim a registry that has no package", () => {
   const claimsNotOnPypi = /not on PyPI/i.test(readme);
   const showsPypiInstall = /pip install "?conifer-sdk/.test(readme);
   assert.ok(
-    claimsNotOnPypi || !showsPypiInstall,
-    "README shows a PyPI install but does not say the package is not on PyPI yet. If it HAS been published, delete this half of the assertion.",
+    claimsNotOnPypi !== showsPypiInstall,
+    "README both claims not-on-PyPI AND shows a PyPI install (or neither).",
   );
 });

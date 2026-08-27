@@ -1,8 +1,8 @@
 # Releasing
 
-The TypeScript package is **live on npm as `conifer-sdk`** (0.1.0, published
-2026-08-27). The Python package is **not on PyPI yet**; `conifer-sdk` 404s there
-and the README says so.
+Both packages are **live** as `conifer-sdk` (0.1.0, published 2026-08-27): npm
+and PyPI. Verified from clean installs on both: import by package name, a real
+gateway call, and a real cost receipt.
 
 NOTE ON THE NAME. It ships UNSCOPED. `@conifer/sdk` was the intent and the
 `conifer` org exists with `conifer_v11` as owner, but every publish into the
