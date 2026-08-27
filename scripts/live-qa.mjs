@@ -138,6 +138,22 @@ await check("chat() returns an answer AND its exact settled cost", async () => {
   return `${answer.receipt.costUsd} USD, ${answer.receipt.effectiveModel}`;
 });
 
+await check("the settled cost rides the BODY, not only the headers", async () => {
+  // A logging pipeline that keeps bodies and discards headers — which is most
+  // of them — must still see what the turn cost. This is the field OpenRouter
+  // puts cost in, so a migrating team's cost column keeps working.
+  const answer = await conifer.chat({
+    model: chatModel,
+    messages: [{ role: "user", content: "hi" }],
+    maxTokens: 200,
+  });
+  if (answer.usage?.cost_nanousd === undefined) {
+    throw new Error("no cost on usage — a body-only logger would see nothing");
+  }
+  eq(answer.usage.cost_nanousd, answer.receipt.costNanoUsd, "body vs header cost");
+  return `${answer.usage.cost} USD on the body, matching the receipt`;
+});
+
 await check("the caller's requestId is the id that comes back", async () => {
   // Was inert until 2026-08-27: the gateway reads `idempotency-key` first, and
   // the SDK always sends one, so `x-request-id` was never consulted.

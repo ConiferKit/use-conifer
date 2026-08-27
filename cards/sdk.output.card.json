@@ -6,7 +6,7 @@
     "id": "string — the upstream completion id",
     "model": "string — the model the gateway actually served (the effective spelling)",
     "choices": "the OpenAI chat wire, verbatim. Vendor extras (reasoning, reasoning_content) are NOT stripped.",
-    "usage": "the OpenAI usage object, verbatim, including prompt_tokens_details.cached_tokens / cache_write_tokens when the upstream reported them",
+    "usage": "the OpenAI usage object, verbatim, including prompt_tokens_details.cached_tokens / cache_write_tokens when the upstream reported them. PLUS `cost` (decimal USD, the field OpenRouter uses) and `cost_nanousd` (the exact integer billed), copied from the receipt HEADERS onto the body — because every logging pipeline keeps bodies and discards headers, so a migrating team would otherwise lose their cost column silently. ADDITIVE ONLY (a server-sent `cost` wins) and ABSENT where cost is unknown, e.g. on a stream, since 0 would read as 'free'. `receipt.costNanoUsd` remains the authority.",
     "receipt": {
       "note": "The x-conifer-* disclosure headers, parsed. Absent fields are ABSENT — never zero-filled, because the gateway omits a receipt it cannot guarantee.",
       "requestedModel": "x-conifer-requested-model",

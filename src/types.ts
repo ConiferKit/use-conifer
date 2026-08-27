@@ -73,6 +73,18 @@ export interface Usage {
     [extra: string]: unknown;
   };
   completion_tokens_details?: { reasoning_tokens?: number; [extra: string]: unknown };
+  /**
+   * The settled cost of this turn in decimal USD, copied onto the BODY from the
+   * receipt headers. See `withCost`: OpenRouter puts cost here, and every
+   * logging pipeline keeps bodies while discarding headers, so a migrating team
+   * would otherwise lose their cost column without noticing.
+   *
+   * ABSENT on a stream, where the head carries no cost — a 0 would read as
+   * "free". `receipt.costNanoUsd` remains the authority.
+   */
+  cost?: number;
+  /** The same figure as the exact integer nanodollars the gateway billed. */
+  cost_nanousd?: number;
   [extra: string]: unknown;
 }
 

@@ -155,6 +155,26 @@ def _request_id():
     return mine
 
 
+def _cost_on_body():
+    # A logging pipeline that keeps bodies and discards headers — which is most
+    # of them — must still see what the turn cost. This is the field OpenRouter
+    # puts cost in, so a migrating team's cost column keeps working.
+    answer = conifer.chat(
+        ChatRequest(
+            model=state["chat"],
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=200,
+        )
+    )
+    usage = answer.usage or {}
+    if usage.get("cost_nanousd") is None:
+        raise AssertionError("no cost on usage — a body-only logger would see nothing")
+    eq(usage["cost_nanousd"], answer.receipt.cost_nano_usd, "body vs header cost")
+    return f"{usage['cost']} USD on the body, matching the receipt"
+
+
+check("the settled cost rides the BODY, not only the headers", _cost_on_body)
+
 check("the caller's request_id is the id that comes back", _request_id)
 
 
