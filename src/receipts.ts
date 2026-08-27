@@ -7,7 +7,7 @@
 // moment someone points their existing client at Conifer (which is the whole
 // point of being OpenAI-compatible), the differentiator becomes invisible.
 //
-// The old answer was "rewrite against @conifer/sdk". That is a bad trade to ask
+// The old answer was "rewrite against conifer-sdk". That is a bad trade to ask
 // for on day one, and it is not even necessary: every one of those clients
 // accepts an injected `fetch`. So this module hands them one that reads the
 // receipt on the way past and gives it to you, leaving the response otherwise

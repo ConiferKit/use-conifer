@@ -49,21 +49,21 @@ minute. Same session, nothing restarted, no frame sped up.
 export CONIFER_API_KEY='sk-conifer-…'   # mint one at https://conifer.build/console#/keys
 ```
 
-> **Not yet on a registry.** `@conifer/sdk` is not on npm and `conifer-sdk` is
-> not on PyPI yet, so install from this repository:
->
 > ```bash
-> git clone https://github.com/ConiferKit/use-conifer
-> npm i ./use-conifer                      # TypeScript
-> pip install "./use-conifer/python[tls]"  # Python — keep the [tls] extra
+> npm i conifer-sdk                 # TypeScript — live on npm
+> pip install "conifer-sdk[tls]"    # Python — keep the [tls] extra
 > ```
+>
+> The Python package is not on PyPI yet; until it is, install it from this
+> repository with `pip install "./use-conifer/python[tls]"` after
+> `git clone https://github.com/ConiferKit/use-conifer`.
 >
 > On macOS, `[tls]` is what keeps a fresh python.org venv from failing its first
 > call with `CERTIFICATE_VERIFY_FAILED`. [Why it is an extra rather than a
 > dependency](#python-and-tls).
 
 ```ts
-import { Conifer, textOf } from "@conifer/sdk";
+import { Conifer, textOf } from "conifer-sdk";
 
 const conifer = new Conifer();
 const answer = await conifer.chat({
@@ -253,7 +253,7 @@ on the way past:
 
 ```ts
 import OpenAI from "openai";
-import { ReceiptCollector } from "@conifer/sdk";
+import { ReceiptCollector } from "conifer-sdk";
 
 const receipts = new ReceiptCollector();
 const openai = new OpenAI({
@@ -355,7 +355,7 @@ The rest is the part that usually goes wrong quietly. **The shims refuse what
 Conifer cannot honor, and name the replacement:**
 
 ```ts
-import { fromOpenRouter } from "@conifer/sdk";
+import { fromOpenRouter } from "conifer-sdk";
 
 fromOpenRouter({ model: "anthropic/claude-opus-5", messages, provider: { order: ["anthropic"] } });
 // ConiferPortabilityError: OpenRouter's `provider` preferences pin a serving host.
@@ -412,10 +412,10 @@ cd use-conifer && npm install && npm run build
 }
 ```
 
-Once `@conifer/sdk` is published this becomes
-`"command": "npx", "args": ["-y", "@conifer/sdk", "conifer-mcp"]` and the build
-step goes away. It is written as a path today because the npx form would 404
-until the package is on the registry.
+The npx form is now the recommended config:
+`"command": "npx", "args": ["-y", "conifer-sdk", "conifer-mcp"]`, which removes
+the build step. The path form above still works for local development against
+an unpublished checkout.
 
 Six tools, each one real gateway call:
 
@@ -432,7 +432,7 @@ what its last call cost can be told to spend less. One that cannot, cannot.
 ### A Slack bot that routes by cost
 
 ```ts
-import { Conifer } from "@conifer/sdk";
+import { Conifer } from "conifer-sdk";
 
 const conifer = new Conifer({ defaultHeaders: { "x-conifer-client": "slack-bot" } });
 

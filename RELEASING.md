@@ -1,8 +1,20 @@
 # Releasing
 
-The SDK is **not on npm or PyPI yet**. Both names are free as of 2026-08-27
-(`@conifer/sdk` 404s, the `@conifer` npm scope is unclaimed, `conifer-sdk` 404s
-on PyPI), and the README is honest that installation is from source.
+The TypeScript package is **live on npm as `conifer-sdk`** (0.1.0, published
+2026-08-27). The Python package is **not on PyPI yet**; `conifer-sdk` 404s there
+and the README says so.
+
+NOTE ON THE NAME. It ships UNSCOPED. `@conifer/sdk` was the intent and the
+`conifer` org exists with `conifer_v11` as owner, but every publish into the
+scope 404s on the PUT — the org has ZERO teams (`GET /-/org/conifer/team`
+returns `[]`, and `npm team ls conifer:developers` says "Team not found"), and
+npm grants package-create rights through a team, so even the owner cannot
+create the first package in the scope. That was reproduced against a granular
+token, a scope-granted token, and a full browser-2FA login: the 2FA succeeded
+and the PUT still 404'd, which is npm reporting a permission failure as a 404
+so it does not leak private package names. Unscoped `conifer-sdk` sidesteps the
+org entirely and matches the PyPI name. If the org is ever repaired, publish
+`@conifer/sdk` as an alias that re-exports; do not rename this package.
 
 Publishing is deliberately a human action: it is public, irreversible per
 version, and npm/PyPI both refuse to reuse a version number even after an

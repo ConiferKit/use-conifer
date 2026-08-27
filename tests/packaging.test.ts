@@ -245,7 +245,7 @@ test("the Python package ships the README it declares", () => {
 test("the two packages carry the same version", () => {
   // `package.json` and `pyproject.toml` have no shared source of truth, so a
   // mismatched pair ships silently — and then `pip install conifer-sdk==0.2.0`
-  // and `npm i @conifer/sdk@0.2.0` are different software under one name,
+  // and `npm i conifer-sdk@0.2.0` are different software under one name,
   // which is the sort of thing nobody debugs quickly.
   const npmVersion = JSON.parse(
     readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
@@ -263,15 +263,26 @@ test("the two packages carry the same version", () => {
 });
 
 test("the README does not claim a registry that has no package", () => {
-  // The install block currently says, correctly, that neither registry has
-  // this package. Leaving that text after publishing — or removing it before —
+  // Leaving "not on a registry" in after publishing — or removing it before —
   // is the kind of small dishonesty that costs trust on the day it matters.
   // RELEASING.md makes updating it a step; this makes forgetting it visible.
+  //
+  // The two ecosystems are checked SEPARATELY because they are genuinely in
+  // different states: npm has conifer-sdk as of 2026-08-27, PyPI does not.
+  // A single combined flag cannot express that and read as honest.
   const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
-  const claimsNotPublished = /not on npm/i.test(readme);
-  const showsRegistryInstall = /npm i @conifer\/sdk(?!\.)|pip install conifer-sdk\b/.test(readme);
+
+  const claimsNotOnNpm = /not on npm/i.test(readme);
+  const showsNpmInstall = /npm i (conifer-sdk|@conifer\/sdk)(?!\.)/.test(readme);
   assert.ok(
-    claimsNotPublished !== showsRegistryInstall,
-    "the README both claims the package is unpublished AND shows a registry install (or neither). Pick one — see RELEASING.md.",
+    claimsNotOnNpm !== showsNpmInstall,
+    "README both claims not-on-npm AND shows an npm registry install (or neither).",
+  );
+
+  const claimsNotOnPypi = /not on PyPI/i.test(readme);
+  const showsPypiInstall = /pip install "?conifer-sdk/.test(readme);
+  assert.ok(
+    claimsNotOnPypi || !showsPypiInstall,
+    "README shows a PyPI install but does not say the package is not on PyPI yet. If it HAS been published, delete this half of the assertion.",
   );
 });
