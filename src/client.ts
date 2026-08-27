@@ -2,25 +2,39 @@
 // cards/sdk.output.card.json, and touches the network only through Transport.
 
 import {
+  ConiferConflictError,
   ConiferError,
   ConiferPortabilityError,
+  ConiferTimeoutError,
 } from "./errors.ts";
 import { nanoUsdToUsdString, readReceipt, type Receipt } from "./receipt.ts";
 import { Transport, type FetchLike } from "./transport.ts";
-import type {
-  Balance,
-  CatalogModel,
-  ChatRequest,
-  Completion,
-  CompletionStream,
-  EmbeddingsRequest,
-  EmbeddingsResponse,
-  StreamChunk,
+import {
+  isTerminalJob,
+  type Balance,
+  type CatalogModel,
+  type ChatRequest,
+  type Completion,
+  type CompletionStream,
+  type DeferredJob,
+  type EmbeddingsRequest,
+  type EmbeddingsResponse,
+  type StreamChunk,
 } from "./types.ts";
 
 export const DEFAULT_BASE_URL = "https://api.conifer.build";
 /** Matches the gateway's own edge silent-cut, so we never quit on a live turn. */
 export const DEFAULT_TIMEOUT_MS = 300_000;
+/**
+ * The narrowest completion window the gateway will accept a deferred job for.
+ *
+ * Not a client-side convention: the gateway refuses anything smaller with
+ * `defer requires a completion window of at least 86400 seconds` (measured
+ * live 2026-08-27). Deferred work rides a provider batch, and a batch cannot
+ * promise a short turnaround — so a narrow window is refused rather than
+ * quietly served synchronously at a different price.
+ */
+export const MIN_DEFER_WINDOW_SECONDS = 86_400;
 
 export interface ConiferOptions {
   apiKey?: string;
@@ -67,6 +81,8 @@ export class Conifer {
   readonly keys: KeysApi;
   /** `POST /v1/embeddings`. Same receipts, same money ceiling as chat. */
   readonly embeddings: Embeddings;
+  /** The deferred-job read/cancel plane. Submit with `defer()`. */
+  readonly jobs: JobsApi;
 
   constructor(options: ConiferOptions = {}) {
     const env = (globalThis as { process?: { env?: Record<string, string | undefined> } })
@@ -101,6 +117,7 @@ export class Conifer {
     });
     this.keys = new KeysApi(this.transport);
     this.embeddings = new Embeddings(this.transport);
+    this.jobs = new JobsApi(this.transport);
   }
 
   /**
@@ -108,6 +125,18 @@ export class Conifer {
    * integer nanodollar cost of the call you just made.
    */
   async chat(request: ChatRequest): Promise<Completion> {
+    if (request.defer === true) {
+      // A deferred turn answers 202 with a JOB ENVELOPE, not a completion.
+      // Coercing it into `Completion` is exactly what this SDK used to do, and
+      // the result was a turn that had been ACCEPTED AND DEBITED coming back
+      // as `choices: []` with `textOf() === undefined` — indistinguishable, at
+      // the call site, from a model that answered with nothing. Send people to
+      // the method that returns the job.
+      throw new ConiferPortabilityError(
+        "defer",
+        "a deferred turn is accepted with 202 and a job id, not a completion — `chat()` has nothing to return. Call `defer()` for the job, then `jobs.wait(job.jobId)` (or `jobs.status`/`jobs.result`) to collect it.",
+      );
+    }
     const chain = resolveChain(request);
     let lastError: ConiferError | undefined;
     // One idempotency key for the LOGICAL turn: every transport retry of a
@@ -143,6 +172,44 @@ export class Conifer {
     }
     /* c8 ignore next */
     throw lastError ?? new ConiferError({ status: 0, type: "empty_chain", message: "no model to call" });
+  }
+
+  /**
+   * Submit a turn as a DEFERRED JOB, and get the job back.
+   *
+   * The trade is explicit: you give up an immediate answer, and in exchange the
+   * turn rides a provider batch. It is the right shape for work that is not
+   * interactive — an overnight re-index, a bulk classification, an eval sweep.
+   *
+   * The gateway requires a completion window of at least 24 hours (86400s), and
+   * refuses a narrower one rather than quietly serving it synchronously; that
+   * floor is applied here as the default so the common call just works.
+   *
+   * The job is ACCEPTED AND DEBITED at submission. Collect it with
+   * `jobs.wait(job.jobId)`, or poll `jobs.status` and call `jobs.result`
+   * yourself.
+   */
+  async defer(request: ChatRequest): Promise<DeferredJob> {
+    if (request.fallbackModels?.length) {
+      // A chain is a sequence of SEPARATE requests decided by watching the
+      // first one fail. A deferred job's failure is discovered hours later,
+      // by which time "fall back" would mean submitting a second job the
+      // caller never asked for.
+      throw new ConiferPortabilityError(
+        "fallbackModels+defer",
+        "a client-side fallback chain cannot be applied to a deferred job: the outcome is not known until the job ends. Submit one job, and handle a `failed` status yourself.",
+      );
+    }
+    const deadlineSeconds = request.deadlineSeconds ?? MIN_DEFER_WINDOW_SECONDS;
+    const deferred: ChatRequest = { ...request, defer: true, deadlineSeconds };
+    const { data } = await this.transport.request({
+      method: "POST",
+      path: "/v1/chat/completions",
+      body: chatBody(deferred, false),
+      headers: chatHeaders(deferred, turnIdentity(request)),
+      signal: request.signal,
+    });
+    return toDeferredJob((data ?? {}) as Record<string, unknown>);
   }
 
   /** The same turn, streamed. The receipt resolves when the stream ends. */
@@ -379,6 +446,149 @@ export function turnIdentity(request: {
   requestId?: string;
 }): string {
   return request.idempotencyKey ?? request.requestId ?? randomId("idem");
+}
+
+/**
+ * The deferred-job plane: `conifer.jobs.*`.
+ *
+ * The accept arm rides `POST /v1/chat/completions` with `defer: true` (see
+ * {@link Conifer.defer}); this class owns the read/cancel half.
+ *
+ * TENANCY, worth knowing before you write a retry loop: a job id belonging to
+ * another account and a job id that never existed are the SAME 404. That is
+ * deliberate — an existence oracle would leak other people's traffic — so a
+ * 404 here means "not yours or not real", never "not yet".
+ */
+export class JobsApi {
+  private readonly transport: Transport;
+
+  constructor(transport: Transport) {
+    this.transport = transport;
+  }
+
+  /** `GET /v1/deferred/{id}`. Status only; no content, no cost. */
+  async status(jobId: string): Promise<DeferredJob> {
+    const { data } = await this.transport.request({
+      method: "GET",
+      path: `/v1/deferred/${encodeURIComponent(jobId)}`,
+    });
+    return toDeferredJob((data ?? {}) as Record<string, unknown>);
+  }
+
+  /**
+   * `GET /v1/deferred/{id}/result` — the completion, with its settled receipt.
+   *
+   * Throws `ConiferConflictError` while the job is still running, and ALSO for
+   * every terminal state that has no result (cancelled, failed, expired). The
+   * message says which, because the money differs: a failed or expired job was
+   * refunded, while a result that aged out unfetched was charged and is gone.
+   *
+   * Fetching is not free of consequence: it moves the job to `fetched` and
+   * starts the retention grace, after which the body is deleted.
+   */
+  async result(jobId: string): Promise<Completion> {
+    const { data, response } = await this.transport.request({
+      method: "GET",
+      path: `/v1/deferred/${encodeURIComponent(jobId)}/result`,
+    });
+    const payload = (data ?? {}) as Record<string, unknown>;
+    return {
+      ...payload,
+      choices: (payload.choices as Completion["choices"]) ?? [],
+      receipt: readReceipt(response.headers),
+      fallbackIndex: 0,
+    } as Completion;
+  }
+
+  /** `POST /v1/deferred/{id}/cancel`. Refunded per the gateway's cancel rules. */
+  async cancel(jobId: string): Promise<DeferredJob> {
+    const { data } = await this.transport.request({
+      method: "POST",
+      path: `/v1/deferred/${encodeURIComponent(jobId)}/cancel`,
+    });
+    return toDeferredJob((data ?? {}) as Record<string, unknown>);
+  }
+
+  /**
+   * Poll until the job ends, then return its result.
+   *
+   * A convenience over `status`/`result`, written here so every caller does not
+   * re-derive the same three rules and get one of them wrong:
+   *
+   *   1. STOP ON TERMINAL. `expired`, `cancelled` and `failed` never change, so
+   *      polling one forever is a loop that cannot exit. Those raise rather
+   *      than spin.
+   *   2. BACK OFF. A deferred job's whole premise is a long window (the gateway
+   *      requires at least 24h), so a tight poll is thousands of pointless
+   *      requests. The interval doubles from `pollMs` up to `maxPollMs`.
+   *   3. RESPECT THE CALLER'S DEADLINE. `signal` aborts the wait without
+   *      cancelling the job — the work continues and can still be fetched.
+   *
+   * This does NOT cancel on timeout. Cancelling work the caller paid for
+   * because a client-side clock ran out is not a decision an SDK should make
+   * silently; call `cancel()` if that is what you want.
+   */
+  async wait(
+    jobId: string,
+    options: {
+      pollMs?: number;
+      maxPollMs?: number;
+      timeoutMs?: number;
+      signal?: AbortSignal;
+      onPoll?: (job: DeferredJob) => void;
+    } = {},
+  ): Promise<Completion> {
+    const started = Date.now();
+    let interval = options.pollMs ?? 2_000;
+    const maxInterval = options.maxPollMs ?? 30_000;
+
+    for (;;) {
+      const job = await this.status(jobId);
+      options.onPoll?.(job);
+      if (job.status === "ended" || job.status === "fetched") {
+        return this.result(jobId);
+      }
+      if (isTerminalJob(job.status)) {
+        // Terminal and resultless. Raising with the gateway's own vocabulary
+        // beats returning an empty completion the caller has to interpret.
+        throw new ConiferConflictError({
+          status: 409,
+          type: "request_in_progress",
+          message: `deferred job ${jobId} ended as "${job.status}" and has no result. Cancelled, failed and expired jobs are refunded for the unfinished work.`,
+          body: job.raw,
+        });
+      }
+      if (options.signal?.aborted) {
+        throw new ConiferTimeoutError(
+          `stopped waiting on deferred job ${jobId}; it is still running and can still be fetched`,
+        );
+      }
+      if (options.timeoutMs !== undefined && Date.now() - started >= options.timeoutMs) {
+        throw new ConiferTimeoutError(
+          `deferred job ${jobId} was still "${job.status}" after ${options.timeoutMs}ms. The job was NOT cancelled: it is still running, and \`jobs.result("${jobId}")\` will return it once it ends.`,
+        );
+      }
+      await sleep(interval);
+      interval = Math.min(interval * 2, maxInterval);
+    }
+  }
+}
+
+/** The 202/status envelope, parsed. */
+export function toDeferredJob(payload: Record<string, unknown>): DeferredJob {
+  return {
+    jobId: String(payload.job_id ?? ""),
+    status: (payload.status as string) ?? "",
+    deadlineUtc: payload.deadline_utc as number | undefined,
+    createdUtc: payload.created_utc as number | undefined,
+    model: payload.model as string | undefined,
+    pollUrl: payload.poll_url as string | undefined,
+    raw: payload,
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** BYOK custody. Your provider key lives on your account; callers keep using CONIFER_API_KEY. */

@@ -76,8 +76,8 @@
       "note": "ADVISORY. Only widens how a turn may be served (flex tier). Never changes auth, model, or price."
     },
     "defer": {
-      "wire": "body.defer = \"allow\"",
-      "note": "Opts a wide-window turn into the 202 deferred-job protocol. An explicit marker that cannot be honored is a 400, never a silent sync serve."
+      "wire": "body.defer = \"allow\" + header x-conifer-defer",
+      "note": "Submits the turn as a DEFERRED JOB. Answered with 202 and a JOB ENVELOPE (job_id/status/deadline_utc/poll_url) — NOT a completion, which is why `chat()` REFUSES this flag and `defer()` exists to return the job. The gateway requires a completion window of at least 86400s and refuses a narrower one rather than serving it synchronously, so `defer()` defaults to that floor. The job is accepted AND DEBITED at submission."
     },
     "venue": {
       "wire": "header x-conifer-venue",
@@ -146,5 +146,13 @@
     "CONIFER_API_KEY": "the credential",
     "CONIFER_BASE_URL": "override the gateway origin (staging, a local gateway)",
     "OPENAI_BASE_URL": "read ONLY as a fallback when CONIFER_BASE_URL is unset and it already points at a Conifer host, so a drop-in env survives"
+  },
+  "deferred_jobs": {
+    "note": "The read/cancel plane for deferred work: `conifer.jobs.*` (TS) / `job_status`/`job_result`/`job_cancel`/`jobs_wait` (Python). The accept arm rides POST /v1/chat/completions.",
+    "GET /v1/deferred/{id}": "status only — no content, no cost. TENANCY: a foreign job id and a nonexistent one are the SAME 404, so a 404 means 'not yours or not real', never 'not yet'.",
+    "GET /v1/deferred/{id}/result": "the completion with its settled receipt. 409 while running, AND for every terminal state with no result (cancelled/failed/expired — all refunded for unfinished work). Fetching moves the job to `fetched` and starts the retention grace, after which the body is deleted.",
+    "POST /v1/deferred/{id}/cancel": "refunded per the gateway's cancel rules.",
+    "states": "queued → submitted → ended → fetched, plus expired/cancelled/failed. TERMINAL = fetched/expired/cancelled/failed. `ended` is deliberately NOT terminal: it is where the result becomes fetchable, and treating it as an end would skip collecting it.",
+    "wait()": "polls with exponential backoff, STOPS on a terminal state (a loop keyed only on 'is it ended' spins forever on a cancelled job), and on timeout raises WITHOUT cancelling — killing work the caller paid for on a client-side clock is not the SDK's decision."
   }
 }

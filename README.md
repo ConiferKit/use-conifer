@@ -115,6 +115,42 @@ Three things worth knowing, because they are decisions rather than defaults:
 `conifer.cheapestFor(["embeddings"])` picks the cheapest embedding seat the
 catalog actually declares.
 
+## Deferred jobs
+
+For work that is not interactive — an overnight re-index, a bulk
+classification, an eval sweep — submit the turn as a job and collect it later.
+
+```ts
+const job = await conifer.defer({
+  model: "claude-fable-5",
+  messages: [{ role: "user", content: "classify these 400 tickets…" }],
+});
+console.log(job.jobId, job.status);          // "job-gw-…", "queued"
+
+const answer = await conifer.jobs.wait(job.jobId);
+console.log(textOf(answer), answer.receipt.costUsd);
+```
+
+```python
+job = conifer.defer(ChatRequest(model="claude-fable-5", messages=[...]))
+answer = conifer.jobs_wait(job.job_id)       # or job_status / job_result
+```
+
+- **`chat({ defer: true })` throws, on purpose.** A deferred turn is answered
+  with 202 and a job envelope, not a completion — so `chat()` has nothing to
+  return. The previous behavior was worse than an error: the turn was accepted
+  *and debited*, and came back as `choices: []`, indistinguishable at the call
+  site from a model that answered with nothing.
+- **The window floor is the gateway's, not ours.** Deferred work rides a
+  provider batch, so the gateway requires a completion window of at least 24h
+  and refuses anything narrower rather than quietly serving it synchronously at
+  a different price. `defer()` defaults to that floor so the common call works.
+- **`wait()` stops on terminal states.** `cancelled`, `failed` and `expired`
+  never change; a poll loop keyed only on "is it ended yet" spins until the
+  process dies. It also backs off exponentially, and on timeout it raises
+  *without cancelling* — killing work you already paid for because a
+  client-side clock ran out is not a decision an SDK should make for you.
+
 ## Why this exists when the OpenAI SDK already works
 
 It still does, and it remains the right choice for a plain drop-in. This package

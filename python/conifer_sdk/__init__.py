@@ -16,7 +16,10 @@ from .client import (
     Conifer,
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT_SECONDS,
+    MIN_DEFER_WINDOW_SECONDS,
     decode_vector,
+    to_deferred_job,
+    turn_identity,
     parse_frame,
     resolve_base_url,
 )
@@ -49,6 +52,9 @@ from .portability import (
 )
 from .types import (
     Balance,
+    DeferredJob,
+    TERMINAL_JOB_STATUSES,
+    is_terminal_job,
     CatalogModel,
     ChatRequest,
     Completion,
@@ -65,6 +71,12 @@ __all__ = [
     "resolve_base_url",
     "parse_frame",
     "decode_vector",
+    "MIN_DEFER_WINDOW_SECONDS",
+    "DeferredJob",
+    "TERMINAL_JOB_STATUSES",
+    "is_terminal_job",
+    "to_deferred_job",
+    "turn_identity",
     "Embedding",
     "EmbeddingsRequest",
     "EmbeddingsResponse",

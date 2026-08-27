@@ -268,9 +268,8 @@ _VERCEL_UNSUPPORTED: Dict[str, str] = {
         "to; send content in the request itself."
     ),
     "batches": (
-        "Conifer serves no Batches API. The nearest equivalent is the deferred-job "
-        "protocol: set defer=True with a wide deadline_seconds on a chat turn, and "
-        "poll the job."
+        "Conifer serves no Batches API. The nearest equivalent is a deferred job: "
+        "defer() submits the turn against a >=24h window and jobs_wait() collects it."
     ),
 }
 

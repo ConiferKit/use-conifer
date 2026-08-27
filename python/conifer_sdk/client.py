@@ -19,6 +19,7 @@ import uuid
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from .errors import (
+    ConiferConflictError,
     ConiferConnectionError,
     ConiferError,
     ConiferPortabilityError,
@@ -28,18 +29,28 @@ from .errors import (
 from .receipt import Receipt, nano_usd_to_usd_string, read_receipt
 from .types import (
     Balance,
+    DeferredJob,
     CatalogModel,
     ChatRequest,
     Completion,
     Embedding,
     EmbeddingsRequest,
     EmbeddingsResponse,
+    is_terminal_job,
 )
 
 DEFAULT_BASE_URL = "https://api.conifer.build"
 #: Matches the gateway's own 300s edge silent-cut, so the client never gives up
 #: on a turn the gateway is still serving (and still going to bill).
 DEFAULT_TIMEOUT_SECONDS = 300.0
+#: The narrowest completion window the gateway accepts a deferred job for.
+#:
+#: Not a client-side convention: the gateway refuses anything smaller with
+#: "defer requires a completion window of at least 86400 seconds" (measured
+#: live 2026-08-27). Deferred work rides a provider batch, and a batch cannot
+#: promise a short turnaround — so a narrow window is refused rather than
+#: quietly served synchronously at a different price.
+MIN_DEFER_WINDOW_SECONDS = 86_400
 
 _RETRYABLE_STATUS = {429, 502, 503, 504}
 
@@ -285,6 +296,18 @@ class Conifer:
 
     def chat(self, request: ChatRequest) -> Completion:
         """One chat turn, returned with the settled cost of that exact call."""
+        if request.defer:
+            # A deferred turn answers 202 with a JOB ENVELOPE, not a
+            # completion. Coercing it into Completion is exactly what this SDK
+            # used to do, and the result was a turn that had been ACCEPTED AND
+            # DEBITED coming back as choices=[] — indistinguishable, at the
+            # call site, from a model that answered with nothing.
+            raise ConiferPortabilityError(
+                "defer",
+                "a deferred turn is accepted with 202 and a job id, not a completion \u2014 "
+                "chat() has nothing to return. Call defer() for the job, then "
+                "jobs_wait(job.job_id) (or job_status/job_result) to collect it.",
+            )
         chain = resolve_chain(request)
         idempotency_key = turn_identity(request)
         last: Optional[ConiferError] = None
@@ -321,7 +344,152 @@ class Conifer:
 
         raise last or ConiferError(status=0, type="empty_chain", message="no model to call")
 
-    # -------------------------------------------------------------- catalog
+    # -------------------------------------------------------- deferred jobs
+
+    def defer(self, request: ChatRequest) -> DeferredJob:
+        """Submit a turn as a DEFERRED JOB, and get the job back.
+
+        The trade is explicit: you give up an immediate answer, and in exchange
+        the turn rides a provider batch. It is the right shape for work that is
+        not interactive — an overnight re-index, a bulk classification, an eval
+        sweep.
+
+        The gateway requires a completion window of at least 24 hours and
+        refuses a narrower one rather than quietly serving it synchronously, so
+        that floor is the default here and the common call just works.
+
+        The job is ACCEPTED AND DEBITED at submission. Collect it with
+        :meth:`jobs_wait`, or poll :meth:`job_status` and call
+        :meth:`job_result` yourself.
+        """
+        if request.fallback_models:
+            # A chain is a sequence of SEPARATE requests decided by watching
+            # the first one fail. A deferred job's failure is discovered hours
+            # later, by which time "fall back" would mean submitting a second
+            # job the caller never asked for.
+            raise ConiferPortabilityError(
+                "fallback_models+defer",
+                "a client-side fallback chain cannot be applied to a deferred job: the "
+                "outcome is not known until the job ends. Submit one job, and handle a "
+                "`failed` status yourself.",
+            )
+        deferred = ChatRequest(
+            **{
+                **request.__dict__,
+                "defer": True,
+                "deadline_seconds": request.deadline_seconds or MIN_DEFER_WINDOW_SECONDS,
+            }
+        )
+        data, _ = self.request(
+            "POST",
+            "/v1/chat/completions",
+            chat_body(deferred),
+            chat_headers(deferred, turn_identity(request)),
+        )
+        return to_deferred_job(data or {})
+
+    def job_status(self, job_id: str) -> DeferredJob:
+        """``GET /v1/deferred/{id}``. Status only; no content, no cost.
+
+        TENANCY: a job id belonging to another account and one that never
+        existed are the SAME 404 — an existence oracle would leak other
+        people's traffic — so a 404 means "not yours or not real", never
+        "not yet".
+        """
+        from urllib.parse import quote
+
+        data, _ = self.request("GET", f"/v1/deferred/{quote(job_id, safe='')}")
+        return to_deferred_job(data or {})
+
+    def job_result(self, job_id: str) -> Completion:
+        """The completion, with its settled receipt.
+
+        Raises :class:`ConiferConflictError` while the job is still running,
+        and ALSO for every terminal state that has no result (cancelled,
+        failed, expired). The message says which, because the money differs: a
+        failed or expired job was refunded, while a result that aged out
+        unfetched was charged and is gone.
+
+        Fetching is not free of consequence: it moves the job to ``fetched``
+        and starts the retention grace, after which the body is deleted.
+        """
+        from urllib.parse import quote
+
+        data, headers = self.request("GET", f"/v1/deferred/{quote(job_id, safe='')}/result")
+        payload = data if isinstance(data, dict) else {}
+        return Completion(
+            choices=payload.get("choices") or [],
+            receipt=read_receipt(headers),
+            fallback_index=0,
+            id=payload.get("id"),
+            model=payload.get("model"),
+            usage=payload.get("usage"),
+            raw=payload,
+        )
+
+    def job_cancel(self, job_id: str) -> DeferredJob:
+        """Cancel a job. Refunded per the gateway's cancel rules."""
+        from urllib.parse import quote
+
+        data, _ = self.request("POST", f"/v1/deferred/{quote(job_id, safe='')}/cancel")
+        return to_deferred_job(data or {})
+
+    def jobs_wait(
+        self,
+        job_id: str,
+        poll_seconds: float = 2.0,
+        max_poll_seconds: float = 30.0,
+        timeout_seconds: Optional[float] = None,
+        on_poll: Optional[Callable[[DeferredJob], None]] = None,
+    ) -> Completion:
+        """Poll until the job ends, then return its result.
+
+        Written here so every caller does not re-derive the same three rules
+        and get one of them wrong:
+
+        1. STOP ON TERMINAL. ``expired``, ``cancelled`` and ``failed`` never
+           change, so polling one forever is a loop that cannot exit. Those
+           raise rather than spin.
+        2. BACK OFF. A deferred job's whole premise is a long window (the
+           gateway requires at least 24h), so a tight poll is thousands of
+           pointless requests. The interval doubles up to ``max_poll_seconds``.
+        3. RESPECT THE CALLER'S DEADLINE, without touching the job.
+
+        This does NOT cancel on timeout. Cancelling work the caller paid for
+        because a client-side clock ran out is not a decision an SDK should
+        make silently; call :meth:`job_cancel` if that is what you want.
+        """
+        started = time.monotonic()
+        interval = poll_seconds
+        while True:
+            job = self.job_status(job_id)
+            if on_poll is not None:
+                on_poll(job)
+            if job.status in ("ended", "fetched"):
+                return self.job_result(job_id)
+            if is_terminal_job(job.status):
+                # Terminal and resultless. Raising with the gateway's own
+                # vocabulary beats returning an empty completion.
+                raise ConiferConflictError(
+                    status=409,
+                    type="request_in_progress",
+                    message=(
+                        f'deferred job {job_id} ended as "{job.status}" and has no result. '
+                        "Cancelled, failed and expired jobs are refunded for the "
+                        "unfinished work."
+                    ),
+                    body=job.raw,
+                )
+            if timeout_seconds is not None and time.monotonic() - started >= timeout_seconds:
+                raise ConiferTimeoutError(
+                    f'deferred job {job_id} was still "{job.status}" after '
+                    f"{timeout_seconds}s. The job was NOT cancelled: it is still running, "
+                    f'and job_result("{job_id}") will return it once it ends.'
+                )
+            time.sleep(interval)
+            interval = min(interval * 2, max_poll_seconds)
+
+    # --------------------------------------------------------------- catalog
 
     def models(self) -> List[CatalogModel]:
         """``GET /v1/models``, projected without loss."""
@@ -590,6 +758,19 @@ def parse_frame(frame: str) -> Optional[Dict[str, Any]]:
         return json.loads(data)
     except json.JSONDecodeError:
         return None
+
+
+def to_deferred_job(payload: Mapping[str, Any]) -> DeferredJob:
+    """The 202/status envelope, parsed."""
+    return DeferredJob(
+        job_id=str(payload.get("job_id", "")),
+        status=str(payload.get("status", "")),
+        deadline_utc=payload.get("deadline_utc"),
+        created_utc=payload.get("created_utc"),
+        model=payload.get("model"),
+        poll_url=payload.get("poll_url"),
+        raw=dict(payload),
+    )
 
 
 def turn_identity(request: Any) -> str:

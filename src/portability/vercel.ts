@@ -117,7 +117,7 @@ export function assertSupportedVercelSurface(surface: string): void {
     files:
       "Conifer serves no Files API. There is no server-side document store to upload to; send content in the request itself.",
     batches:
-      "Conifer serves no Batches API. The nearest equivalent is the deferred-job protocol: set `defer: true` with a wide `deadlineSeconds` on a chat turn, and poll the job.",
+      "Conifer serves no Batches API. The nearest equivalent is a deferred job: `conifer.defer({...})` submits the turn against a >=24h window and `conifer.jobs.wait(jobId)` collects it.",
   };
   // Aliases, so a caller who spells the surface the way THEIR old SDK spelled
   // it gets the explanation rather than silence.

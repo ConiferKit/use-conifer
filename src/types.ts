@@ -252,3 +252,61 @@ export interface EmbeddingsResponse {
 export function vectorOf(response: EmbeddingsResponse): number[] | undefined {
   return response.data[0]?.embedding;
 }
+
+// -------------------------------------------------------------- deferred jobs
+
+/**
+ * The lifecycle of a deferred job, in the gateway's own words.
+ *
+ * Four of the seven are TERMINAL, and the distinction is a money question, not
+ * a formality: `ended`/`fetched` mean you were charged and there is a result;
+ * `expired`, `cancelled` and `failed` all carry a refund of the unfinished
+ * work. Never poll a terminal state again — it will not change.
+ */
+export type JobStatus =
+  /** Accepted and debited; waiting for the aggregator. */
+  | "queued"
+  /** Riding a provider batch. */
+  | "submitted"
+  /** The result is stored and the money is settled. Fetchable. */
+  | "ended"
+  /** TERMINAL: the result was fetched. Retention grace runs from here. */
+  | "fetched"
+  /** TERMINAL: the deadline or retention window passed. */
+  | "expired"
+  /** TERMINAL: you cancelled it; refunded per the cancel rules. */
+  | "cancelled"
+  /** TERMINAL: the provider errored this item; fully refunded. */
+  | "failed";
+
+/** The states that will never change again. Polling one is a wasted call. */
+export const TERMINAL_JOB_STATUSES: readonly JobStatus[] = [
+  "fetched",
+  "expired",
+  "cancelled",
+  "failed",
+];
+
+/** True once a job has reached a state it can never leave. */
+export function isTerminalJob(status: JobStatus | string | undefined): boolean {
+  return TERMINAL_JOB_STATUSES.includes(status as JobStatus);
+}
+
+/**
+ * A deferred job, as returned by the 202 accept and by every status poll.
+ *
+ * Carries no content and no cost: the money is disclosed on the RESULT, which
+ * is a separate call.
+ */
+export interface DeferredJob {
+  jobId: string;
+  status: JobStatus | string;
+  /** Unix seconds. After this the job expires and unfinished work is refunded. */
+  deadlineUtc?: number;
+  createdUtc?: number;
+  /** The model the job was accepted for. */
+  model?: string;
+  /** The gateway's own poll path, relative to the base URL. */
+  pollUrl?: string;
+  raw: Record<string, unknown>;
+}

@@ -20,13 +20,19 @@ from conifer_sdk import (  # noqa: E402
     ConiferAuthError,
     ConiferBadRequestError,
     ConiferCostCeilingError,
+    ConiferConflictError,
     ConiferError,
     ConiferKeySpendCapError,
     ConiferModelNotFoundError,
     ConiferPaymentError,
     ConiferPortabilityError,
     ConiferRateLimitError,
+    ConiferTimeoutError,
     EmbeddingsRequest,
+    MIN_DEFER_WINDOW_SECONDS,
+    TERMINAL_JOB_STATUSES,
+    is_terminal_job,
+    to_deferred_job,
     vector_of,
     ceiling_from_policy,
     conifer_openai_compatible_config,
@@ -959,6 +965,155 @@ class RequestIdentity(unittest.TestCase):
             EmbeddingsRequest(model="text-embedding-3-small", input="hi", request_id="trace-9")
         )
         self.assertEqual(calls[0]["headers"]["idempotency-key"], "trace-9")
+
+
+class DeferredJobs(unittest.TestCase):
+    """The deferred-job plane. Twin of tests/deferred.test.ts.
+
+    WHY THIS EXISTS. The SDK accepted ``defer=True`` from the start and had no
+    way to collect the result. Worse than missing: the gateway answers a
+    deferred submit with 202 and a JOB ENVELOPE, which ``chat()`` coerced into
+    a Completion — so a turn that had been accepted AND DEBITED came back as
+    ``choices=[]``, indistinguishable at the call site from a model that
+    answered with nothing.
+
+    Every status string below was observed against api.conifer.build on
+    2026-08-27, including a full round trip: queued -> submitted -> ended ->
+    (fetch) -> fetched, settling at 470000 nanodollars.
+    """
+
+    ACCEPTED = {
+        "job_id": "job-gw-abc",
+        "status": "queued",
+        "deadline_utc": 1787900264,
+        "poll_url": "/v1/deferred/job-gw-abc",
+    }
+
+    def test_chat_refuses_a_deferred_turn_rather_than_returning_nothing(self):
+        calls, transport = scripted()
+        with self.assertRaises(ConiferPortabilityError) as caught:
+            client(transport).chat(ChatRequest(model="m", messages=[], defer=True))
+        self.assertEqual(caught.exception.field, "defer")
+        # The message must name the way forward, not just the problem.
+        self.assertIn("defer()", caught.exception.message)
+        # Refused before the request: no money moved to produce this error.
+        self.assertEqual(len(calls), 0)
+
+    def test_defer_submits_with_the_gateways_floor_and_returns_the_job(self):
+        calls, transport = scripted((202, {}, self.ACCEPTED))
+        job = client(transport).defer(ChatRequest(model="m", messages=[]))
+        body = calls[0]["body"]
+        self.assertEqual(body["defer"], "allow")
+        # The gateway REFUSES a narrower window, so defaulting to the floor is
+        # what makes the common call work rather than 400.
+        self.assertEqual(body["completion_window_seconds"], MIN_DEFER_WINDOW_SECONDS)
+        self.assertEqual(calls[0]["headers"]["x-conifer-defer"], "allow")
+        self.assertEqual(job.job_id, "job-gw-abc")
+        self.assertEqual(job.status, "queued")
+
+    def test_an_explicit_deadline_is_not_overwritten_by_the_floor(self):
+        calls, transport = scripted((202, {}, self.ACCEPTED))
+        client(transport).defer(ChatRequest(model="m", messages=[], deadline_seconds=172_800))
+        self.assertEqual(calls[0]["body"]["completion_window_seconds"], 172_800)
+
+    def test_a_fallback_chain_cannot_ride_a_deferred_job(self):
+        calls, transport = scripted()
+        with self.assertRaises(ConiferPortabilityError):
+            client(transport).defer(
+                ChatRequest(
+                    model="m", messages=[], fallback_models=["b"], allow_client_fallback=True
+                )
+            )
+        self.assertEqual(len(calls), 0)
+
+    def test_status_result_and_cancel_hit_the_published_paths(self):
+        calls, transport = scripted(
+            (200, {}, {"job_id": "job-gw-abc", "status": "submitted", "model": "claude-fable-5"}),
+            (
+                200,
+                {"x-conifer-cost-nanousd": "470000"},
+                {"choices": [{"message": {"role": "assistant", "content": "pinecone"}}]},
+            ),
+            (200, {}, {"job_id": "job-gw-abc", "status": "cancelled"}),
+        )
+        conifer = client(transport)
+
+        status = conifer.job_status("job-gw-abc")
+        self.assertTrue(calls[0]["url"].endswith("/v1/deferred/job-gw-abc"))
+        self.assertEqual(status.status, "submitted")
+
+        answer = conifer.job_result("job-gw-abc")
+        self.assertTrue(calls[1]["url"].endswith("/v1/deferred/job-gw-abc/result"))
+        self.assertEqual(answer.text, "pinecone")
+        # A deferred result settles in band, exactly like a non-streamed turn.
+        self.assertEqual(answer.receipt.cost_nano_usd, 470_000)
+
+        cancelled = conifer.job_cancel("job-gw-abc")
+        self.assertTrue(calls[2]["url"].endswith("/v1/deferred/job-gw-abc/cancel"))
+        self.assertEqual(calls[2]["method"], "POST")
+        self.assertEqual(cancelled.status, "cancelled")
+
+    def test_a_job_id_is_escaped_so_it_cannot_walk_out_of_its_path(self):
+        calls, transport = scripted((200, {}, {"job_id": "x", "status": "queued"}))
+        client(transport).job_status("../../v1/balance")
+        self.assertFalse(calls[0]["url"].endswith("/v1/balance"))
+
+    def test_wait_polls_to_the_end_and_returns_the_settled_result(self):
+        calls, transport = scripted(
+            (200, {}, {"job_id": "j", "status": "queued"}),
+            (200, {}, {"job_id": "j", "status": "submitted"}),
+            (200, {}, {"job_id": "j", "status": "ended"}),
+            (
+                200,
+                {"x-conifer-cost-nanousd": "470000"},
+                {"choices": [{"message": {"role": "assistant", "content": "pinecone"}}]},
+            ),
+        )
+        seen = []
+        answer = client(transport).jobs_wait(
+            "j", poll_seconds=0.001, on_poll=lambda job: seen.append(job.status)
+        )
+        # The live sequence, condensed.
+        self.assertEqual(seen, ["queued", "submitted", "ended"])
+        self.assertEqual(answer.text, "pinecone")
+        self.assertEqual(answer.receipt.cost_nano_usd, 470_000)
+        self.assertEqual(len(calls), 4)
+
+    def test_wait_stops_on_a_terminal_state_instead_of_polling_forever(self):
+        # The loop-that-cannot-exit bug, prevented by construction.
+        for status in ("cancelled", "failed", "expired"):
+            calls, transport = scripted((200, {}, {"job_id": "j", "status": status}))
+            with self.assertRaises(ConiferConflictError) as caught:
+                client(transport).jobs_wait("j", poll_seconds=0.001)
+            self.assertIn(status, caught.exception.message)
+            # Exactly one poll: it learned the answer and stopped.
+            self.assertEqual(len(calls), 1, f"{status} must not be polled twice")
+
+    def test_wait_honors_a_timeout_without_cancelling_paid_work(self):
+        calls, transport = scripted((200, {}, {"job_id": "j", "status": "queued"}))
+        with self.assertRaises(ConiferTimeoutError) as caught:
+            client(transport).jobs_wait("j", poll_seconds=0.001, timeout_seconds=0)
+        # The message must say the job survived, or a reader will assume the
+        # opposite and re-submit work they have already paid for.
+        self.assertIn("NOT cancelled", caught.exception.message)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(any(c["url"].endswith("/cancel") for c in calls))
+
+    def test_the_terminal_set_matches_the_gateways_state_machine(self):
+        # `ended` is deliberately NOT terminal: it is the state where a result
+        # becomes fetchable, and treating it as an end would skip collecting it.
+        self.assertEqual(TERMINAL_JOB_STATUSES, ("fetched", "expired", "cancelled", "failed"))
+        self.assertFalse(is_terminal_job("ended"))
+        self.assertFalse(is_terminal_job("queued"))
+        self.assertTrue(is_terminal_job("fetched"))
+        self.assertFalse(is_terminal_job(None))
+
+    def test_the_job_envelope_parses_without_losing_what_was_sent(self):
+        job = to_deferred_job({**self.ACCEPTED, "surprise_field": 1})
+        self.assertEqual(job.job_id, "job-gw-abc")
+        self.assertEqual(job.poll_url, "/v1/deferred/job-gw-abc")
+        # Nothing the gateway said is dropped behind our field names.
+        self.assertEqual(job.raw["surprise_field"], 1)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,14 @@
 // index.ts — the SDK's one public seam. Consumers import from here.
 
-export { Conifer, Embeddings, KeysApi, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS } from "./client.ts";
+export {
+  Conifer,
+  Embeddings,
+  JobsApi,
+  KeysApi,
+  DEFAULT_BASE_URL,
+  DEFAULT_TIMEOUT_MS,
+  MIN_DEFER_WINDOW_SECONDS,
+} from "./client.ts";
 export type { ConiferOptions } from "./client.ts";
 export {
   chatBody,
@@ -13,10 +21,12 @@ export {
   resolveBaseUrl,
   resolveChain,
   toCatalogModel,
+  toDeferredJob,
+  turnIdentity,
   parseFrame,
 } from "./client.ts";
 
-export { textOf, vectorOf } from "./types.ts";
+export { textOf, vectorOf, isTerminalJob, TERMINAL_JOB_STATUSES } from "./types.ts";
 export type {
   Balance,
   CatalogModel,
@@ -24,10 +34,12 @@ export type {
   Choice,
   Completion,
   CompletionStream,
+  DeferredJob,
   Embedding,
   EmbeddingsRequest,
   EmbeddingsResponse,
   Message,
+  JobStatus,
   Role,
   StreamChunk,
   Usage,

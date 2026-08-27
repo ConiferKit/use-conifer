@@ -171,3 +171,39 @@ class EmbeddingsResponse:
 def vector_of(response: EmbeddingsResponse) -> Optional[List[float]]:
     """The first vector, for the overwhelmingly common single-input call."""
     return response.data[0].embedding if response.data else None
+
+
+# ------------------------------------------------------------ deferred jobs
+
+#: The states a deferred job can never leave. Polling one is a wasted call.
+#:
+#: The distinction is a money question, not a formality: ``ended``/``fetched``
+#: mean you were charged and there is a result, while ``expired``,
+#: ``cancelled`` and ``failed`` all carry a refund of the unfinished work.
+TERMINAL_JOB_STATUSES = ("fetched", "expired", "cancelled", "failed")
+
+
+def is_terminal_job(status: Optional[str]) -> bool:
+    """True once a job has reached a state it can never leave."""
+    return status in TERMINAL_JOB_STATUSES
+
+
+@dataclass
+class DeferredJob:
+    """A deferred job, as returned by the 202 accept and by every status poll.
+
+    Carries no content and no cost: the money is disclosed on the RESULT, which
+    is a separate call.
+    """
+
+    job_id: str
+    #: One of queued / submitted / ended / fetched / expired / cancelled / failed.
+    status: str
+    #: Unix seconds. After this the job expires and unfinished work is refunded.
+    deadline_utc: Optional[int] = None
+    created_utc: Optional[int] = None
+    #: The model the job was accepted for.
+    model: Optional[str] = None
+    #: The gateway's own poll path, relative to the base URL.
+    poll_url: Optional[str] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
