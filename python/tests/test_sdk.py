@@ -48,6 +48,7 @@ from conifer_sdk import (  # noqa: E402
     resolve_base_url,
 )
 from conifer_sdk.client import (  # noqa: E402
+    minimum_backoff_seconds,
     decode_vector,
     embeddings_body,
     embeddings_headers,
@@ -804,6 +805,19 @@ class ErrorVocabulary(unittest.TestCase):
                 ChatRequest(model="m", messages=[])
             )
         self.assertEqual(len(calls), 1, "a body conflict must not be retried")
+
+    def test_a_transient_409_waits_long_enough_to_converge(self):
+        # The default schedule (0.25s, 0.5s) gives a retryable failure 0.75s of
+        # total patience, which is right for a 502 and far too impatient for a
+        # 409: that one waits on CROSS-REPLICA CONVERGENCE, not on a socket.
+        # Found in a fresh-install consumer test — i.e. exactly where a new
+        # user would have found it, on their first call, for a turn that was
+        # actually being served.
+        self.assertGreaterEqual(minimum_backoff_seconds(409), 1.0)
+        # Every other status keeps the fast schedule: a blip recovers fast.
+        for status in (429, 502, 503, 504):
+            self.assertEqual(minimum_backoff_seconds(status), 0.0, f"{status} slowed down")
+        self.assertGreaterEqual(minimum_backoff_seconds(409) * 2, 3.0)
 
     def test_both_languages_agree_on_the_class_for_every_contract_type(self):
         """Parity, checked against the TypeScript names rather than assumed.

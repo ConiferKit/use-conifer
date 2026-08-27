@@ -24,9 +24,20 @@ export CONIFER_API_KEY='sk-conifer-…'   # mint one at https://conifer.build/co
 >
 > ```bash
 > git clone https://github.com/ConiferKit/use-conifer
-> npm i ./use-conifer            # TypeScript
-> pip install ./use-conifer/python   # Python
+> npm i ./use-conifer                    # TypeScript
+> pip install "./use-conifer/python[tls]"  # Python — see the note below
 > ```
+>
+> **Python on macOS: use `[tls]`.** A python.org install whose
+> *Install Certificates.command* was never run has an **empty CA trust store**,
+> and so does every venv built on it — it cannot verify *any* HTTPS host, and
+> your first call dies with `CERTIFICATE_VERIFY_FAILED`. The `[tls]` extra pulls
+> in `certifi`, which the SDK uses automatically when it detects an empty store.
+> It is an extra rather than a dependency because zero dependencies is a real
+> feature here (this drops into a lambda or a locked-down build image with no
+> package tree to audit), and because Linux, Homebrew, Docker and conda already
+> have a working store. If you hit the error anyway, the SDK says exactly this,
+> and names the remedy, rather than reporting "the gateway is unreachable".
 >
 > Everything else in this README is verified against the live gateway.
 

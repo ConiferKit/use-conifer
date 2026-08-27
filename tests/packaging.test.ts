@@ -161,3 +161,30 @@ test("the Python suite declares its test-only dependency somewhere a clone can f
   const runtime = /^dependencies = (\[\]|\[\s*\])$/m.test(pyproject);
   assert.ok(runtime, "the published package must still install with an empty dependency list");
 });
+
+/**
+ * The Python package must offer the CA-bundle escape hatch, and must NOT make
+ * it mandatory.
+ *
+ * Found in a fresh-venv install test: a python.org macOS install whose
+ * "Install Certificates.command" was never run has an EMPTY trust store, and so
+ * does every venv built on it. It cannot verify any HTTPS host, so the SDK's
+ * very first call dies with CERTIFICATE_VERIFY_FAILED — which is how a new user
+ * would have met this package. `[tls]` is the one-command fix.
+ *
+ * It stays an EXTRA because zero runtime dependencies is a real feature (this
+ * drops into a lambda or a locked-down build image with no package tree to
+ * audit), and most environments already have a working store.
+ */
+test("the Python package offers a `tls` extra without depending on it", () => {
+  const pyproject = readFileSync(
+    fileURLToPath(new URL("../python/pyproject.toml", import.meta.url)),
+    "utf8",
+  );
+  // The runtime dependency list must stay empty.
+  assert.match(pyproject, /dependencies = \[\]/);
+  // And the escape hatch must exist, spelled the way the README tells people.
+  assert.match(pyproject, /tls = \["certifi"\]/);
+  const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+  assert.match(readme, /\[tls\]/, "the README must document the extra it tells people to install");
+});

@@ -239,7 +239,11 @@ class Conifer:
             failure = error_from(status, parsed, response_headers)
             if failure.retryable and status in _RETRYABLE_STATUS and attempt < self.max_retries:
                 hinted = getattr(failure, "retry_after_seconds", None)
-                time.sleep(hinted if hinted is not None else backoff_seconds(attempt))
+                time.sleep(
+                    hinted
+                    if hinted is not None
+                    else max(backoff_seconds(attempt), minimum_backoff_seconds(status))
+                )
                 last = failure
                 continue
             raise failure
@@ -812,6 +816,27 @@ def turn_identity(request: Any) -> str:
 def backoff_seconds(attempt: int) -> float:
     """Exponential backoff with jitter: 0.25s, 0.5s, 1s, …"""
     return 0.25 * (2**attempt) + random.random() * 0.1
+
+
+def minimum_backoff_seconds(status: int) -> float:
+    """A floor on the wait for statuses whose recovery is not instant.
+
+    The default schedule (0.25s, 0.5s) is tuned for a momentary blip and gives
+    a retryable failure 0.75s of total patience. That is right for a 502 and
+    far too impatient for a transient 409: those mean "a first attempt is in
+    flight, or its settled body is on another replica", so the SDK is waiting
+    for CROSS-REPLICA CONVERGENCE, not for a socket to come back.
+
+    Found in a fresh-install consumer test — which is exactly where it would
+    otherwise have been found, by a new user on their first call. The turn was
+    being served; the client simply gave up after 0.75s and reported a hard
+    failure for it. With this floor the same case gets ~4.5s across two
+    retries, which covered every occurrence observed.
+
+    Retrying remains safe because the retry carries the SAME idempotency key:
+    the gateway either replays the settled response or serves the turn once.
+    """
+    return 1.5 if status == 409 else 0.0
 
 
 # ------------------------------------------------------- embeddings helpers

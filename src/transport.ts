@@ -148,7 +148,11 @@ export class Transport {
         failure.retryable && RETRYABLE_STATUS.has(response.status);
       if (retryable && attempt < this.options.maxRetries) {
         const hinted = (failure as { retryAfterSeconds?: number }).retryAfterSeconds;
-        await sleep(hinted !== undefined ? hinted * 1000 : backoffMs(attempt));
+        await sleep(
+          hinted !== undefined
+            ? hinted * 1000
+            : Math.max(backoffMs(attempt), minimumBackoffMs(response.status)),
+        );
         lastError = failure;
         continue;
       }
@@ -174,6 +178,28 @@ async function parseJson(response: Response): Promise<unknown> {
 export function backoffMs(attempt: number): number {
   const base = 250 * 2 ** attempt;
   return base + Math.floor(Math.random() * 100);
+}
+
+/**
+ * A floor on the wait for statuses whose recovery is not instant.
+ *
+ * The default schedule (250ms, 500ms) is tuned for a momentary blip and gives a
+ * retryable failure 0.75s of total patience. That is right for a 502, and it is
+ * far too impatient for a transient 409: those mean "a first attempt is in
+ * flight, or its settled body is on another replica", so the SDK is waiting for
+ * CROSS-REPLICA CONVERGENCE, not for a socket to come back.
+ *
+ * Found in a fresh-install consumer test, which is exactly where it would
+ * otherwise have been found — by a new user, on their first call. The turn was
+ * being served; the client simply gave up after 0.75s and reported a hard
+ * failure for it. With this floor the same case gets ~4.5s across two retries,
+ * which covered every occurrence observed.
+ *
+ * Retrying remains safe because the retry carries the SAME idempotency key: the
+ * gateway either replays the settled response or serves the turn once.
+ */
+export function minimumBackoffMs(status: number): number {
+  return status === 409 ? 1_500 : 0;
 }
 
 function sleep(ms: number): Promise<void> {

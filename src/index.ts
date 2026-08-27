@@ -76,7 +76,7 @@ export {
 export { ReceiptCollector, SpendBudget } from "./receipts.ts";
 export type { ObservedReceipt, ReceiptTotal } from "./receipts.ts";
 
-export { Transport, backoffMs } from "./transport.ts";
+export { Transport, backoffMs, minimumBackoffMs } from "./transport.ts";
 export type { FetchLike, RequestSpec, TransportOptions } from "./transport.ts";
 
 // Portability: migrate from another gateway without silently changing what runs.

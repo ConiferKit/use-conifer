@@ -15,6 +15,7 @@ import {
   ConiferRateLimitError,
   chatBody,
   chatHeaders,
+  minimumBackoffMs,
   nanoUsdToUsdString,
   parseCostComponents,
   parseFrame,
@@ -586,4 +587,20 @@ test("a 409 for a REUSED key with different bytes is not retried", async () => {
     ConiferConflictError,
   );
   assert.equal(calls.length, 1, "a body conflict must not be retried");
+});
+
+test("a transient 409 waits long enough to actually converge", () => {
+  // The default schedule (250ms, 500ms) gives a retryable failure 0.75s of
+  // total patience, which is right for a 502 and far too impatient for a 409:
+  // that one is waiting on CROSS-REPLICA CONVERGENCE, not on a socket. Found
+  // in a fresh-install consumer test — i.e. exactly where a new user would
+  // have found it, on their first call, for a turn that was being served.
+  assert.ok(minimumBackoffMs(409) >= 1_000, "a 409 needs a real floor");
+  // Every other status keeps the fast schedule: a blip should recover fast.
+  for (const status of [429, 502, 503, 504]) {
+    assert.equal(minimumBackoffMs(status), 0, `${status} must not be slowed down`);
+  }
+  // Two retries at the floor is several seconds of patience, which covered
+  // every occurrence observed against production.
+  assert.ok(minimumBackoffMs(409) * 2 >= 3_000);
 });
