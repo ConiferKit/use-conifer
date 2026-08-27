@@ -15,6 +15,7 @@ import {
   ConiferRateLimitError,
   chatBody,
   chatHeaders,
+  emptyReason,
   minimumBackoffMs,
   nanoUsdToUsdString,
   parseCostComponents,
@@ -603,4 +604,75 @@ test("a transient 409 waits long enough to actually converge", () => {
   // Two retries at the floor is several seconds of patience, which covered
   // every occurrence observed against production.
   assert.ok(minimumBackoffMs(409) * 2 >= 3_000);
+});
+
+/**
+ * The empty-completion trap, and the one signal that explains it.
+ *
+ * Measured live 2026-08-27 on BOTH wires: a reasoning model spends `maxTokens`
+ * on its thinking block FIRST, so a small budget is consumed before the visible
+ * answer starts. You get `content: ""`, `finish_reason: "length"`, and a bill
+ * for every one of those output tokens. `claude-fable-5` at `maxTokens: 16`
+ * does exactly this; at 200 the same prompt answers fine.
+ *
+ * That empty string is indistinguishable, at the call site, from a refusal, a
+ * content filter, or a broken SDK — and the distinguishing field is one most
+ * callers never read. So the SDK reads it.
+ */
+test("an empty completion explains itself instead of just being empty", () => {
+  const truncated = {
+    choices: [{ index: 0, finish_reason: "length", message: { role: "assistant", content: "" } }],
+    receipt: {},
+    fallbackIndex: 0,
+  } as any;
+  const why = emptyReason(truncated);
+  assert.match(why ?? "", /maxTokens/);
+  assert.match(why ?? "", /thinking block is spent FIRST/);
+
+  // With the reasoning-token breakdown, the explanation gets specific: it can
+  // name how much of the budget went to thinking rather than answering.
+  const withUsage = {
+    ...truncated,
+    usage: { completion_tokens: 20, completion_tokens_details: { reasoning_tokens: 20 } },
+  };
+  assert.match(emptyReason(withUsage) ?? "", /20 of 20 output tokens went to thinking/);
+});
+
+test("a completion that HAS text has nothing to explain", () => {
+  const fine = {
+    choices: [{ finish_reason: "stop", message: { role: "assistant", content: "pinecone" } }],
+    receipt: {},
+    fallbackIndex: 0,
+  } as any;
+  assert.equal(emptyReason(fine), undefined);
+});
+
+test("a tool call is an answer, not an absence", () => {
+  // Empty text beside a tool call is CORRECT, and calling it a failure would
+  // send people chasing a bug in the one case that is working as designed.
+  const toolCall = {
+    choices: [
+      {
+        finish_reason: "tool_calls",
+        message: { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function" }] },
+      },
+    ],
+    receipt: {},
+    fallbackIndex: 0,
+  } as any;
+  assert.equal(emptyReason(toolCall), undefined);
+});
+
+test("a content filter and a no-choices body are named for what they are", () => {
+  const filtered = {
+    choices: [{ finish_reason: "content_filter", message: { content: "" } }],
+    receipt: {},
+    fallbackIndex: 0,
+  } as any;
+  // Worth stating plainly: the filter is the PROVIDER's, not ours.
+  assert.match(emptyReason(filtered) ?? "", /Conifer applies no moderation of its own/);
+
+  // The shape a deferred 202 used to be coerced into. Point at the fix.
+  const empty = { choices: [], receipt: {}, fallbackIndex: 0 } as any;
+  assert.match(emptyReason(empty) ?? "", /defer\(\)/);
 });

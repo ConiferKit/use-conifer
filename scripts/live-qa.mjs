@@ -43,6 +43,7 @@ const {
   ReceiptCollector,
   SpendBudget,
   isTerminalJob,
+  emptyReason,
   textOf,
   vectorOf,
 } = await import(entry.href);
@@ -172,6 +173,29 @@ await check("stream() flows and reports usage in its terminal chunk", async () =
     throw new Error("a stream disclosed a cost on the head; the README says it cannot");
   }
   return `${chunks} chunks, ${usage.total_tokens} tokens`;
+});
+
+await check("an empty completion explains itself rather than just being empty", async () => {
+  // The trap: a reasoning model spends maxTokens on its thinking block FIRST,
+  // so a tight budget yields empty content, finish_reason "length", and a bill
+  // for every output token. Indistinguishable at the call site from a refusal
+  // or a broken SDK unless something reads finish_reason for you.
+  const truncated = await conifer.chat({
+    model: chatModel,
+    messages: [{ role: "user", content: "What is 8347 * 9182? Think it through step by step." }],
+    maxTokens: 16,
+  });
+  const text = textOf(truncated);
+  if (text !== "") {
+    // Not every model truncates the same way; if this one answered, the
+    // explanation must be ABSENT rather than invented.
+    eq(emptyReason(truncated), undefined, "a completion with text needs no explanation");
+    return "model answered within 16 tokens; no explanation offered (correct)";
+  }
+  const why = emptyReason(truncated);
+  if (why === undefined) throw new Error("empty content with no explanation — the trap is back");
+  if (!/maxTokens/.test(why)) throw new Error(`unhelpful explanation: ${why}`);
+  return why.slice(0, 44);
 });
 
 // -------------------------------------------------------------- embeddings

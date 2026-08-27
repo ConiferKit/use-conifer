@@ -60,8 +60,8 @@ from conifer_sdk.client import (  # noqa: E402
 )
 from conifer_sdk.errors import error_from  # noqa: E402
 from conifer_sdk.portability import assert_supported_vercel_surface  # noqa: E402
-from conifer_sdk.receipt import parse_cost_components  # noqa: E402
-from conifer_sdk.types import CatalogModel, ChatRequest  # noqa: E402
+from conifer_sdk.receipt import Receipt, parse_cost_components  # noqa: E402
+from conifer_sdk.types import CatalogModel, ChatRequest, Completion  # noqa: E402
 
 CARDS = Path(__file__).resolve().parents[2] / "cards"
 
@@ -1349,6 +1349,70 @@ class Receipts(unittest.TestCase):
             SpendBudget(1.5)
         with self.assertRaises(ValueError):
             SpendBudget(-1)
+
+class EmptyCompletions(unittest.TestCase):
+    """The empty-completion trap. Twin of the same tests in client.test.ts.
+
+    Measured live 2026-08-27 on BOTH wires: a reasoning model spends
+    ``max_tokens`` on its thinking block FIRST, so a small budget is consumed
+    before the visible answer starts. You get ``content: ""``,
+    ``finish_reason: "length"``, and a bill for every one of those output
+    tokens. `claude-fable-5` at max_tokens=16 does exactly this.
+
+    That empty string is indistinguishable, at the call site, from a refusal, a
+    content filter, or a broken SDK — and the distinguishing field is one most
+    callers never read.
+    """
+
+    @staticmethod
+    def _completion(choices, usage=None):
+        return Completion(choices=choices, receipt=Receipt(), fallback_index=0, usage=usage)
+
+    def test_an_empty_completion_explains_itself(self):
+        truncated = self._completion(
+            [{"finish_reason": "length", "message": {"role": "assistant", "content": ""}}]
+        )
+        why = truncated.empty_reason
+        self.assertIn("max_tokens", why)
+        self.assertIn("thinking block is spent FIRST", why)
+
+        # With the reasoning breakdown it gets specific about where the budget
+        # actually went.
+        detailed = self._completion(
+            [{"finish_reason": "length", "message": {"content": ""}}],
+            usage={"completion_tokens": 20, "completion_tokens_details": {"reasoning_tokens": 20}},
+        )
+        self.assertIn("20 of 20 output tokens went to thinking", detailed.empty_reason)
+
+    def test_a_completion_with_text_has_nothing_to_explain(self):
+        fine = self._completion(
+            [{"finish_reason": "stop", "message": {"content": "pinecone"}}]
+        )
+        self.assertIsNone(fine.empty_reason)
+
+    def test_a_tool_call_is_an_answer_not_an_absence(self):
+        # Empty text beside a tool call is CORRECT; calling it a failure would
+        # send people chasing a bug in the one case working as designed.
+        tool = self._completion(
+            [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {"content": None, "tool_calls": [{"id": "1"}]},
+                }
+            ]
+        )
+        self.assertIsNone(tool.empty_reason)
+
+    def test_a_filter_and_a_no_choices_body_are_named(self):
+        filtered = self._completion(
+            [{"finish_reason": "content_filter", "message": {"content": ""}}]
+        )
+        # Worth stating plainly: the filter is the PROVIDER's, not ours.
+        self.assertIn("applies no moderation of its own", filtered.empty_reason)
+
+        # The shape a deferred 202 used to be coerced into. Point at the fix.
+        self.assertIn("defer()", self._completion([]).empty_reason)
+
 
 if __name__ == "__main__":
     unittest.main()

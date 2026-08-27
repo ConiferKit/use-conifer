@@ -20,7 +20,8 @@
       "receiptVenue": "x-conifer-receipt-venue — the venue that SERVED the turn; this gateway is always `cloud`. Distinct from the REQUEST constraint `x-conifer-venue`; the contract never repurposes a name.",
       "counterfactualNanoUsd": "x-conifer-counterfactual-nanousd — the retail counterfactual at the documented default pin. OMITTED unless the routed predicate holds, and never 0-as-guess, so absence means 'not applicable', not 'no saving'."
     },
-    "fallbackIndex": "number — which member of a client-side fallback chain served (0 = the model you asked for). Always present, always honest."
+    "fallbackIndex": "number — which member of a client-side fallback chain served (0 = the model you asked for). Always present, always honest.",
+    "emptyReason": "`emptyReason(completion)` (TS) / `completion.empty_reason` (Python) — WHY a completion came back with no text, or absent when there is text. The trap it exists for, measured live 2026-08-27 on BOTH wires: a reasoning model spends maxTokens on its THINKING BLOCK FIRST, so a small budget is consumed before the visible answer starts — empty content, finish_reason 'length', and a bill for every output token. That empty string is indistinguishable at the call site from a refusal, a content filter, or a broken SDK, and the distinguishing field is one most callers never read. A tool call returns ABSENT: empty text beside a tool call is the correct answer, not a failure."
   },
   "stream": {
     "note": "An async iterable of raw OpenAI chunks plus a terminal receipt.",

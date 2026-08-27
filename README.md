@@ -80,6 +80,34 @@ is the wire being honest rather than a gap: the response head is sent before the
 first token and the money settles after the last. Reconcile a stream from its
 terminal `usage` chunk, which the SDK always requests.
 
+### When the answer comes back empty
+
+The most confusing thing this API can return is `""`, and the reason is never in
+the content. A reasoning model spends `maxTokens` on its **thinking block
+first** — so a budget that looks generous for a one-word answer can be consumed
+entirely before the visible answer starts. You get empty content,
+`finish_reason: "length"`, and a bill for every one of those output tokens.
+Measured on both the OpenAI and Anthropic wires: `claude-fable-5` at
+`maxTokens: 16` does exactly this; at 200 the same prompt answers fine.
+
+That empty string looks identical to a refusal, a content filter, or a broken
+SDK. So the SDK reads the one distinguishing field for you:
+
+```ts
+const answer = await conifer.chat({ model, messages, maxTokens: 16 });
+textOf(answer);        // ""
+emptyReason(answer);   // "the model hit maxTokens before emitting visible text.
+                       //  On a reasoning model the thinking block is spent FIRST…"
+```
+
+```python
+answer.text          # ""
+answer.empty_reason  # the same sentence, or None when there is nothing to explain
+```
+
+It returns `undefined`/`None` whenever there is text — and also for a tool call,
+because empty text beside a tool call is the correct answer, not an absence.
+
 ## Embeddings
 
 Same key, same receipts, same cost ceiling — and the vectors arrive as plain
@@ -390,10 +418,10 @@ Verified from a real `npm i`: an ES2022 consumer typechecks clean under
 
 ```bash
 npm run build     # emit dist/ (ESM + .d.ts)
-npm test          # 131 tests, offline
+npm test          # 135 tests, offline
 npm run typecheck
 
-cd python && python3 -m pytest -q   # 85 tests, offline
+cd python && python3 -m pytest -q   # 89 tests, offline
 ```
 
 Most assertions run with an injected transport: no network, no mock framework,
@@ -411,8 +439,8 @@ a deferred turn that was billed and returned nothing readable. So there is a
 second, deliberate gate:
 
 ```bash
-CONIFER_API_KEY=sk-… npm run qa:live                     # 16 checks
-CONIFER_API_KEY=sk-… node scripts/live-qa.mjs --include-deferred   # 18
+CONIFER_API_KEY=sk-… npm run qa:live                     # 17 checks
+CONIFER_API_KEY=sk-… node scripts/live-qa.mjs --include-deferred   # 19
 
 cd python && CONIFER_API_KEY=sk-… python3 scripts/live_qa.py --include-deferred
 ```
@@ -441,7 +469,7 @@ Stated here so you find out now rather than mid-migration:
 The offline suites use injected transports and no network, so they can only
 confirm what we already believed. Every claim in this README is also checked
 against production by `scripts/live-qa.mjs` and `python/scripts/live_qa.py`
-(16 checks each, 18 with `--include-deferred`), in both languages, plus a
+(17 checks each, 19 with `--include-deferred`), in both languages, plus a
 fresh-install pass that installs the packed tarball and the Python package into
 clean projects and uses them as a consumer does.
 

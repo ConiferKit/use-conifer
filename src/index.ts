@@ -26,7 +26,13 @@ export {
   parseFrame,
 } from "./client.ts";
 
-export { textOf, vectorOf, isTerminalJob, TERMINAL_JOB_STATUSES } from "./types.ts";
+export {
+  textOf,
+  emptyReason,
+  vectorOf,
+  isTerminalJob,
+  TERMINAL_JOB_STATUSES,
+} from "./types.ts";
 export type {
   Balance,
   CatalogModel,

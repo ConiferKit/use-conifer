@@ -67,6 +67,64 @@ class Completion:
         content = (self.choices[0].get("message") or {}).get("content")
         return content if isinstance(content, str) else None
 
+    @property
+    def empty_reason(self) -> Optional[str]:
+        """Why this completion came back with no text, when it did.
+
+        ``None`` means there is text and nothing to explain. Otherwise this is
+        a sentence you can log or raise, because an empty string is the single
+        most confusing thing this API returns and the reason is never in the
+        content.
+
+        THE TRAP THIS EXISTS FOR (measured live 2026-08-27, on BOTH the OpenAI
+        and Anthropic wires). A reasoning model spends ``max_tokens`` on its
+        thinking block FIRST. Ask ``claude-fable-5`` a question needing real
+        reasoning with ``max_tokens=16`` and you get ``content: ""``,
+        ``finish_reason: "length"``, and a bill for 16 output tokens — the
+        model never reached the visible answer.
+
+        Nothing about that is a bug, and nothing about it is discoverable: the
+        empty string looks like a refusal, a content filter, or a broken SDK,
+        and the one distinguishing signal is a field most callers never read.
+        So the SDK reads it for you.
+        """
+        if not self.choices:
+            return (
+                "the gateway returned no choices at all. If this was a deferred turn, use "
+                "defer() and jobs_wait() — a 202 job envelope is not a completion."
+            )
+        choice = self.choices[0]
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str) and content != "":
+            return None
+        # A tool call IS the answer. Absent text there is correct.
+        if message.get("tool_calls"):
+            return None
+        finish = choice.get("finish_reason")
+        if finish == "length":
+            details = (self.usage or {}).get("completion_tokens_details") or {}
+            reasoning = details.get("reasoning_tokens")
+            if isinstance(reasoning, int) and reasoning > 0:
+                spent = (self.usage or {}).get("completion_tokens")
+                return (
+                    f"the model hit max_tokens while still reasoning ({reasoning} of {spent} "
+                    "output tokens went to thinking), so it never reached the visible answer. "
+                    'Raise max_tokens, or set reasoning={"effort": "none"} / "low" on a model '
+                    "that supports it."
+                )
+            return (
+                "the model hit max_tokens before emitting visible text. On a reasoning model "
+                "the thinking block is spent FIRST, so a small max_tokens can be consumed "
+                "entirely before the answer starts. Raise max_tokens."
+            )
+        if finish == "content_filter":
+            return (
+                "the upstream provider's own content filter stopped this turn. Conifer "
+                "applies no moderation of its own."
+            )
+        return f"the model returned empty content with finish_reason {finish!r}."
+
 
 @dataclass
 class CatalogModel:

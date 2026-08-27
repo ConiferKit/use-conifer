@@ -184,6 +184,35 @@ def _stream():
 
 check("stream() flows and reports usage in its terminal chunk", _stream)
 
+def _empty_reason():
+    # The trap: a reasoning model spends max_tokens on its thinking block
+    # FIRST, so a tight budget yields empty content, finish_reason "length",
+    # and a bill for every output token. Indistinguishable at the call site
+    # from a refusal or a broken SDK unless something reads finish_reason.
+    truncated = conifer.chat(
+        ChatRequest(
+            model=state["chat"],
+            messages=[
+                {"role": "user", "content": "What is 8347 * 9182? Think it through step by step."}
+            ],
+            max_tokens=16,
+        )
+    )
+    if truncated.text != "":
+        # Not every model truncates alike; if this one answered, the
+        # explanation must be ABSENT rather than invented.
+        eq(truncated.empty_reason, None, "a completion with text needs no explanation")
+        return "model answered within 16 tokens; no explanation offered (correct)"
+    why = truncated.empty_reason
+    if why is None:
+        raise AssertionError("empty content with no explanation — the trap is back")
+    if "max_tokens" not in why:
+        raise AssertionError(f"unhelpful explanation: {why}")
+    return why[:44]
+
+
+check("an empty completion explains itself rather than just being empty", _empty_reason)
+
 # --------------------------------------------------------------- embeddings
 
 print("\nembeddings")

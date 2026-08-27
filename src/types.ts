@@ -113,6 +113,49 @@ export function textOf(completion: Completion): string | undefined {
   return typeof content === "string" ? content : undefined;
 }
 
+/**
+ * Why a completion came back with no text, when it did.
+ *
+ * `undefined` means there is text and nothing to explain. Otherwise this is a
+ * sentence you can log or raise, because an empty string is the single most
+ * confusing thing this API returns and the reason is never in the content.
+ *
+ * THE TRAP THIS EXISTS FOR (measured live 2026-08-27, on BOTH the OpenAI and
+ * Anthropic wires). A reasoning model spends `maxTokens` on its thinking block
+ * FIRST. Ask `claude-fable-5` for one word with `maxTokens: 20` and you get
+ * `content: ""`, `finish_reason: "length"`, and a bill for 20 output tokens —
+ * the model never reached the visible answer. Raise it to 200 and the same
+ * prompt answers fine, having spent 47 tokens thinking.
+ *
+ * Nothing about that is a bug, and nothing about it is discoverable: the empty
+ * string looks like a refusal, a content filter, or a broken SDK, and the one
+ * distinguishing signal is a field most callers never read. So the SDK reads it
+ * for you rather than leaving everyone to rediscover it.
+ */
+export function emptyReason(completion: Completion): string | undefined {
+  const choice = completion.choices[0];
+  if (choice === undefined) {
+    return "the gateway returned no choices at all. If this was a deferred turn, use `defer()` and `jobs.wait()` — a 202 job envelope is not a completion.";
+  }
+  const content = choice.message?.content;
+  if (typeof content === "string" && content !== "") return undefined;
+  // A tool call IS the answer. Absent text there is correct, not a failure.
+  if (Array.isArray(choice.message?.tool_calls) && choice.message.tool_calls.length > 0) {
+    return undefined;
+  }
+  if (choice.finish_reason === "length") {
+    const reasoning = completion.usage?.completion_tokens_details?.reasoning_tokens;
+    if (typeof reasoning === "number" && reasoning > 0) {
+      return `the model hit maxTokens while still reasoning (${reasoning} of ${completion.usage?.completion_tokens} output tokens went to thinking), so it never reached the visible answer. Raise maxTokens, or set reasoning: { effort: "none" } / "low" on a model that supports it.`;
+    }
+    return "the model hit maxTokens before emitting visible text. On a reasoning model the thinking block is spent FIRST, so a small maxTokens can be consumed entirely before the answer starts. Raise maxTokens.";
+  }
+  if (choice.finish_reason === "content_filter") {
+    return "the upstream provider's own content filter stopped this turn. Conifer applies no moderation of its own.";
+  }
+  return `the model returned empty content with finish_reason ${JSON.stringify(choice.finish_reason)}.`;
+}
+
 export interface StreamChunk {
   id?: string;
   model?: string;
