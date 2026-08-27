@@ -26,14 +26,16 @@ const output = card("sdk.output.card.json");
 const portability = card("portability.card.json");
 
 /**
- * The gateway's OWN generated contract artifact.
+ * The gateway's own generated wire contract, vendored at
+ * `contracts/gateway-contract.json` and pinned by byte.
  *
- * This reads `the gateway repo/`, the repo that is actually DEPLOYED. The first draft
- * read `the gateway repo/`, an older sibling checkout whose artifact was two
- * receipt headers behind — so the test passed while production sent
+ * Vendoring is deliberate. An earlier version read the artifact out of a
+ * sibling checkout of the gateway repo, and picked up a stale copy that was two
+ * receipt headers behind — so this test passed while production sent
  * `x-conifer-receipt-venue` and `x-conifer-counterfactual-nanousd` that the SDK
  * silently dropped. Pinning the wrong copy of a contract is indistinguishable
- * from having no pin at all, which is why the path matters more than it looks.
+ * from having no pin at all. A vendored file also means this suite runs offline
+ * in any clone, which is what makes the repo contributable.
  */
 const gatewayContract = JSON.parse(
   readFileSync(here("../contracts/gateway-contract.json"), "utf8"),

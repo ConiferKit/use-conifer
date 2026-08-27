@@ -1,16 +1,33 @@
 # The Conifer SDK
 
-One client for the Conifer gateway, in TypeScript and Python, plus an MCP server
-so tools that speak no OpenAI wire can still call it.
+[![CI](https://github.com/ConiferKit/use-conifer/actions/workflows/ci.yml/badge.svg)](https://github.com/ConiferKit/use-conifer/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+One client for the [Conifer](https://conifer.build) gateway, in TypeScript and
+Python, plus an MCP server so tools that speak no OpenAI wire can still call it.
+
+Conifer is one API key in front of every major model, on the OpenAI and
+Anthropic wires. It charges the market rate for the model you call and **adds no
+markup of its own**, and bringing your own provider key costs nothing.
+
+**Docs:** [conifer.build/docs/sdk](https://conifer.build/docs/sdk/) ·
+**Issues:** [file one](https://github.com/ConiferKit/use-conifer/issues) ·
+**Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ```bash
 export CONIFER_API_KEY='sk-conifer-…'   # mint one at https://conifer.build/console#/keys
 ```
 
-> **Not yet published.** `@conifer/sdk` is not on npm and `conifer-sdk` is not
-> on PyPI, so the imports below assume a local install
-> (`npm i /path/to/conifer/sdk`, or `sys.path` at `sdk/python`). Everything else
-> in this README is verified against the live gateway.
+> **Not yet on a registry.** `@conifer/sdk` is not on npm and `conifer-sdk` is
+> not on PyPI yet, so install from this repository:
+>
+> ```bash
+> git clone https://github.com/ConiferKit/use-conifer
+> npm i ./use-conifer            # TypeScript
+> pip install ./use-conifer/python   # Python
+> ```
+>
+> Everything else in this README is verified against the live gateway.
 
 ```ts
 import { Conifer, textOf } from "@conifer/sdk";
@@ -122,7 +139,8 @@ hook — it can only use what its host exposes as a tool. So:
 Build it once, then point any MCP host at the compiled binary:
 
 ```bash
-cd sdk && npm install && npm run build
+git clone https://github.com/ConiferKit/use-conifer
+cd use-conifer && npm install && npm run build
 ```
 
 ```json
@@ -130,7 +148,7 @@ cd sdk && npm install && npm run build
   "mcpServers": {
     "conifer": {
       "command": "node",
-      "args": ["/path/to/conifer/sdk/bin/conifer-mcp.mjs"],
+      "args": ["/path/to/use-conifer/bin/conifer-mcp.mjs"],
       "env": { "CONIFER_API_KEY": "sk-conifer-…" }
     }
   }
@@ -180,15 +198,16 @@ export async function onMention(text: string, isLongTask: boolean) {
 
 ## The cards
 
-Per the workspace's card architecture, this package's contract is data:
+This package's contract is data rather than prose, so it cannot drift from the code that reads it:
 
 - [`cards/sdk.input.card.json`](cards/sdk.input.card.json) — everything the SDK reads, and which gateway input each field maps to.
 - [`cards/sdk.output.card.json`](cards/sdk.output.card.json) — everything it emits, including every receipt field and every error class.
 - [`cards/portability.card.json`](cards/portability.card.json) — the migration contract, per competitor.
 
 The cards are *tested*, not decorative: `tests/cards.test.ts` reads the
-gateway's own generated `contracts/gateway-contract.json` and fails if a receipt
-header the gateway emits is not parsed, if a header the input card claims is
+gateway's own generated wire contract — vendored at
+[`contracts/gateway-contract.json`](contracts/gateway-contract.json) and pinned
+by byte — and fails if a receipt header the gateway emits is not parsed, if a header the input card claims is
 never sent, or if a field the portability card calls unsupported does not
 actually refuse. The Python suite re-checks the same portability card, so both
 languages refuse the same things.
@@ -209,7 +228,7 @@ Verified from a real `npm i`: an ES2022 consumer typechecks clean under
 
 ```bash
 npm run build                                            # emit dist/ (ESM + .d.ts)
-node --experimental-strip-types --test tests/*.test.ts   # 66 tests
+node --experimental-strip-types --test tests/*.test.ts   # 70 tests
 cd python && python3 -m unittest discover -s tests       # 35 tests
 ```
 
@@ -242,7 +261,6 @@ recording here:
 2. **A TLS trust failure was reported as "could not reach the gateway"**, which
    sends the reader to check the network, the key, and the gateway, none of which
    are wrong. It now names the real cause and the two fixes.
-
 3. **The package was unusable on the Node version it advertised.** `engines`
    said `>=22`, but the entry point was a raw `.ts` file, so Node 22 threw
    `ERR_UNKNOWN_FILE_EXTENSION` on `import`. It now ships compiled ESM plus
@@ -257,3 +275,8 @@ Live results: exact receipts (`0.000046000` USD on a haiku turn, itemized and
 summing to the total), `ConiferCostCeilingError` on a $0.000000001 ceiling with
 the projection attached, and `ConiferModelNotFoundError` on an unknown id — in
 both languages.
+
+## License
+
+[Apache License 2.0](LICENSE). Contributions are welcome under the same license
+— start with [CONTRIBUTING.md](CONTRIBUTING.md).

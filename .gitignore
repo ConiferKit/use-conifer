@@ -1,3 +1,6 @@
 node_modules/
-package-lock.json
 dist/
+__pycache__/
+*.egg-info/
+python/build/
+.pytest_cache/

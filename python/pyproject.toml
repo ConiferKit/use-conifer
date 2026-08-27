@@ -6,6 +6,22 @@ requires-python = ">=3.10"
 # No dependencies, on purpose: the SDK works in a lambda, a Slack bot, or a
 # locked-down build image without a package tree to audit.
 dependencies = []
+license = "Apache-2.0"
+readme = "README.md"
+authors = [{ name = "Conifer" }]
+keywords = ["conifer", "llm", "openai", "anthropic", "gateway", "ai", "sdk"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://conifer.build"
+Documentation = "https://conifer.build/docs/sdk/conifer/"
+Source = "https://github.com/ConiferKit/use-conifer"
+Issues = "https://github.com/ConiferKit/use-conifer/issues"
 
 [build-system]
 requires = ["setuptools>=68"]

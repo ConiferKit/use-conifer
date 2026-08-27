@@ -1,0 +1,25 @@
+name: SDK bug
+description: The TypeScript or Python client behaves incorrectly
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language
+      options: ["TypeScript", "Python", "Both"]
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The smallest code that shows the problem. Redact the key.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected versus actual
+    validations:
+      required: true
