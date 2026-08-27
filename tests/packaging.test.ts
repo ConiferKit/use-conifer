@@ -97,5 +97,5 @@ test("the MCP bin answers over stdio instead of exiting silently", () => {
   });
   assert.notEqual(out.trim(), "", "the bin produced no output at all");
   const reply = JSON.parse(out.trim().split("\n")[0] as string);
-  assert.equal(reply.result.tools.length, 4);
+  assert.equal(reply.result.tools.length, 5);
 });
