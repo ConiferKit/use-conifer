@@ -1,10 +1,23 @@
 // mcp/server.ts — Conifer as an MCP server.
 //
-// WHY THIS EXISTS. A one-line env drop-in only helps a tool that already speaks
-// the OpenAI wire. An agent, a Slack bot, or an IDE that speaks MCP has no such
-// hook: it can only use what its host exposes as a tool. This server is that
-// hook — it puts the gateway (catalog, price-aware model choice, a completion,
-// and the balance) into any MCP host as four tools.
+// WHY THIS EXISTS. A one-line env drop-in swaps the model BEHIND your coding
+// agent. This server does something different: it puts the whole catalog IN
+// FRONT of the agent, as tools it can call mid-task. The shape follows from
+// how people actually use it inside a development pipeline:
+//
+//   · "Ask a second model" — your Cursor/Claude Code session is driven by one
+//     model, but a task often wants another: a cheap one for a bulk rewrite, a
+//     reasoning one for a design review. `conifer_complete` is that door, with
+//     full multi-turn messages, not just a one-shot prompt.
+//   · "Which model should this job use?" — `conifer_compare` runs the SAME
+//     prompt across several models in parallel and returns each answer beside
+//     its exact settled cost, so choosing a model for a pipeline step is an
+//     experiment, not a vibe.
+//   · "What can I even call, and what does it cost?" — `conifer_list_models`,
+//     `conifer_choose_model`, `conifer_balance`.
+//
+// Every spending tool takes `max_cost_nanousd`. An agent that can see and bound
+// what its calls cost can be told to spend less; one that cannot, cannot.
 //
 // WHY NO SDK DEPENDENCY. MCP over stdio is newline-delimited JSON-RPC 2.0. The
 // whole protocol surface we need is initialize / tools/list / tools/call, so
@@ -90,16 +103,27 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: "conifer_complete",
     description:
-      "Run one chat turn through the Conifer gateway and return the text PLUS the settled cost of that exact call in nanodollars ($1 = 1e9). Set max_cost_nanousd to refuse the turn before any upstream call if it could cost more than you want to spend.",
+      "Ask any model on the gateway one question — or hand it a whole conversation — and get the answer back with the exact settled cost of that call in nanodollars ($1 = 1e9). Use it mid-task to consult a different model than the one driving this session: a cheap one for bulk work, a reasoning one for a design question. Set max_cost_nanousd and the gateway refuses the call before spending anything if it could cost more.",
     inputSchema: {
       type: "object",
-      required: ["model", "prompt"],
+      required: ["model"],
       properties: {
         model: { type: "string", description: "A catalog id; `vendor/model` spellings resolve too." },
-        prompt: { type: "string" },
-        system: { type: "string" },
+        prompt: { type: "string", description: "One-shot shortcut: becomes the single user message." },
+        messages: {
+          type: "array",
+          description:
+            "Full OpenAI-shaped conversation ({role, content}). Use this for multi-turn work — refining an answer, carrying context between calls. Wins over `prompt` when both are set.",
+          items: { type: "object" },
+        },
+        system: { type: "string", description: "Prepended as the system message." },
         max_tokens: { type: "number" },
         temperature: { type: "number" },
+        reasoning_effort: {
+          type: "string",
+          enum: ["none", "low", "medium", "high"],
+          description: "Forwarded as the reasoning block. Only models that reason honor it.",
+        },
         max_cost_nanousd: {
           type: "number",
           description: "HARD ceiling on this turn's worst-case cost. Over it, the gateway refuses before spending anything.",
@@ -107,21 +131,15 @@ export const TOOLS: ToolDefinition[] = [
       },
     },
     async run(args, client) {
-      const messages: Message[] = [];
-      if (typeof args.system === "string") {
-        messages.push({ role: "system", content: args.system });
-      }
-      messages.push({ role: "user", content: String(args.prompt ?? "") });
-      const completion = await client.chat({
-        model: String(args.model),
-        messages,
-        maxTokens: (args.max_tokens as number | undefined) ?? 1024,
-        temperature: args.temperature as number | undefined,
-        maxCostNanoUsd: args.max_cost_nanousd as number | undefined,
-        client: "conifer-mcp",
-      });
+      const completion = await client.chat(
+        completeRequest(args, { maxTokensDefault: 1024 }),
+      );
       return {
         text: completion.choices[0]?.message?.content ?? "",
+        // Vendor reasoning trace, when the model emitted one. Absent otherwise.
+        reasoning:
+          completion.choices[0]?.message?.reasoning ??
+          completion.choices[0]?.message?.reasoning_content,
         model: completion.receipt.effectiveModel ?? completion.model,
         cost_nanousd: completion.receipt.costNanoUsd,
         cost_usd: completion.receipt.costUsd,
@@ -129,6 +147,66 @@ export const TOOLS: ToolDefinition[] = [
         usage: completion.usage,
         request_id: completion.receipt.requestId,
       };
+    },
+  },
+  {
+    name: "conifer_compare",
+    description:
+      "Run the SAME prompt across several models in parallel and return each answer beside its exact settled cost, cheapest first. This is how you pick a model for a pipeline step with evidence instead of a guess: try the candidates on a real example from the job, read the answers, read the costs. A model that fails reports its error in place — one bad model never sinks the comparison. Each model's call is its own billed turn; max_cost_nanousd caps EACH turn, not the total.",
+    inputSchema: {
+      type: "object",
+      required: ["models", "prompt"],
+      properties: {
+        models: {
+          type: "array",
+          items: { type: "string" },
+          minItems: 2,
+          maxItems: 5,
+          description: "2-5 catalog ids to try. Each is a separate billed call.",
+        },
+        prompt: { type: "string" },
+        system: { type: "string" },
+        max_tokens: { type: "number" },
+        max_cost_nanousd: {
+          type: "number",
+          description: "Per-model ceiling. A model whose worst case exceeds it reports the refusal instead of an answer.",
+        },
+      },
+    },
+    async run(args, client) {
+      const models = (args.models as string[] | undefined) ?? [];
+      if (models.length < 2) {
+        return { error: "give at least two models — comparing one model to itself is a completion, and conifer_complete does that cheaper." };
+      }
+      const settled = await Promise.all(
+        models.slice(0, 5).map(async (model) => {
+          try {
+            const completion = await client.chat(
+              completeRequest({ ...args, model, messages: undefined }, { maxTokensDefault: 1024 }),
+            );
+            return {
+              model: completion.receipt.effectiveModel ?? model,
+              text: completion.choices[0]?.message?.content ?? "",
+              cost_nanousd: completion.receipt.costNanoUsd,
+              cost_usd: completion.receipt.costUsd,
+              usage: completion.usage,
+            };
+          } catch (error) {
+            const failure = error instanceof ConiferError ? error : undefined;
+            return {
+              model,
+              error: failure ? `${failure.type}: ${failure.message}` : String(error),
+            };
+          }
+        }),
+      );
+      // Cheapest first; failures sink to the bottom where they read as footnotes.
+      settled.sort((a, b) => {
+        const costA = "cost_nanousd" in a && a.cost_nanousd !== undefined ? a.cost_nanousd : Number.MAX_SAFE_INTEGER;
+        const costB = "cost_nanousd" in b && b.cost_nanousd !== undefined ? b.cost_nanousd : Number.MAX_SAFE_INTEGER;
+        return costA - costB;
+      });
+      return { results: settled };
     },
   },
   {
@@ -141,6 +219,39 @@ export const TOOLS: ToolDefinition[] = [
     },
   },
 ];
+
+/**
+ * The shared complete/compare request builder. One construction site so the
+ * two spending tools cannot drift: same message assembly, same ceiling, same
+ * attribution tag.
+ */
+export function completeRequest(
+  args: Record<string, unknown>,
+  defaults: { maxTokensDefault: number },
+): Parameters<Conifer["chat"]>[0] {
+  const messages: Message[] = [];
+  if (typeof args.system === "string") {
+    messages.push({ role: "system", content: args.system });
+  }
+  if (Array.isArray(args.messages) && args.messages.length > 0) {
+    messages.push(...(args.messages as Message[]));
+  } else {
+    messages.push({ role: "user", content: String(args.prompt ?? "") });
+  }
+  const effort = args.reasoning_effort;
+  return {
+    model: String(args.model),
+    messages,
+    maxTokens: (args.max_tokens as number | undefined) ?? defaults.maxTokensDefault,
+    temperature: args.temperature as number | undefined,
+    reasoning:
+      typeof effort === "string" && ["none", "low", "medium", "high"].includes(effort)
+        ? { effort: effort as "none" | "low" | "medium" | "high" }
+        : undefined,
+    maxCostNanoUsd: args.max_cost_nanousd as number | undefined,
+    client: "conifer-mcp",
+  };
+}
 
 function summarize(model: CatalogModel) {
   return {

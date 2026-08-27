@@ -75,6 +75,7 @@ test("tools/list works before a key exists, so a host can inspect the server", a
     "conifer_list_models",
     "conifer_choose_model",
     "conifer_complete",
+    "conifer_compare",
     "conifer_balance",
   ]);
   for (const tool of (response as any).result.tools) {
@@ -249,10 +250,92 @@ test("the stdio transport frames newline-delimited JSON-RPC both ways", async ()
 });
 
 test("every tool that spends money can be given a ceiling", () => {
-  const complete = TOOLS.find((tool) => tool.name === "conifer_complete");
-  assert.ok(complete);
-  assert.ok(
-    "max_cost_nanousd" in (complete.inputSchema as any).properties,
-    "an agent must be able to bound its own spend",
+  for (const name of ["conifer_complete", "conifer_compare"]) {
+    const tool = TOOLS.find((candidate) => candidate.name === name);
+    assert.ok(tool, name);
+    assert.ok(
+      "max_cost_nanousd" in (tool.inputSchema as any).properties,
+      `${name}: an agent must be able to bound its own spend`,
+    );
+  }
+});
+
+test("complete accepts a full conversation, not just a one-shot prompt", async () => {
+  const { calls, client } = stubClient([
+    json(
+      { choices: [{ message: { role: "assistant", content: "refined" } }] },
+      { headers: { "x-conifer-cost-nanousd": "1000" } },
+    ),
+  ]);
+  const conversation = [
+    { role: "user", content: "draft a commit message" },
+    { role: "assistant", content: "feat: stuff" },
+    { role: "user", content: "too vague, name the subsystem" },
+  ];
+  await handle(
+    {
+      jsonrpc: "2.0",
+      id: 20,
+      method: "tools/call",
+      params: {
+        name: "conifer_complete",
+        arguments: { model: "m", system: "be terse", messages: conversation, reasoning_effort: "low" },
+      },
+    },
+    client,
   );
+  const body = JSON.parse(calls[0]!.init.body);
+  assert.equal(body.messages.length, 4, "system + the three turns");
+  assert.deepEqual(body.messages[0], { role: "system", content: "be terse" });
+  assert.deepEqual(body.messages.slice(1), conversation);
+  assert.deepEqual(body.reasoning, { effort: "low" });
+});
+
+test("compare runs every model, sorts by cost, and keeps failures as footnotes", async () => {
+  const { client } = stubClient([
+    // Scripted in call order; results must come back sorted by COST.
+    json(
+      { choices: [{ message: { content: "dear answer" } }] },
+      { headers: { "x-conifer-cost-nanousd": "9000", "x-conifer-effective-model": "dear" } },
+    ),
+    json(
+      { choices: [{ message: { content: "cheap answer" } }] },
+      { headers: { "x-conifer-cost-nanousd": "10", "x-conifer-effective-model": "cheap" } },
+    ),
+    json(
+      { error: { type: "model_not_found", message: "no" } },
+      { status: 404 },
+    ),
+  ]);
+  const response = await handle(
+    {
+      jsonrpc: "2.0",
+      id: 21,
+      method: "tools/call",
+      params: {
+        name: "conifer_compare",
+        arguments: { models: ["dear", "cheap", "missing"], prompt: "hi" },
+      },
+    },
+    client,
+  );
+  const { results } = payload(response);
+  assert.equal(results.length, 3);
+  assert.equal(results[0].model, "cheap", "cheapest first");
+  assert.equal(results[1].model, "dear");
+  assert.match(results[2].error, /model_not_found/, "a failure is reported in place, not thrown");
+  assert.equal((response as any).result.isError, undefined, "one bad model never sinks the comparison");
+});
+
+test("compare refuses a single-model list with advice instead of spending", async () => {
+  const response = await handle(
+    {
+      jsonrpc: "2.0",
+      id: 22,
+      method: "tools/call",
+      params: { name: "conifer_compare", arguments: { models: ["only-one"], prompt: "hi" } },
+    },
+    stubClient([]).client,
+  );
+  assert.match(payload(response).error, /at least two/);
 });
