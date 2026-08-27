@@ -184,9 +184,16 @@ export const TOOLS: ToolDefinition[] = [
             const completion = await client.chat(
               completeRequest({ ...args, model, messages: undefined }, { maxTokensDefault: 1024 }),
             );
+            const text = completion.choices[0]?.message?.content ?? "";
             return {
               model: completion.receipt.effectiveModel ?? model,
-              text: completion.choices[0]?.message?.content ?? "",
+              text,
+              // A reasoning model can spend the whole token budget thinking
+              // and return empty text — a blank row reads as "broken" when
+              // the honest reading is "give it more max_tokens". Say so.
+              ...(text === "" && {
+                note: "empty answer: the model spent its max_tokens on reasoning; raise max_tokens or set reasoning_effort on conifer_complete",
+              }),
               cost_nanousd: completion.receipt.costNanoUsd,
               cost_usd: completion.receipt.costUsd,
               usage: completion.usage,
