@@ -188,3 +188,70 @@ test("the Python package offers a `tls` extra without depending on it", () => {
   const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
   assert.match(readme, /\[tls\]/, "the README must document the extra it tells people to install");
 });
+
+/**
+ * The Python package must actually SHIP a description.
+ *
+ * Found by inspecting a built wheel rather than trusting the build's exit code:
+ * `readme = "README.md"` named a file that did not exist in `python/`, and
+ * setuptools resolved it to nothing WITHOUT a warning. The build succeeded, the
+ * metadata carried `Description-Content-Type: text/markdown`, and the body was
+ * EMPTY — which renders as a blank PyPI project page. On a launch, the first
+ * thing most people would have seen of this SDK is nothing at all.
+ *
+ * The fix is a symlink to the repo README, because two copies of a 400-line
+ * document drift and the stale one is always the one a user reads. (A relative
+ * `../README.md` does not work: setuptools refuses to read outside the package
+ * root, and fails the build loudly.)
+ */
+test("the Python package ships the README it declares", () => {
+  const readme = new URL("../python/README.md", import.meta.url);
+  assert.ok(existsSync(readme), "python/README.md is missing — PyPI would render a blank page");
+
+  // It must be the SAME document, not a copy that can drift.
+  const shipped = readFileSync(fileURLToPath(readme), "utf8");
+  const canonical = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+  assert.equal(shipped, canonical, "python/README.md has drifted from the repo README");
+  assert.ok(shipped.length > 1000, "the shipped README is suspiciously short");
+
+  // And the declaration must point at it by the name setuptools can resolve.
+  const pyproject = readFileSync(
+    fileURLToPath(new URL("../python/pyproject.toml", import.meta.url)),
+    "utf8",
+  );
+  assert.match(pyproject, /readme = "README\.md"/);
+});
+
+test("the two packages carry the same version", () => {
+  // `package.json` and `pyproject.toml` have no shared source of truth, so a
+  // mismatched pair ships silently — and then `pip install conifer-sdk==0.2.0`
+  // and `npm i @conifer/sdk@0.2.0` are different software under one name,
+  // which is the sort of thing nobody debugs quickly.
+  const npmVersion = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+  ).version as string;
+  const pyproject = readFileSync(
+    fileURLToPath(new URL("../python/pyproject.toml", import.meta.url)),
+    "utf8",
+  );
+  const pyVersion = /^version = "([^"]+)"/m.exec(pyproject)?.[1];
+  assert.equal(
+    pyVersion,
+    npmVersion,
+    `python/pyproject.toml is ${pyVersion} but package.json is ${npmVersion}`,
+  );
+});
+
+test("the README does not claim a registry that has no package", () => {
+  // The install block currently says, correctly, that neither registry has
+  // this package. Leaving that text after publishing — or removing it before —
+  // is the kind of small dishonesty that costs trust on the day it matters.
+  // RELEASING.md makes updating it a step; this makes forgetting it visible.
+  const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+  const claimsNotPublished = /not on npm/i.test(readme);
+  const showsRegistryInstall = /npm i @conifer\/sdk(?!\.)|pip install conifer-sdk\b/.test(readme);
+  assert.ok(
+    claimsNotPublished !== showsRegistryInstall,
+    "the README both claims the package is unpublished AND shows a registry install (or neither). Pick one — see RELEASING.md.",
+  );
+});
