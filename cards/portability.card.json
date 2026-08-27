@@ -33,7 +33,7 @@
       "provider": "OpenRouter's ProviderPreferences (order/allow_fallbacks/ignore/data_collection/quantizations). Conifer picks the host for the admitted model by price/health inside the gateway; a client cannot pin it. Sending this throws.",
       "route": "`route: \"fallback\"` is server-side failover. Conifer admits exactly the model you name, so there is no host-level retry to enable. Use `models` + `allowClientFallback`.",
       "plugins": "`web`, `file-parser`, `response-healing`, `context-compression` have no Conifer equivalent. Throws.",
-      "prompt": "the legacy text-completions field. Conifer serves the chat wire. Throws.",
+      "prompt": "the legacy text-completions field. The gateway DOES serve POST /v1/completions (verified live 2026-08-27: 200, billed, full receipt headers, non-streaming only — a streamed request there is refused naming /v1/chat/completions). This shim still throws, because it converts to the CHAT wire and the SDK client does not drive that door; the refusal names the door so a caller who wants it can call it directly. Earlier text claimed no door existed at all, which was false and would have turned away a valid migration.",
       "top_k / min_p / top_a / repetition_penalty / logit_bias": "not modelled on the gateway's request card; forwarded ONLY when `passthroughUnknown: true` is set, and then explicitly at the caller's risk."
     },
     "generation_stats_endpoint": "OpenRouter's GET /api/v1/generation has no equivalent: Conifer settles the cost onto the SAME response's receipt headers, so the stats are already in hand when the call returns. The shim reads them there rather than making a second call.",

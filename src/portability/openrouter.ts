@@ -61,7 +61,7 @@ const REFUSALS: Record<string, string> = {
   transforms:
     "`transforms` (middle-out) rewrites your prompt server-side. Conifer refuses an over-window request with a typed 400 naming the window instead. Trim the prompt yourself, or pick a model with a larger context window.",
   prompt:
-    "the legacy text-completion `prompt` field has no Conifer door. Send `messages` instead.",
+    "`prompt` is the legacy text-completion field. The gateway DOES serve it at POST /v1/completions (billed and receipted like any other turn), but this shim converts to the chat wire and this SDK client does not drive that door — and note /v1/completions is non-streaming, so `stream: true` there is refused. Send `messages` instead, or call /v1/completions directly with your existing OpenAI-compatible client.",
 };
 
 /**

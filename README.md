@@ -1,19 +1,49 @@
+<div align="center">
+
+<a href="https://conifer.build">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://conifer.build/conifer-mark-spin-dark.png">
+    <img alt="Conifer" src="https://conifer.build/conifer-mark-spin-light.png" width="132">
+  </picture>
+</a>
+
 # The Conifer SDK
+
+**One API key in front of every major model — and the exact cost of every call.**
 
 [![CI](https://github.com/ConiferKit/use-conifer/actions/workflows/ci.yml/badge.svg)](https://github.com/ConiferKit/use-conifer/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-conifer.build-1f6f4a.svg)](https://conifer.build/docs/sdk/)
+
+[Docs](https://conifer.build/docs/sdk/) ·
+[Migrating](https://conifer.build/docs/sdk/migrate/) ·
+[Issues](https://github.com/ConiferKit/use-conifer/issues) ·
+[Contributing](CONTRIBUTING.md)
+
+</div>
 
 One client for the [Conifer](https://conifer.build) gateway, in TypeScript and
 Python, plus an MCP server so tools that speak no OpenAI wire can still call it.
 
-Conifer is one API key in front of every major model, on the OpenAI and
-Anthropic wires. Credits are charged at the model's list price, and every call
-returns its exact settled cost — down to the nanodollar, itemized. Bring your
-own provider keys and Conifer proxies them for a small fee on list price.
+Conifer speaks the OpenAI and Anthropic wires, so the base URL and the key are
+most of a migration. Credits are charged at the model's list price, and every
+call returns its exact settled cost — down to the nanodollar, itemized. Bring
+your own provider keys and Conifer proxies them for a small fee on list price.
 
-**Docs:** [conifer.build/docs/sdk](https://conifer.build/docs/sdk/) ·
-**Issues:** [file one](https://github.com/ConiferKit/use-conifer/issues) ·
-**Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
+## See it run
+
+The router reads the question and picks the model. A question about a port
+number went to Kimi K3 and came back in three seconds; a question about KV cache
+limits, with the cost dial moved to *best*, went to Claude Opus 5 and took a
+minute. Same session, nothing restarted, no frame sped up.
+
+<div align="center">
+  <a href="https://conifer.build/#router">
+    <img alt="Claude Code running through Conifer's router. The router panel shows the turn routed to kimi-k3 with the cost dial on cheap; the answer, 5432, came back in 3 seconds. Click to watch the full recording on conifer.build." src="https://raw.githubusercontent.com/ConiferKit/use-conifer/main/docs/media/router-demo.jpg" width="760">
+  </a>
+  <br>
+  <sub><b><a href="https://conifer.build/#router">▶ Watch the router choose (50s, no audio)</a></b> — a real screen recording, playing on <a href="https://conifer.build">conifer.build</a></sub>
+</div>
 
 ```bash
 export CONIFER_API_KEY='sk-conifer-…'   # mint one at https://conifer.build/console#/keys
@@ -24,22 +54,13 @@ export CONIFER_API_KEY='sk-conifer-…'   # mint one at https://conifer.build/co
 >
 > ```bash
 > git clone https://github.com/ConiferKit/use-conifer
-> npm i ./use-conifer                    # TypeScript
-> pip install "./use-conifer/python[tls]"  # Python — see the note below
+> npm i ./use-conifer                      # TypeScript
+> pip install "./use-conifer/python[tls]"  # Python — keep the [tls] extra
 > ```
 >
-> **Python on macOS: use `[tls]`.** A python.org install whose
-> *Install Certificates.command* was never run has an **empty CA trust store**,
-> and so does every venv built on it — it cannot verify *any* HTTPS host, and
-> your first call dies with `CERTIFICATE_VERIFY_FAILED`. The `[tls]` extra pulls
-> in `certifi`, which the SDK uses automatically when it detects an empty store.
-> It is an extra rather than a dependency because zero dependencies is a real
-> feature here (this drops into a lambda or a locked-down build image with no
-> package tree to audit), and because Linux, Homebrew, Docker and conda already
-> have a working store. If you hit the error anyway, the SDK says exactly this,
-> and names the remedy, rather than reporting "the gateway is unreachable".
->
-> Everything else in this README is verified against the live gateway.
+> On macOS, `[tls]` is what keeps a fresh python.org venv from failing its first
+> call with `CERTIFICATE_VERIFY_FAILED`. [Why it is an extra rather than a
+> dependency](#python-and-tls).
 
 ```ts
 import { Conifer, textOf } from "@conifer/sdk";
@@ -462,11 +483,27 @@ Verified from a real `npm i`: an ES2022 consumer typechecks clean under
 `strict` with **no** `skipLibCheck`, and CommonJS `require()` works on Node 22,
 24 and 26.
 
+## Python and TLS
+
+The Python package has **zero dependencies**, which is a real feature: it drops
+into a lambda or a locked-down build image with no package tree to audit. So
+`certifi` ships as the optional `[tls]` extra rather than a hard dependency.
+
+You want that extra on macOS. A python.org install whose *Install
+Certificates.command* was never run has an empty CA trust store, and so does
+every venv built on it — it cannot verify any HTTPS host, and the first call
+dies with `CERTIFICATE_VERIFY_FAILED`. With `[tls]` installed the SDK detects
+the empty store and uses `certifi` automatically. Linux, Homebrew, Docker and
+conda already have a working store.
+
+Hit it without the extra and the error says so, and names the fix, rather than
+reporting that the gateway is unreachable.
+
 ## Tests
 
 ```bash
 npm run build     # emit dist/ (ESM + .d.ts)
-npm test          # 145 tests, offline
+npm test          # 162 tests, offline
 npm run typecheck
 
 cd python && python3 -m pytest -q   # 105 tests, offline
@@ -474,17 +511,13 @@ cd python && python3 -m pytest -q   # 105 tests, offline
 
 Most assertions run with an injected transport: no network, no mock framework,
 and every one is about bytes that would go on the wire or values handed back.
-`tests/packaging.test.ts` is the exception and the important one — it checks the
-package as a CONSUMER receives it, because that is where two real defects hid
-(see below).
+`tests/packaging.test.ts` is the exception, and it matters: it checks the
+package as a consumer receives it, which is where two real defects hid.
 
-### The live QA harness
+### Verified against the live gateway
 
-Offline tests can only confirm what we already believed. Four defects in this
-SDK were invisible to a suite that mocked the server and obvious against the
-real one, including three error classes that were unreachable in production and
-a deferred turn that was billed and returned nothing readable. So there is a
-second, deliberate gate:
+A suite that mocks the server can only confirm what we already believed, so
+every claim in this README is also checked against production:
 
 ```bash
 CONIFER_API_KEY=sk-… npm run qa:live                     # 20 checks
@@ -495,9 +528,17 @@ cd python && CONIFER_API_KEY=sk-… python3 scripts/live_qa.py --include-deferre
 
 It exercises every surface — catalog, chat, streaming, embeddings, receipts,
 budgets, deferred jobs, and each refusal — against `api.conifer.build`, in both
-languages, and prints the real cost of what it just did. It **spends real
-money** (a few tenths of a cent), which is exactly why it is not part of
-`npm test`: run it before a release, on purpose.
+languages, and prints the real cost of what it just did. A fresh-install pass
+installs the packed tarball and the Python package into clean projects and uses
+them as a consumer does.
+
+It **spends real money** (a few tenths of a cent), which is why it is not part
+of `npm test`: run it before a release, deliberately.
+
+This gate earns its keep. Every defect found in the 2026-08-27 pass was
+invisible offline and obvious here — three error classes unreachable in
+production, a caller's `requestId` never once consulted, and a deferred turn
+that was billed and returned nothing readable.
 
 ## What Conifer does not do
 
@@ -506,37 +547,10 @@ Stated here so you find out now rather than mid-migration:
 - **No image generation, reranking, moderation, audio, Files, or Batches.**
   `assertSupportedVercelSurface` throws at the call site, naming the remedy,
   rather than letting you find out as a 404 in production on the one code path
-  nobody exercised. (Embeddings WERE on this list; the gateway shipped
-  `/v1/embeddings` on 2026-08-26 and the SDK now serves that door directly.)
+  nobody exercised.
 - **No provider pinning.** The gateway chooses the host for the model you named, by price and health. The model is never substituted.
 - **No server-side prompt compression, moderation, injection scanning, or prompt registry.**
 - **No mid-stream fallback.** The first token commits the turn, so a chain cannot be attached to a stream.
-
-## Verified against the live gateway
-
-The offline suites use injected transports and no network, so they can only
-confirm what we already believed. Every claim in this README is also checked
-against production by `scripts/live-qa.mjs` and `python/scripts/live_qa.py`
-(20 TS / 18 Python checks, plus 2 more with `--include-deferred`), in both languages, plus a
-fresh-install pass that installs the packed tarball and the Python package into
-clean projects and uses them as a consumer does.
-
-That second gate is not ceremony. It is where every defect in the 2026-08-27
-pass was found, and none of them were visible offline:
-
-- three error classes were **unreachable** in production, because the gateway
-  had moved to the industry error vocabulary while the fixtures kept the retired
-  names — so every 401 and 400 arrived as a bare `ConiferError` and every 429
-  silently discarded the server's own `retry-after`;
-- `requestId` was **inert**: the gateway reads `idempotency-key` first, and the
-  SDK always sent one, so a caller's trace id was never once consulted;
-- `chat({ defer: true })` returned an **empty completion** for a turn that had
-  been accepted *and debited*;
-- transient `409`s were treated as terminal, and then, once retried, were given
-  0.75s to resolve a cross-replica convergence;
-- a fresh Python venv could not make its **first call at all**, because a
-  python.org install has an empty CA trust store and no `certifi` to fall back
-  to.
 
 ## License
 
