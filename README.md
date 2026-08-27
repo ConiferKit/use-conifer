@@ -395,7 +395,7 @@ until the package is on the registry.
 
 Six tools, each one real gateway call:
 
-- `conifer_complete` — ask any model a question, or hand it a whole conversation. The answer returns **with what it cost**, and `max_cost_nanousd` bounds the spend before the call.
+- `conifer_complete` — ask any model a question, or hand it a whole conversation. The answer returns **with what it cost**, and `max_cost_nanousd` bounds the spend before the call. An empty answer carries `empty_reason`, so an agent is told *why* instead of retrying and paying twice.
 - `conifer_compare` — the same prompt across 2–5 models in parallel, each answer beside its cost, cheapest first. The ceiling caps each turn, not the total.
 - `conifer_embed` — text to embedding vectors, with the settled cost. Returns the shape, the cost and a short preview rather than the raw vectors: a single 1536-dimension embedding is ~30 KB of digits that no model can read, and a batch would swallow the context window.
 - `conifer_list_models` — the catalog, with declared capabilities and as-charged prices.
