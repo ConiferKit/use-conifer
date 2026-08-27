@@ -15,7 +15,7 @@
   },
   "types": "./dist/src/index.d.ts",
   "bin": {
-    "conifer-mcp": "./bin/conifer-mcp.mjs"
+    "conifer-mcp": "bin/conifer-mcp.mjs"
   },
   "files": [
     "dist",

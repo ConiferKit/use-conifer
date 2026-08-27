@@ -53,6 +53,26 @@ test("installing from a clone builds dist, not just packing", () => {
   assert.equal(pkg.scripts.prepare, "npm run build");
 });
 
+test("the `bin` path has no `./` prefix, so the registry keeps the binary", () => {
+  // npm VALIDATES bin paths on publish and SILENTLY DROPS any entry whose
+  // value it considers invalid — a leading "./" is exactly that. The failure
+  // is invisible locally: `npm pack` keeps the "./" form, a tarball install
+  // links node_modules/.bin/conifer-mcp fine, and every offline test passes.
+  // Only the PUBLISHED package loses the bin, so `npx conifer-mcp` and every
+  // MCP client config pointing at it break for everyone but us.
+  //
+  // Caught 2026-08-27 while publishing 0.1.0: npm printed
+  //   `"bin[conifer-mcp]" script name bin/conifer-mcp.mjs was invalid and removed`
+  // as a WARNING inside a wall of publish output, and would have shipped a
+  // package whose advertised MCP entry point did not exist.
+  for (const [name, path] of Object.entries(pkg.bin as Record<string, string>)) {
+    assert.ok(
+      !path.startsWith("./"),
+      `bin[${name}] is "${path}" — npm strips entries with a "./" prefix on publish; use "${path.slice(2)}"`,
+    );
+  }
+});
+
 test("everything package.json points at is inside `files`", () => {
   const shipped: string[] = pkg.files;
   const referenced = [
