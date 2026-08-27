@@ -76,6 +76,7 @@ test("tools/list works before a key exists, so a host can inspect the server", a
     "conifer_choose_model",
     "conifer_complete",
     "conifer_compare",
+    "conifer_embed",
     "conifer_balance",
   ]);
   for (const tool of (response as any).result.tools) {

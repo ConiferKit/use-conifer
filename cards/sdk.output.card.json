@@ -3,24 +3,25 @@
   "version": 1,
   "purpose": "Everything the Conifer SDK emits. Consumers depend on this card, never on src/ internals.",
   "completion": {
-    "id": "string \u2014 the upstream completion id",
-    "model": "string \u2014 the model the gateway actually served (the effective spelling)",
+    "id": "string — the upstream completion id",
+    "model": "string — the model the gateway actually served (the effective spelling)",
     "choices": "the OpenAI chat wire, verbatim. Vendor extras (reasoning, reasoning_content) are NOT stripped.",
     "usage": "the OpenAI usage object, verbatim, including prompt_tokens_details.cached_tokens / cache_write_tokens when the upstream reported them",
     "receipt": {
-      "note": "The x-conifer-* disclosure headers, parsed. Absent fields are ABSENT \u2014 never zero-filled, because the gateway omits a receipt it cannot guarantee.",
+      "note": "The x-conifer-* disclosure headers, parsed. Absent fields are ABSENT — never zero-filled, because the gateway omits a receipt it cannot guarantee.",
       "requestedModel": "x-conifer-requested-model",
       "effectiveModel": "x-conifer-effective-model",
       "reason": "x-conifer-receipt-reason",
       "endpoint": "x-conifer-endpoint",
       "costNanoUsd": "x-conifer-cost-nanousd, as a BigInt-safe integer string plus a number convenience field",
       "costComponentsNanoUsd": "x-conifer-cost-components-nanousd, split into {fresh, cacheWrite, cacheRead, output}; the four sum to costNanoUsd by construction",
-      "serviceTier": "x-conifer-service-tier \u2014 ABSENT when no completion window was declared; never fabricated",
+      "serviceTier": "x-conifer-service-tier — ABSENT when no completion window was declared; never fabricated",
       "requestId": "x-conifer-request-id",
-      "receiptVenue": "x-conifer-receipt-venue \u2014 the venue that SERVED the turn; this gateway is always `cloud`. Distinct from the REQUEST constraint `x-conifer-venue`; the contract never repurposes a name.",
-      "counterfactualNanoUsd": "x-conifer-counterfactual-nanousd \u2014 the retail counterfactual at the documented default pin. OMITTED unless the routed predicate holds, and never 0-as-guess, so absence means 'not applicable', not 'no saving'."
+      "receiptVenue": "x-conifer-receipt-venue — the venue that SERVED the turn; this gateway is always `cloud`. Distinct from the REQUEST constraint `x-conifer-venue`; the contract never repurposes a name.",
+      "counterfactualNanoUsd": "x-conifer-counterfactual-nanousd — the retail counterfactual at the documented default pin. OMITTED unless the routed predicate holds, and never 0-as-guess, so absence means 'not applicable', not 'no saving'."
     },
-    "fallbackIndex": "number \u2014 which member of a client-side fallback chain served (0 = the model you asked for). Always present, always honest."
+    "fallbackIndex": "number — which member of a client-side fallback chain served (0 = the model you asked for). Always present, always honest.",
+    "emptyReason": "`emptyReason(completion)` (TS) / `completion.empty_reason` (Python) — WHY a completion came back with no text, or absent when there is text. The trap it exists for, measured live 2026-08-27 on BOTH wires: a reasoning model spends maxTokens on its THINKING BLOCK FIRST, so a small budget is consumed before the visible answer starts — empty content, finish_reason 'length', and a bill for every output token. That empty string is indistinguishable at the call site from a refusal, a content filter, or a broken SDK, and the distinguishing field is one most callers never read. A tool call returns ABSENT: empty text beside a tool call is the correct answer, not a failure."
   },
   "stream": {
     "note": "An async iterable of raw OpenAI chunks plus a terminal receipt.",
@@ -35,7 +36,7 @@
     "contextWindow": "number | absent",
     "maxOutputTokens": "number | absent",
     "maxTools": "number | absent",
-    "caps": "string[] | absent \u2014 declared capabilities. ABSENT means undeclared, NOT unsupported.",
+    "caps": "string[] | absent — declared capabilities. ABSENT means undeclared, NOT unsupported.",
     "pricing": "the AS-CHARGED price for THIS entry's lane only. Never both lanes.",
     "feePct": "the BYOK take rate, on byok entries only. Display-only.",
     "unavailable": "true only when BYOK custody is degraded for a model you hold a key for"
@@ -48,23 +49,40 @@
   },
   "errors": {
     "note": "One error class per gateway refusal, so a consumer branches on a name rather than a status number. Every error carries `status`, `type`, `code`, `message`, `requestId`, and `retryable`.",
-    "discriminator": "(type, code, status), in that order of authority. The gateway speaks the INDUSTRY error vocabulary, not a private schema: `invalid_request_error` covers 401 AND 400 AND an unknown URL, and `rate_limit_error` is the 429. So `type` alone cannot pick the class \u2014 `error.code` (`invalid_api_key`, `model_not_found`, \u2026) disambiguates where the gateway sends one, and the STATUS settles it where it does not. Mapping on `type` alone is exactly the bug this line exists to prevent: it made ConiferAuthError, ConiferBadRequestError and ConiferRateLimitError unreachable against the live gateway (found 2026-08-27).",
-    "retired_types": "The gateway's older private names \u2014 `unauthorized`, `invalid_request`, `rate_limited` \u2014 are still accepted so an older deploy or a recorded fixture maps to the same class. They are NOT what the live gateway sends.",
-    "ConiferAuthError": "401/403 \u2014 type invalid_request_error, code invalid_api_key (retired: unauthorized)",
-    "ConiferPaymentError": "402 insufficient_allowance \u2014 carries requiredNanoUsd / balanceNanoUsd",
-    "ConiferCostCeilingError": "402 cost_ceiling_exceeded \u2014 carries projectedNanoUsd / ceilingNanoUsd",
-    "ConiferBadRequestError": "400 \u2014 type invalid_request_error with no auth/model code (retired: invalid_request)",
-    "ConiferModelNotFoundError": "404 model_not_found or job_not_found \u2014 indistinguishable from 'not visible to you', by design",
-    "ConiferConflictError": "409 request_in_progress",
+    "discriminator": "(type, code, status), in that order of authority. The gateway speaks the INDUSTRY error vocabulary, not a private schema: `invalid_request_error` covers 401 AND 400 AND an unknown URL, and `rate_limit_error` is the 429. So `type` alone cannot pick the class — `error.code` (`invalid_api_key`, `model_not_found`, …) disambiguates where the gateway sends one, and the STATUS settles it where it does not. Mapping on `type` alone is exactly the bug this line exists to prevent: it made ConiferAuthError, ConiferBadRequestError and ConiferRateLimitError unreachable against the live gateway (found 2026-08-27).",
+    "retired_types": "The gateway's older private names — `unauthorized`, `invalid_request`, `rate_limited` — are still accepted so an older deploy or a recorded fixture maps to the same class. They are NOT what the live gateway sends.",
+    "ConiferAuthError": "401/403 — type invalid_request_error, code invalid_api_key (retired: unauthorized)",
+    "ConiferPaymentError": "402 insufficient_allowance — carries requiredNanoUsd / balanceNanoUsd",
+    "ConiferCostCeilingError": "402 cost_ceiling_exceeded — carries projectedNanoUsd / ceilingNanoUsd",
+    "ConiferBadRequestError": "400 — type invalid_request_error with no auth/model code (retired: invalid_request)",
+    "ConiferModelNotFoundError": "404 model_not_found or job_not_found — indistinguishable from 'not visible to you', by design",
+    "ConiferConflictError": "409 request_in_progress — THREE different meanings under one type, so `retryable` is decided by the gateway's WORDING, not the status. 'already used with a different request body' is TERMINAL (the same bytes refuse forever). 'already in progress; retry shortly' and 'no replayable response; retry shortly' are TRANSIENT — the gateway asking to be asked again, which is safe because the retry carries the SAME idempotency key and so cannot bill twice. Found live 2026-08-27 by the QA harness, on a FIRST call.",
     "ConiferByokKeyError": "422 byok_key_rejected",
-    "ConiferRateLimitError": "429 rate_limit_error \u2014 carries retryAfterSeconds when the gateway sent one (retired: rate_limited)",
+    "ConiferRateLimitError": "429 rate_limit_error — carries retryAfterSeconds when the gateway sent one (retired: rate_limited)",
     "ConiferUpstreamError": "422/502 upstream_error or wire_upstream_mismatch",
     "ConiferUnavailableError": "503 service_available=false",
-    "ConiferTimeoutError": "client-side abort \u2014 no gateway verdict, so no billing claim is made either way"
+    "ConiferTimeoutError": "client-side abort — no gateway verdict, so no billing claim is made either way"
+  },
+  "embeddings": {
+    "note": "The result of `POST /v1/embeddings`. Unlike a stream, an embeddings turn settles IN BAND, so the COST fields of the receipt are present on this very response.",
+    "data": "one entry per input, index ascending. `embedding` is ALWAYS plain numbers, whatever the wire encoding was — the SDK requests base64 by default (~3x less network) and decodes it, which is exactly lossless. An unrecognized encoding decodes to an EMPTY vector rather than a guess: a wrong vector sails through a cosine similarity and returns nonsense rankings forever, where a missing one fails loudly.",
+    "usage": "input tokens only. There is no `completion_tokens` because there is no completion.",
+    "receipt": "the same parsed x-conifer-* disclosure as a chat turn, cost included.",
+    "raw": "the provider's own body, untouched — base64 strings included, for a caller who wants the bytes rather than the numbers."
   },
   "consumers": [
     "sdk/mcp (the MCP server)",
     "sdk/python (the parity implementation, same cards)",
     "Conifer-Website/components/docs/content/sdk*.tsx (the docs)"
-  ]
+  ],
+  "deferred_job": {
+    "note": "The 202 accept envelope and every status poll share this shape. Carries NO content and NO cost: the money is disclosed on the result, which is a separate call.",
+    "jobId": "job_id",
+    "status": "one of queued/submitted/ended/fetched/expired/cancelled/failed",
+    "deadlineUtc": "unix seconds; after this the job expires and unfinished work is refunded",
+    "createdUtc": "unix seconds",
+    "model": "the model the job was accepted for",
+    "pollUrl": "the gateway's own poll path, relative to the base URL",
+    "raw": "the envelope untouched"
+  }
 }

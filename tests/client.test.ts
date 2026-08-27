@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import {
   Conifer,
+  ConiferConflictError,
   ConiferCostCeilingError,
   ConiferModelNotFoundError,
   ConiferPaymentError,
@@ -14,6 +15,8 @@ import {
   ConiferRateLimitError,
   chatBody,
   chatHeaders,
+  emptyReason,
+  minimumBackoffMs,
   nanoUsdToUsdString,
   parseCostComponents,
   parseFrame,
@@ -451,4 +454,225 @@ test("a stray OPENAI_BASE_URL cannot redirect Conifer traffic elsewhere", () => 
 
 test("a missing key fails at construction, not at the first call", () => {
   assert.throws(() => new Conifer({ apiKey: "", fetch: (async () => new Response("")) as any }), /CONIFER_API_KEY/);
+});
+
+/**
+ * `requestId` used to be inert, and that is worth a test of its own.
+ *
+ * The gateway derives its request id from the FIRST of `idempotency-key` then
+ * `x-request-id` (its own `request_id()`, confirmed live 2026-08-27). Because
+ * the SDK always sends an idempotency key, the second name was never once
+ * reached: a caller who set `requestId` to their trace id got a generated
+ * `idem-<uuid>` back in the receipt and could not correlate a support question
+ * with their own logs. On this gateway the two are ONE identity, so the SDK
+ * feeds `requestId` into the key that is actually read.
+ */
+test("an explicit requestId becomes the id the gateway actually echoes", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse(COMPLETION, { headers: { ...RECEIPT_HEADERS, "x-conifer-request-id": "trace-42" } }),
+  ]);
+  const conifer = new Conifer({ apiKey: "k", fetch: fetchImpl });
+  const answer = await conifer.chat({
+    model: "m",
+    messages: [{ role: "user", content: "hi" }],
+    requestId: "trace-42",
+  });
+
+  // The header the gateway READS carries the caller's id …
+  assert.equal(calls[0]?.init.headers["idempotency-key"], "trace-42");
+  // … and the one it merely logs carries it too, for anything in between.
+  assert.equal(calls[0]?.init.headers["x-request-id"], "trace-42");
+  // So the id the caller chose is the id that comes back.
+  assert.equal(answer.receipt.requestId, "trace-42");
+});
+
+test("an explicit idempotencyKey still wins over requestId", async () => {
+  // The two remain separable: idempotency is about not billing twice, and a
+  // caller whose trace ids are not unique per turn must be able to say so.
+  const { calls, fetchImpl } = stubFetch([jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS })]);
+  await new Conifer({ apiKey: "k", fetch: fetchImpl }).chat({
+    model: "m",
+    messages: [{ role: "user", content: "hi" }],
+    requestId: "trace-42",
+    idempotencyKey: "key-1",
+  });
+  assert.equal(calls[0]?.init.headers["idempotency-key"], "key-1");
+  assert.equal(calls[0]?.init.headers["x-request-id"], "trace-42");
+});
+
+test("with neither id, a generated key still makes the turn idempotent", async () => {
+  const { calls, fetchImpl } = stubFetch([jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS })]);
+  await new Conifer({ apiKey: "k", fetch: fetchImpl }).chat({
+    model: "m",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  // A retry that cannot double-bill is the whole point, so the key is never
+  // optional — only its SOURCE is.
+  assert.match(calls[0]?.init.headers["idempotency-key"] as string, /^idem-/);
+  assert.equal(calls[0]?.init.headers["x-request-id"], undefined);
+});
+
+test("the embeddings door resolves the same identity the same way", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse({ data: [] }, { headers: { "x-conifer-request-id": "trace-9" } }),
+  ]);
+  await new Conifer({ apiKey: "k", fetch: fetchImpl }).embeddings.create({
+    model: "text-embedding-3-small",
+    input: "hi",
+    requestId: "trace-9",
+  });
+  assert.equal(calls[0]?.init.headers["idempotency-key"], "trace-9");
+});
+
+/**
+ * A transient 409 is retried, with the SAME key — which is what makes it safe.
+ *
+ * The gateway answers "this request has no replayable response; retry shortly"
+ * when a key is known but its settled body lives in another replica's cache. It
+ * will not guess between "settled elsewhere" and "still running", because
+ * either guess can double-charge or wrongly refund. Re-asking with the same
+ * idempotency key is exactly how that resolves: the gateway either replays the
+ * settled response or serves the turn once.
+ *
+ * Found live, not by inspection: a QA run hit this on a FIRST call and the SDK
+ * surfaced a hard failure for a turn the gateway was willing to serve.
+ */
+test("a 409 that asks to be retried IS retried, reusing the idempotency key", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse(
+      {
+        error: {
+          type: "request_in_progress",
+          message: "this request has no replayable response; retry shortly",
+        },
+      },
+      { status: 409 },
+    ),
+    jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS }),
+  ]);
+  const answer = await new Conifer({ apiKey: "k", fetch: fetchImpl }).chat({
+    model: "m",
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  assert.equal(calls.length, 2, "the transient conflict should have been retried");
+  // THE safety property: the same key both times, so the retry cannot bill a
+  // second turn even if the first one had actually settled.
+  assert.equal(
+    calls[0]?.init.headers["idempotency-key"],
+    calls[1]?.init.headers["idempotency-key"],
+  );
+  assert.equal(textOf(answer), "pinecone");
+});
+
+test("a 409 for a REUSED key with different bytes is not retried", async () => {
+  // Terminal by construction: the same request refuses identically forever, so
+  // retrying is pure latency and burnt rate limit.
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse(
+      {
+        error: {
+          type: "request_in_progress",
+          message: "idempotency key was already used with a different request body",
+        },
+      },
+      { status: 409 },
+    ),
+  ]);
+  await assert.rejects(
+    () =>
+      new Conifer({ apiKey: "k", fetch: fetchImpl }).chat({
+        model: "m",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    ConiferConflictError,
+  );
+  assert.equal(calls.length, 1, "a body conflict must not be retried");
+});
+
+test("a transient 409 waits long enough to actually converge", () => {
+  // The default schedule (250ms, 500ms) gives a retryable failure 0.75s of
+  // total patience, which is right for a 502 and far too impatient for a 409:
+  // that one is waiting on CROSS-REPLICA CONVERGENCE, not on a socket. Found
+  // in a fresh-install consumer test — i.e. exactly where a new user would
+  // have found it, on their first call, for a turn that was being served.
+  assert.ok(minimumBackoffMs(409) >= 1_000, "a 409 needs a real floor");
+  // Every other status keeps the fast schedule: a blip should recover fast.
+  for (const status of [429, 502, 503, 504]) {
+    assert.equal(minimumBackoffMs(status), 0, `${status} must not be slowed down`);
+  }
+  // Two retries at the floor is several seconds of patience, which covered
+  // every occurrence observed against production.
+  assert.ok(minimumBackoffMs(409) * 2 >= 3_000);
+});
+
+/**
+ * The empty-completion trap, and the one signal that explains it.
+ *
+ * Measured live 2026-08-27 on BOTH wires: a reasoning model spends `maxTokens`
+ * on its thinking block FIRST, so a small budget is consumed before the visible
+ * answer starts. You get `content: ""`, `finish_reason: "length"`, and a bill
+ * for every one of those output tokens. `claude-fable-5` at `maxTokens: 16`
+ * does exactly this; at 200 the same prompt answers fine.
+ *
+ * That empty string is indistinguishable, at the call site, from a refusal, a
+ * content filter, or a broken SDK — and the distinguishing field is one most
+ * callers never read. So the SDK reads it.
+ */
+test("an empty completion explains itself instead of just being empty", () => {
+  const truncated = {
+    choices: [{ index: 0, finish_reason: "length", message: { role: "assistant", content: "" } }],
+    receipt: {},
+    fallbackIndex: 0,
+  } as any;
+  const why = emptyReason(truncated);
+  assert.match(why ?? "", /maxTokens/);
+  assert.match(why ?? "", /thinking block is spent FIRST/);
+
+  // With the reasoning-token breakdown, the explanation gets specific: it can
+  // name how much of the budget went to thinking rather than answering.
+  const withUsage = {
+    ...truncated,
+    usage: { completion_tokens: 20, completion_tokens_details: { reasoning_tokens: 20 } },
+  };
+  assert.match(emptyReason(withUsage) ?? "", /20 of 20 output tokens went to thinking/);
+});
+
+test("a completion that HAS text has nothing to explain", () => {
+  const fine = {
+    choices: [{ finish_reason: "stop", message: { role: "assistant", content: "pinecone" } }],
+    receipt: {},
+    fallbackIndex: 0,
+  } as any;
+  assert.equal(emptyReason(fine), undefined);
+});
+
+test("a tool call is an answer, not an absence", () => {
+  // Empty text beside a tool call is CORRECT, and calling it a failure would
+  // send people chasing a bug in the one case that is working as designed.
+  const toolCall = {
+    choices: [
+      {
+        finish_reason: "tool_calls",
+        message: { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function" }] },
+      },
+    ],
+    receipt: {},
+    fallbackIndex: 0,
+  } as any;
+  assert.equal(emptyReason(toolCall), undefined);
+});
+
+test("a content filter and a no-choices body are named for what they are", () => {
+  const filtered = {
+    choices: [{ finish_reason: "content_filter", message: { content: "" } }],
+    receipt: {},
+    fallbackIndex: 0,
+  } as any;
+  // Worth stating plainly: the filter is the PROVIDER's, not ours.
+  assert.match(emptyReason(filtered) ?? "", /Conifer applies no moderation of its own/);
+
+  // The shape a deferred 202 used to be coerced into. Point at the fix.
+  const empty = { choices: [], receipt: {}, fallbackIndex: 0 } as any;
+  assert.match(emptyReason(empty) ?? "", /defer\(\)/);
 });

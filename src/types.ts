@@ -113,6 +113,49 @@ export function textOf(completion: Completion): string | undefined {
   return typeof content === "string" ? content : undefined;
 }
 
+/**
+ * Why a completion came back with no text, when it did.
+ *
+ * `undefined` means there is text and nothing to explain. Otherwise this is a
+ * sentence you can log or raise, because an empty string is the single most
+ * confusing thing this API returns and the reason is never in the content.
+ *
+ * THE TRAP THIS EXISTS FOR (measured live 2026-08-27, on BOTH the OpenAI and
+ * Anthropic wires). A reasoning model spends `maxTokens` on its thinking block
+ * FIRST. Ask `claude-fable-5` for one word with `maxTokens: 20` and you get
+ * `content: ""`, `finish_reason: "length"`, and a bill for 20 output tokens —
+ * the model never reached the visible answer. Raise it to 200 and the same
+ * prompt answers fine, having spent 47 tokens thinking.
+ *
+ * Nothing about that is a bug, and nothing about it is discoverable: the empty
+ * string looks like a refusal, a content filter, or a broken SDK, and the one
+ * distinguishing signal is a field most callers never read. So the SDK reads it
+ * for you rather than leaving everyone to rediscover it.
+ */
+export function emptyReason(completion: Completion): string | undefined {
+  const choice = completion.choices[0];
+  if (choice === undefined) {
+    return "the gateway returned no choices at all. If this was a deferred turn, use `defer()` and `jobs.wait()` — a 202 job envelope is not a completion.";
+  }
+  const content = choice.message?.content;
+  if (typeof content === "string" && content !== "") return undefined;
+  // A tool call IS the answer. Absent text there is correct, not a failure.
+  if (Array.isArray(choice.message?.tool_calls) && choice.message.tool_calls.length > 0) {
+    return undefined;
+  }
+  if (choice.finish_reason === "length") {
+    const reasoning = completion.usage?.completion_tokens_details?.reasoning_tokens;
+    if (typeof reasoning === "number" && reasoning > 0) {
+      return `the model hit maxTokens while still reasoning (${reasoning} of ${completion.usage?.completion_tokens} output tokens went to thinking), so it never reached the visible answer. Raise maxTokens, or set reasoning: { effort: "none" } / "low" on a model that supports it.`;
+    }
+    return "the model hit maxTokens before emitting visible text. On a reasoning model the thinking block is spent FIRST, so a small maxTokens can be consumed entirely before the answer starts. Raise maxTokens.";
+  }
+  if (choice.finish_reason === "content_filter") {
+    return "the upstream provider's own content filter stopped this turn. Conifer applies no moderation of its own.";
+  }
+  return `the model returned empty content with finish_reason ${JSON.stringify(choice.finish_reason)}.`;
+}
+
 export interface StreamChunk {
   id?: string;
   model?: string;
@@ -177,4 +220,136 @@ export interface Balance {
   allowanceRemainingNanoUsd?: number;
   creditsRemainingNanoUsd?: number;
   remainingUsd: string;
+}
+
+// ----------------------------------------------------------------- embeddings
+
+/**
+ * One embeddings turn.
+ *
+ * The gateway bills embeddings on INPUT ONLY — there is no completion, so
+ * there is no output term and the catalog carries a zero output rate for every
+ * embedding seat. That is why this request has no `maxTokens`, no sampling
+ * knobs and no stream: none of them mean anything here, and offering them
+ * would imply a control the wire does not have.
+ */
+export interface EmbeddingsRequest {
+  /** Must DECLARE `caps: ["embeddings"]`. A chat model is refused with a 400 naming the chat door. */
+  model: string;
+  /**
+   * Text, or a batch of texts. A batch returns one vector per member, in the
+   * order you sent them.
+   *
+   * Token-id arrays are NOT accepted: the gateway cannot size a spend hold
+   * from token ids it did not tokenize, and serving an unpriced turn is the
+   * one thing the money path must never do. Send text.
+   */
+  input: string | string[];
+  /** Matryoshka shortening, on models that support it. Forwarded verbatim; the provider validates it. */
+  dimensions?: number;
+  /**
+   * The WIRE encoding, which is not the same question as what you get back.
+   *
+   * Leave this alone unless you need the raw provider bytes. The SDK requests
+   * `base64` by default and decodes it for you — same numbers, ~3x less
+   * network. See {@link Embeddings.create}. Set `"float"` to send JSON floats
+   * on the wire, or read `raw` for whatever the provider actually sent.
+   */
+  encodingFormat?: "float" | "base64";
+  /** Opaque end-user id, forwarded verbatim for the provider's own abuse tooling. */
+  user?: string;
+
+  /** HARD ceiling on the caller-total worst case, in integer nanodollars. */
+  maxCostNanoUsd?: number;
+  idempotencyKey?: string;
+  requestId?: string;
+  /** Your app's name, for your own usage attribution. */
+  client?: string;
+  headers?: Record<string, string>;
+  /** Fields the SDK does not model, merged into the body at your own risk. */
+  extraBody?: Record<string, unknown>;
+  signal?: AbortSignal;
+}
+
+export interface Embedding {
+  index: number;
+  /** The vector, always as numbers, whatever the wire encoding was. */
+  embedding: number[];
+  object?: string;
+  [extra: string]: unknown;
+}
+
+export interface EmbeddingsResponse {
+  object?: string;
+  model?: string;
+  data: Embedding[];
+  /** Input tokens only. `completion_tokens` is absent because there is no completion. */
+  usage?: Usage;
+  /** The x-conifer-* disclosure, parsed. Embeddings settle in-band, so the cost IS here. */
+  receipt: Receipt;
+  /** The provider's own body, untouched — including base64 strings if that is what it sent. */
+  raw: Record<string, unknown>;
+}
+
+/** The first vector, for the overwhelmingly common single-input call. */
+export function vectorOf(response: EmbeddingsResponse): number[] | undefined {
+  return response.data[0]?.embedding;
+}
+
+// -------------------------------------------------------------- deferred jobs
+
+/**
+ * The lifecycle of a deferred job, in the gateway's own words.
+ *
+ * Four of the seven are TERMINAL, and the distinction is a money question, not
+ * a formality: `ended`/`fetched` mean you were charged and there is a result;
+ * `expired`, `cancelled` and `failed` all carry a refund of the unfinished
+ * work. Never poll a terminal state again — it will not change.
+ */
+export type JobStatus =
+  /** Accepted and debited; waiting for the aggregator. */
+  | "queued"
+  /** Riding a provider batch. */
+  | "submitted"
+  /** The result is stored and the money is settled. Fetchable. */
+  | "ended"
+  /** TERMINAL: the result was fetched. Retention grace runs from here. */
+  | "fetched"
+  /** TERMINAL: the deadline or retention window passed. */
+  | "expired"
+  /** TERMINAL: you cancelled it; refunded per the cancel rules. */
+  | "cancelled"
+  /** TERMINAL: the provider errored this item; fully refunded. */
+  | "failed";
+
+/** The states that will never change again. Polling one is a wasted call. */
+export const TERMINAL_JOB_STATUSES: readonly JobStatus[] = [
+  "fetched",
+  "expired",
+  "cancelled",
+  "failed",
+];
+
+/** True once a job has reached a state it can never leave. */
+export function isTerminalJob(status: JobStatus | string | undefined): boolean {
+  return TERMINAL_JOB_STATUSES.includes(status as JobStatus);
+}
+
+/**
+ * A deferred job, as returned by the 202 accept and by every status poll.
+ *
+ * Carries no content and no cost: the money is disclosed on the RESULT, which
+ * is a separate call.
+ */
+export interface DeferredJob {
+  jobId: string;
+  status: JobStatus | string;
+  /** Unix seconds. After this the job expires and unfinished work is refunded. */
+  deadlineUtc?: number;
+  createdUtc?: number;
+  /** The model the job was accepted for. */
+  model?: string;
+  /** The gateway's own poll path, relative to the base URL. */
+  pollUrl?: string;
+  raw: Record<string, unknown>;
 }

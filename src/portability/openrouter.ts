@@ -64,6 +64,29 @@ const REFUSALS: Record<string, string> = {
     "the legacy text-completion `prompt` field has no Conifer door. Send `messages` instead.",
 };
 
+/**
+ * OpenRouter fields Conifer's request card does not model.
+ *
+ * These are NOT refusals: the gateway forwards unknown body fields rather than
+ * rejecting them (verified live 2026-08-27 — `seed`, `frequency_penalty`,
+ * `presence_penalty`, `top_logprobs`, `user`, `prediction` and even an invented
+ * field all return 200). Whether the UPSTREAM honors any of them is the
+ * provider's business and varies by model, which is exactly why the SDK will
+ * not quietly pass them along as though they were guaranteed.
+ *
+ * So they throw by default and are forwarded under `passthroughUnknown: true`.
+ * That is the whole point: the caller learns the knob is unmodelled at the call
+ * site, and opts in with their eyes open.
+ *
+ * KEEPING THIS LIST HONEST IS THE JOB. A field that is neither refused nor
+ * listed here is SILENTLY DROPPED, which violates the first law on the
+ * portability card ("never silently drop a constraint"). Six fields were being
+ * dropped exactly that way until this list was checked against OpenRouter's
+ * current published request schema rather than against our own card:
+ * `frequency_penalty`, `presence_penalty`, `top_logprobs`, `prediction`,
+ * `debug`, and (differently) `user`. `tests/portability.test.ts` now drives
+ * this from the vendor's field list so the next divergence fails the build.
+ */
 const UNMODELLED = [
   "top_k",
   "min_p",
@@ -71,6 +94,13 @@ const UNMODELLED = [
   "repetition_penalty",
   "logit_bias",
   "seed",
+  // Added 2026-08-27, from OpenRouter's current schema. Each was previously
+  // accepted and then dropped without a word.
+  "frequency_penalty",
+  "presence_penalty",
+  "top_logprobs",
+  "prediction",
+  "debug",
 ] as const;
 
 /**
@@ -139,6 +169,16 @@ export function fromOpenRouter(
 export function attributionFromOpenRouter(headers: Record<string, string>): string | undefined {
   const lower: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) lower[key.toLowerCase()] = value;
+  // `X-OpenRouter-Categories` assigns MARKETPLACE categories on openrouter.ai.
+  // Conifer runs no marketplace and no public leaderboard, so there is nothing
+  // for it to become. Refusing beats returning it as an app name — which is
+  // what a lenient reading would do, mislabelling every turn's attribution.
+  if (lower["x-openrouter-categories"] !== undefined) {
+    throw new ConiferPortabilityError(
+      "X-OpenRouter-Categories",
+      "this header assigns categories in OpenRouter's public model marketplace. Conifer has no marketplace or leaderboard to list your app on, so there is no equivalent. Drop it; `x-conifer-client` carries the app NAME for your own usage attribution.",
+    );
+  }
   return lower["x-openrouter-title"] ?? lower["x-title"] ?? lower["http-referer"];
 }
 

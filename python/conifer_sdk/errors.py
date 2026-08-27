@@ -96,7 +96,34 @@ class ConiferModelNotFoundError(ConiferError):
 
 
 class ConiferConflictError(ConiferError):
-    """409: an idempotency key reused with different bytes."""
+    """409: an idempotency key that cannot be answered right now.
+
+    The gateway authors THREE different 409s under this one type, and they do
+    not mean the same thing (``handlers.rs``, measured live 2026-08-27):
+
+    - "idempotency key was already used with a different request body" —
+      TERMINAL. You reused a key for different bytes. Retrying re-sends the
+      same conflict forever; change the key or the body.
+    - "this request is already in progress; retry shortly" — TRANSIENT. A first
+      attempt is still in flight, possibly on another replica.
+    - "this request has no replayable response; retry shortly" — TRANSIENT. The
+      key is known but the body lives in another replica's cache, and the
+      gateway will not guess between "settled elsewhere" and "still running"
+      because either guess can double-charge or wrongly refund.
+
+    The last two are the gateway explicitly asking to be asked again, and
+    retrying them is SAFE precisely because the key is the same — that is what
+    idempotency is for. So ``retryable`` is decided by the gateway's own
+    wording rather than by the status code, which cannot tell these apart.
+
+    Found by the live QA harness: a run hit ``replayed_no_body_unresolved`` on
+    a FIRST call, and the SDK surfaced a hard failure for a turn the gateway
+    was willing to serve on a second ask.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.retryable = bool(re.search(r"retry shortly", self.message, re.IGNORECASE))
 
 
 class ConiferByokKeyError(ConiferError):

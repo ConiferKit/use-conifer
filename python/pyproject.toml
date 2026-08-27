@@ -24,6 +24,21 @@ classifiers = [
 # `python -m unittest discover -s tests -t .`.
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# `pip install "conifer-sdk[tls]"` — a CA bundle, for a Python that has none.
+#
+# WHY THIS IS AN EXTRA AND NOT A DEPENDENCY. A python.org macOS install whose
+# "Install Certificates.command" was never run has an EMPTY trust store, and so
+# does a venv built on it: it cannot verify ANY https host, and the SDK's first
+# call fails with CERTIFICATE_VERIFY_FAILED. That was reproduced in a
+# fresh-venv install test, which is exactly how a new user meets it.
+#
+# The SDK already detects the empty store and uses certifi's bundle when it is
+# importable, so this extra is the one-command fix. It stays OPT-IN because
+# `dependencies` being empty is a real feature — the SDK drops into a lambda or
+# a locked-down build image with no package tree to audit — and because most
+# environments (Linux, Homebrew, Docker, conda) have a working store already,
+# where certifi would be dead weight.
+tls = ["certifi"]
 
 [project.urls]
 Homepage = "https://conifer.build"

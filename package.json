@@ -28,6 +28,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "node scripts/run-tests.mjs",
+    "qa:live": "node scripts/live-qa.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepare": "npm run build"
   },
