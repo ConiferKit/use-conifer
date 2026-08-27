@@ -7,8 +7,9 @@ One client for the [Conifer](https://conifer.build) gateway, in TypeScript and
 Python, plus an MCP server so tools that speak no OpenAI wire can still call it.
 
 Conifer is one API key in front of every major model, on the OpenAI and
-Anthropic wires. It charges the market rate for the model you call and **adds no
-markup of its own**, and bringing your own provider key costs nothing.
+Anthropic wires. Credits are charged at the model's list price, and every call
+returns its exact settled cost — down to the nanodollar, itemized. Bring your
+own provider keys and Conifer proxies them for a small fee on list price.
 
 **Docs:** [conifer.build/docs/sdk](https://conifer.build/docs/sdk/) ·
 **Issues:** [file one](https://github.com/ConiferKit/use-conifer/issues) ·
@@ -157,14 +158,15 @@ cd use-conifer && npm install && npm run build
 
 Once `@conifer/sdk` is published this becomes
 `"command": "npx", "args": ["-y", "@conifer/sdk", "conifer-mcp"]` and the build
-step goes away. It is written as a path today because the npx form would 404 —
-see the note on publishing below.
+step goes away. It is written as a path today because the npx form would 404
+until the package is on the registry.
 
-Four tools, each one real gateway call:
+Five tools, each one real gateway call:
 
+- `conifer_complete` — ask any model a question, or hand it a whole conversation. The answer returns **with what it cost**, and `max_cost_nanousd` bounds the spend before the call.
+- `conifer_compare` — the same prompt across 2–5 models in parallel, each answer beside its cost, cheapest first. The ceiling caps each turn, not the total.
 - `conifer_list_models` — the catalog, with declared capabilities and as-charged prices.
 - `conifer_choose_model` — the cheapest model *declaring* the capabilities you need. It skips models with undeclared capabilities rather than assuming them, and unpriced models rather than assuming they are free.
-- `conifer_complete` — one turn, returned **with what it cost**. Takes `max_cost_nanousd`, so an agent can bound its own spend.
 - `conifer_balance` — remaining credit.
 
 The reason `conifer_complete` reports its cost is that an agent that can see
