@@ -237,3 +237,37 @@ test("the request id is read from either header the gateway may send", () => {
   const fallback = errorFrom(400, envelope("invalid_request_error"), headers({ "x-request-id": "gw-2" }));
   assert.equal(fallback.requestId, "gw-2");
 });
+
+/**
+ * The three 409s, and why one of them must NOT be retried.
+ *
+ * Found by the live QA harness rather than by reading: a Python run hit
+ * `replayed_no_body_unresolved` on a FIRST call and the SDK reported a hard
+ * failure, for a turn the gateway had explicitly invited it to re-ask. The
+ * status code cannot separate these cases — only the gateway's own wording can.
+ */
+test("a 409 that says 'retry shortly' is retryable; a body conflict is not", () => {
+  const transient = [
+    "this request is already in progress; retry shortly",
+    "this request has no replayable response; retry shortly",
+  ];
+  for (const message of transient) {
+    const error = errorFrom(409, envelope("request_in_progress", undefined, message), headers());
+    assert.ok(error instanceof ConiferConflictError);
+    assert.equal(error.retryable, true, message);
+  }
+
+  // Reusing a key for DIFFERENT bytes is terminal: the same request will be
+  // refused identically forever, so retrying is pure latency.
+  const terminal = errorFrom(
+    409,
+    envelope(
+      "request_in_progress",
+      undefined,
+      "idempotency key was already used with a different request body",
+    ),
+    headers(),
+  );
+  assert.ok(terminal instanceof ConiferConflictError);
+  assert.equal(terminal.retryable, false);
+});

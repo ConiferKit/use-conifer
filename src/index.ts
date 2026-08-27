@@ -1,19 +1,39 @@
 // index.ts — the SDK's one public seam. Consumers import from here.
 
-export { Conifer, KeysApi, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS } from "./client.ts";
+export {
+  Conifer,
+  Embeddings,
+  JobsApi,
+  KeysApi,
+  DEFAULT_BASE_URL,
+  DEFAULT_TIMEOUT_MS,
+  MIN_DEFER_WINDOW_SECONDS,
+} from "./client.ts";
 export type { ConiferOptions } from "./client.ts";
 export {
   chatBody,
   chatHeaders,
+  decodeVector,
+  embeddingsBody,
+  embeddingsHeaders,
   pickCheapest,
   priceOf,
   resolveBaseUrl,
   resolveChain,
   toCatalogModel,
+  toDeferredJob,
+  withCost,
+  turnIdentity,
   parseFrame,
 } from "./client.ts";
 
-export { textOf } from "./types.ts";
+export {
+  textOf,
+  emptyReason,
+  vectorOf,
+  isTerminalJob,
+  TERMINAL_JOB_STATUSES,
+} from "./types.ts";
 export type {
   Balance,
   CatalogModel,
@@ -21,7 +41,12 @@ export type {
   Choice,
   Completion,
   CompletionStream,
+  DeferredJob,
+  Embedding,
+  EmbeddingsRequest,
+  EmbeddingsResponse,
   Message,
+  JobStatus,
   Role,
   StreamChunk,
   Usage,
@@ -53,7 +78,12 @@ export {
   errorFrom,
 } from "./errors.ts";
 
-export { Transport, backoffMs } from "./transport.ts";
+// Receipts for the client you ALREADY use: an injected fetch that reads the
+// x-conifer-* disclosure every mainstream client throws away.
+export { ReceiptCollector, SpendBudget } from "./receipts.ts";
+export type { ObservedReceipt, ReceiptTotal } from "./receipts.ts";
+
+export { Transport, backoffMs, minimumBackoffMs } from "./transport.ts";
 export type { FetchLike, RequestSpec, TransportOptions } from "./transport.ts";
 
 // Portability: migrate from another gateway without silently changing what runs.

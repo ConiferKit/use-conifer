@@ -16,6 +16,11 @@ from .client import (
     Conifer,
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT_SECONDS,
+    MIN_DEFER_WINDOW_SECONDS,
+    decode_vector,
+    to_deferred_job,
+    with_cost,
+    turn_identity,
     parse_frame,
     resolve_base_url,
 )
@@ -39,6 +44,7 @@ from .errors import (
 )
 from .receipt import CostComponents, Receipt, nano_usd_to_usd_string, read_receipt
 from .portability import (
+    attribution_from_openrouter,
     ceiling_from_policy,
     conifer_openai_compatible_config,
     from_helicone_headers,
@@ -46,7 +52,26 @@ from .portability import (
     from_vercel_provider_options,
     parse_fallbacks,
 )
-from .types import Balance, CatalogModel, ChatRequest, Completion
+from .receipts import (
+    ObservedReceipt,
+    ReceiptCollector,
+    ReceiptTotal,
+    SpendBudget,
+    SpendBudgetExceeded,
+)
+from .types import (
+    Balance,
+    DeferredJob,
+    TERMINAL_JOB_STATUSES,
+    is_terminal_job,
+    CatalogModel,
+    ChatRequest,
+    Completion,
+    Embedding,
+    EmbeddingsRequest,
+    EmbeddingsResponse,
+    vector_of,
+)
 
 __all__ = [
     "Conifer",
@@ -54,6 +79,23 @@ __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
     "resolve_base_url",
     "parse_frame",
+    "decode_vector",
+    "ReceiptCollector",
+    "ObservedReceipt",
+    "ReceiptTotal",
+    "SpendBudget",
+    "SpendBudgetExceeded",
+    "MIN_DEFER_WINDOW_SECONDS",
+    "DeferredJob",
+    "TERMINAL_JOB_STATUSES",
+    "is_terminal_job",
+    "to_deferred_job",
+    "with_cost",
+    "turn_identity",
+    "Embedding",
+    "EmbeddingsRequest",
+    "EmbeddingsResponse",
+    "vector_of",
     "ConiferError",
     "ConiferAuthError",
     "ConiferPaymentError",
@@ -79,6 +121,7 @@ __all__ = [
     "CatalogModel",
     "Balance",
     "from_openrouter",
+    "attribution_from_openrouter",
     "from_helicone_headers",
     "from_vercel_provider_options",
     "conifer_openai_compatible_config",

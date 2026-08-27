@@ -76,6 +76,7 @@ test("tools/list works before a key exists, so a host can inspect the server", a
     "conifer_choose_model",
     "conifer_complete",
     "conifer_compare",
+    "conifer_embed",
     "conifer_balance",
   ]);
   for (const tool of (response as any).result.tools) {
@@ -338,4 +339,64 @@ test("compare refuses a single-model list with advice instead of spending", asyn
     stubClient([]).client,
   );
   assert.match(payload(response).error, /at least two/);
+});
+
+/**
+ * An empty answer must explain itself to the AGENT, not just to a human.
+ *
+ * `conifer_complete` returned `text: ""` and a bill, with nothing else. An
+ * agent receiving that will usually retry — spending the caller's money a
+ * second time on a turn that fails identically. Measured live: a reasoning
+ * model at `max_tokens: 16` costs ~$0.001 and returns nothing, because the
+ * thinking block is spent before the visible answer starts. That is a budget
+ * problem the agent can fix, but only if it is told.
+ */
+test("an empty completion tells the agent WHY, so it does not just retry", async () => {
+  const { client } = stubClient([
+    json(
+      {
+        choices: [{ index: 0, finish_reason: "length", message: { role: "assistant", content: "" } }],
+        usage: { completion_tokens: 16, prompt_tokens: 25 },
+      },
+      { headers: { "x-conifer-cost-nanousd": "1050000" } },
+    ),
+  ]);
+  const result = payload(
+    await handle(
+      {
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: { name: "conifer_complete", arguments: { model: "m", prompt: "hi", max_tokens: 16 } },
+      },
+      client,
+    ),
+  );
+  assert.equal(result.text, "");
+  assert.match(result.empty_reason as string, /maxTokens/);
+  // The cost is still reported: the turn WAS billed, and hiding that would be
+  // worse than the silence this fixes.
+  assert.equal(result.cost_nanousd, 1_050_000);
+});
+
+test("a normal answer carries no empty_reason to confuse the agent", async () => {
+  const { client } = stubClient([
+    json(
+      { choices: [{ finish_reason: "stop", message: { role: "assistant", content: "pinecone" } }] },
+      { headers: { "x-conifer-cost-nanousd": "1000" } },
+    ),
+  ]);
+  const result = payload(
+    await handle(
+      {
+        jsonrpc: "2.0",
+        id: 8,
+        method: "tools/call",
+        params: { name: "conifer_complete", arguments: { model: "m", prompt: "hi" } },
+      },
+      client,
+    ),
+  );
+  assert.equal(result.text, "pinecone");
+  assert.equal(result.empty_reason, undefined);
 });

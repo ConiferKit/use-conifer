@@ -7,7 +7,6 @@
     "Never invent a server feature client-side and present it as one. Client-side chains report themselves as client-side (`fallbackIndex`, `x-conifer-client`).",
     "Model ids migrate untouched. `vendor/model` resolves through the gateway's own last-segment rule; the SDK does no rewriting of its own."
   ],
-
   "openrouter": {
     "base_url_they_use": "https://openrouter.ai/api/v1",
     "conifer_equivalent": "https://api.conifer.build/v1",
@@ -37,9 +36,13 @@
       "prompt": "the legacy text-completions field. Conifer serves the chat wire. Throws.",
       "top_k / min_p / top_a / repetition_penalty / logit_bias": "not modelled on the gateway's request card; forwarded ONLY when `passthroughUnknown: true` is set, and then explicitly at the caller's risk."
     },
-    "generation_stats_endpoint": "OpenRouter's GET /api/v1/generation has no equivalent: Conifer settles the cost onto the SAME response's receipt headers, so the stats are already in hand when the call returns. The shim reads them there rather than making a second call."
+    "generation_stats_endpoint": "OpenRouter's GET /api/v1/generation has no equivalent: Conifer settles the cost onto the SAME response's receipt headers, so the stats are already in hand when the call returns. The shim reads them there rather than making a second call.",
+    "unmodelled_opt_in": "Knobs Conifer's request card does not model: top_k, min_p, top_a, repetition_penalty, logit_bias, seed, frequency_penalty, presence_penalty, top_logprobs, prediction, debug. NOT refusals — the gateway forwards unknown body fields (verified live 2026-08-27), but whether the UPSTREAM honors one varies by model, so the SDK throws by default and forwards under passthroughUnknown. THE INVARIANT: a field that is neither refused nor listed here is SILENTLY DROPPED, which breaks law #1. Five were being dropped exactly that way until the list was checked against OpenRouter's published schema instead of this card. Both suites now drive an anti-drift gate from the VENDOR's field list.",
+    "unsupported_refused_headers": {
+      "note": "Refused by `attributionFromOpenRouter`, not by the body converter. Kept separate because the card-driven test drives each through its own entry point.",
+      "X-OpenRouter-Categories": "assigns categories in OpenRouter's public model marketplace. Conifer has no marketplace or leaderboard, so there is nothing for it to become; a lenient reading would return it as the app NAME and mislabel every turn's attribution. Throws."
+    }
   },
-
   "vercel_ai_gateway": {
     "base_url_they_use": "https://ai-gateway.vercel.sh/v1",
     "conifer_equivalent": "https://api.conifer.build/v1",
@@ -59,10 +62,25 @@
     },
     "unsupported_refused": {
       "image generation": "no image-output door. Throws.",
-      "OIDC auto-auth": "there is no Conifer OIDC exchange; supply CONIFER_API_KEY."
+      "OIDC auto-auth": "there is no Conifer OIDC exchange; supply CONIFER_API_KEY.",
+      "rerank": "no reranking door. The gateway's embedding seats can rank by cosine similarity instead. Throws.",
+      "moderations": "no moderation door — and none is silently applied either; what you send is what runs. Throws.",
+      "audio (speech and transcription)": "no audio door. Throws.",
+      "files": "no Files API; there is no server-side document store. Throws.",
+      "batches": "no Batches API. The nearest equivalent is the deferred-job protocol (defer + a wide deadline). Throws."
+    },
+    "now_served": {
+      "note": "Surfaces that USED to be refused here and are now served. A shim that refuses a door the gateway actually serves is as wrong as one that admits a door it does not, so this list is part of the contract.",
+      "POST /embeddings": "SHIPPED 2026-08-26. Served by the SDK directly: `conifer.embeddings.create()` (TS) / `client.embed()` (Python). The shim must NOT refuse it."
+    },
+    "gateway_controls": {
+      "note": "Every providerOptions.gateway key is CONVERTED or REFUSED. Never dropped — an earlier version refused only `order`/`only`, converted `models`, and let the rest fall out unremarked.",
+      "converted": "models → fallbackModels (needs the allowClientFallback opt-in; it is a client-side chain of separately billed turns).",
+      "refused": "order, only, ignore, sort, allowFallbacks, requireParameters/require_parameters, quantizations, maxPrice, dataCollection, zdr — plus ANY unrecognized key, because we cannot judge whether a control we have never heard of mattered.",
+      "privacy": "dataCollection and zdr are the most consequential drops possible: the request still succeeds, nothing errors, and a promise the caller made to THEIR OWN users has quietly lapsed. Both refuse with a pointer to https://conifer.build/privacy.",
+      "passthrough": "Per-provider blocks other than `gateway` are returned for deliberate placement in extraBody, never auto-merged."
     }
   },
-
   "helicone": {
     "base_url_they_use": "https://gateway.helicone.ai/v1",
     "conifer_equivalent": "https://api.conifer.build/v1",
@@ -85,10 +103,14 @@
       "Helicone-Moderations-Enabled / Helicone-LLM-Security-Enabled": "no moderation or injection-scanning layer. Throws — a security feature that silently does nothing is worse than an error.",
       "Helicone-Token-Limit-Exception-Handler": "no server-side truncation or middle-out. The gateway refuses an over-window request with a typed 400 naming the window instead. Throws.",
       "Helicone-Session-Id / Session-Path / Session-Name": "no session tree in Conifer's observability. Throws.",
-      "Helicone-Posthog-*": "no third-party fan-out."
-    }
+      "Helicone-Posthog-*": "no third-party fan-out.",
+      "Helicone-Omit-Request": "PRIVACY. Conifer has no per-request switch to omit the prompt from what it retains. Cannot be honored and MUST NOT be dropped — it is a promise the caller may have made to THEIR OWN users. Throws, pointing at https://conifer.build/privacy.",
+      "Helicone-Omit-Response": "PRIVACY. Same as Helicone-Omit-Request, for the completion. Throws.",
+      "Helicone-Auth": "your HELICONE credential — its presence means the caller still believes they are proxying through Helicone. Conifer is the destination. Throws.",
+      "Helicone-Retry-Enabled": "Helicone retries SERVER-side on its own policy. This SDK retries in the CLIENT, narrowly, reusing one idempotency key so it cannot double-bill. A server-side retry you cannot see is not something Conifer will imitate. Throws."
+    },
+    "unknown_headers": "ANY unrecognized `helicone-*` header throws. We cannot judge whether a control we have never heard of carried a constraint, so we must not decide on the caller's behalf that it did not. Fail closed."
   },
-
   "receipt_superset": {
     "note": "What Conifer gives that none of the three do on the response of the SAME call: exact integer nanodollar cost, itemized across the four billed token classes, plus the requested-vs-effective model spelling and the serving endpoint. `costComponentsNanoUsd` always sums to `costNanoUsd`; when that identity cannot be guaranteed the header is omitted rather than approximated.",
     "headers": [

@@ -20,16 +20,29 @@ from conifer_sdk import (  # noqa: E402
     ConiferAuthError,
     ConiferBadRequestError,
     ConiferCostCeilingError,
+    ConiferConflictError,
     ConiferError,
     ConiferKeySpendCapError,
     ConiferModelNotFoundError,
     ConiferPaymentError,
     ConiferPortabilityError,
     ConiferRateLimitError,
+    ConiferTimeoutError,
+    ReceiptCollector,
+    SpendBudget,
+    SpendBudgetExceeded,
+    EmbeddingsRequest,
+    MIN_DEFER_WINDOW_SECONDS,
+    TERMINAL_JOB_STATUSES,
+    is_terminal_job,
+    to_deferred_job,
+    with_cost,
+    vector_of,
     ceiling_from_policy,
     conifer_openai_compatible_config,
     from_helicone_headers,
     from_openrouter,
+    attribution_from_openrouter,
     from_vercel_provider_options,
     nano_usd_to_usd_string,
     parse_fallbacks,
@@ -37,6 +50,11 @@ from conifer_sdk import (  # noqa: E402
     resolve_base_url,
 )
 from conifer_sdk.client import (  # noqa: E402
+    to_catalog_model,
+    minimum_backoff_seconds,
+    decode_vector,
+    embeddings_body,
+    embeddings_headers,
     chat_body,
     parse_frame,
     chat_headers,
@@ -45,8 +63,8 @@ from conifer_sdk.client import (  # noqa: E402
 )
 from conifer_sdk.errors import error_from  # noqa: E402
 from conifer_sdk.portability import assert_supported_vercel_surface  # noqa: E402
-from conifer_sdk.receipt import parse_cost_components  # noqa: E402
-from conifer_sdk.types import CatalogModel, ChatRequest  # noqa: E402
+from conifer_sdk.receipt import Receipt, parse_cost_components  # noqa: E402
+from conifer_sdk.types import CatalogModel, ChatRequest, Completion  # noqa: E402
 
 CARDS = Path(__file__).resolve().parents[2] / "cards"
 
@@ -494,6 +512,54 @@ class PortabilityTests(unittest.TestCase):
         assert_supported_vercel_surface("embeddings")
         self.refuses("oidc", lambda: assert_supported_vercel_surface("oidc"))
 
+        # Probed live 2026-08-27: each of these answers 404 `unknown_url`. A
+        # 404 in production, on the one path nobody exercised, is exactly how
+        # a migration "succeeds" and then fails.
+        for surface in ("rerank", "moderations", "audio", "files", "batches"):
+            self.refuses(surface, lambda s=surface: assert_supported_vercel_surface(s))
+
+        # Spelled the way ANOTHER SDK spells it, the caller still gets the
+        # reason rather than silence.
+        for alias in (
+            "image",
+            "images",
+            "moderation",
+            "reranking",
+            "speech",
+            "transcription",
+            "audio-speech",
+            "audio-transcription",
+            "batch",
+            "file",
+        ):
+            self.refuses(alias, lambda a=alias: assert_supported_vercel_surface(a))
+
+    def test_the_card_and_the_shim_agree_on_which_doors_are_served(self):
+        """The card is the contract, so the refusal list is driven FROM it.
+
+        An entry added to the card without a matching refusal in code (or the
+        reverse) fails here, which is the only thing that keeps a migration
+        document honest as the gateway's served surface changes. Twin of the
+        same assertion in tests/portability.test.ts.
+        """
+        vercel = json.loads(
+            (Path(__file__).resolve().parents[2] / "cards/portability.card.json").read_text()
+        )["vercel_ai_gateway"]
+        for label in vercel["unsupported_refused"]:
+            # The card's keys are prose ("audio (speech and transcription)");
+            # the first word is the surface token the shim is called with.
+            surface = label.split(" ")[0].lower()
+            if surface == "oidc":
+                continue  # spelled the same, covered above
+            with self.assertRaises(ConiferPortabilityError, msg=f"card refuses {label}"):
+                assert_supported_vercel_surface(surface)
+        # And the inverse: a door the card records as NOW SERVED must not throw.
+        for label in vercel["now_served"]:
+            if label == "note":
+                continue
+            surface = label.split("/")[-1]
+            assert_supported_vercel_surface(surface)
+
 
 class ParityTests(unittest.TestCase):
     """Both languages must refuse the same things, or "one SDK" is a slogan."""
@@ -507,6 +573,16 @@ class ParityTests(unittest.TestCase):
                 continue
             with self.assertRaises(ConiferPortabilityError, msg=f"openrouter.{field}"):
                 from_openrouter({"model": "m", "messages": [], field: "x"})
+
+    def test_every_documented_openrouter_header_refusal_is_enforced(self):
+        # Headers are refused by attribution_from_openrouter, not by the body
+        # converter, so they live in their own card section and are driven
+        # through their own entry point.
+        for name in self.portability["openrouter"]["unsupported_refused_headers"]:
+            if name == "note":
+                continue
+            with self.assertRaises(ConiferPortabilityError, msg=f"openrouter header {name}"):
+                attribution_from_openrouter({name: "x"})
 
     def test_every_documented_helicone_refusal_is_enforced_here_too(self):
         for field in self.portability["helicone"]["unsupported_refused"]:
@@ -665,6 +741,97 @@ class ErrorVocabulary(unittest.TestCase):
             error_from(500, {"error": {"type": "some_future_type", "message": "x"}}, {}).retryable
         )
 
+    def test_a_409_that_says_retry_shortly_is_retryable(self):
+        """The three 409s, and why one must NOT be retried.
+
+        Found by the live QA harness rather than by reading: a run hit
+        ``replayed_no_body_unresolved`` on a FIRST call and the SDK reported a
+        hard failure, for a turn the gateway had explicitly invited it to
+        re-ask. The status code cannot separate these cases — only the
+        gateway's own wording can.
+        """
+        for message in (
+            "this request is already in progress; retry shortly",
+            "this request has no replayable response; retry shortly",
+        ):
+            error = error_from(
+                409, {"error": {"type": "request_in_progress", "message": message}}, {}
+            )
+            self.assertIsInstance(error, ConiferConflictError)
+            self.assertTrue(error.retryable, message)
+
+        # Reusing a key for DIFFERENT bytes is terminal: the same request will
+        # be refused identically forever, so retrying is pure latency.
+        terminal = error_from(
+            409,
+            {
+                "error": {
+                    "type": "request_in_progress",
+                    "message": "idempotency key was already used with a different request body",
+                }
+            },
+            {},
+        )
+        self.assertIsInstance(terminal, ConiferConflictError)
+        self.assertFalse(terminal.retryable)
+
+    def test_a_transient_409_is_retried_reusing_the_idempotency_key(self):
+        calls, transport = scripted(
+            (
+                409,
+                {},
+                {
+                    "error": {
+                        "type": "request_in_progress",
+                        "message": "this request has no replayable response; retry shortly",
+                    }
+                },
+            ),
+            (200, RECEIPT_HEADERS, COMPLETION),
+        )
+        answer = Conifer(api_key="k", transport=transport, max_retries=2).chat(
+            ChatRequest(model="m", messages=[])
+        )
+        self.assertEqual(len(calls), 2, "the transient conflict should have been retried")
+        # THE safety property: the same key both times, so the retry cannot
+        # bill a second turn even if the first had actually settled.
+        self.assertEqual(
+            calls[0]["headers"]["idempotency-key"], calls[1]["headers"]["idempotency-key"]
+        )
+        self.assertEqual(answer.text, "pinecone")
+
+    def test_a_body_conflict_409_is_not_retried(self):
+        calls, transport = scripted(
+            (
+                409,
+                {},
+                {
+                    "error": {
+                        "type": "request_in_progress",
+                        "message": "idempotency key was already used with a different request body",
+                    }
+                },
+            )
+        )
+        with self.assertRaises(ConiferConflictError):
+            Conifer(api_key="k", transport=transport, max_retries=3).chat(
+                ChatRequest(model="m", messages=[])
+            )
+        self.assertEqual(len(calls), 1, "a body conflict must not be retried")
+
+    def test_a_transient_409_waits_long_enough_to_converge(self):
+        # The default schedule (0.25s, 0.5s) gives a retryable failure 0.75s of
+        # total patience, which is right for a 502 and far too impatient for a
+        # 409: that one waits on CROSS-REPLICA CONVERGENCE, not on a socket.
+        # Found in a fresh-install consumer test — i.e. exactly where a new
+        # user would have found it, on their first call, for a turn that was
+        # actually being served.
+        self.assertGreaterEqual(minimum_backoff_seconds(409), 1.0)
+        # Every other status keeps the fast schedule: a blip recovers fast.
+        for status in (429, 502, 503, 504):
+            self.assertEqual(minimum_backoff_seconds(status), 0.0, f"{status} slowed down")
+        self.assertGreaterEqual(minimum_backoff_seconds(409) * 2, 3.0)
+
     def test_both_languages_agree_on_the_class_for_every_contract_type(self):
         """Parity, checked against the TypeScript names rather than assumed.
 
@@ -683,6 +850,837 @@ class ErrorVocabulary(unittest.TestCase):
                 hasattr(sys.modules["conifer_sdk"], name),
                 f"{name} is documented in the output card but not exported from conifer_sdk",
             )
+
+
+class Embeddings(unittest.TestCase):
+    """The embeddings door. Twin of tests/embeddings.test.ts.
+
+    The base64 fixture is not invented: ``AACAPwAAAMAAAAA/`` is three
+    little-endian float32s (1, -2, 0.5), checked by hand so the expectation
+    does not depend on our own encoder.
+    """
+
+    RECEIPT = {
+        "x-conifer-requested-model": "text-embedding-3-small",
+        "x-conifer-effective-model": "text-embedding-3-small",
+        "x-conifer-cost-nanousd": "40",
+        "x-conifer-request-id": "gw-emb-1",
+    }
+    THREE_FLOATS = "AACAPwAAAMAAAAA/"
+
+    def test_an_embeddings_turn_hits_its_door_and_returns_its_settled_cost(self):
+        calls, transport = scripted(
+            (
+                200,
+                self.RECEIPT,
+                {
+                    "object": "list",
+                    "model": "text-embedding-3-small",
+                    "data": [{"object": "embedding", "index": 0, "embedding": self.THREE_FLOATS}],
+                    "usage": {"prompt_tokens": 2, "total_tokens": 2},
+                },
+            )
+        )
+        result = client(transport).embed(
+            EmbeddingsRequest(model="text-embedding-3-small", input="hello world")
+        )
+        self.assertTrue(calls[0]["url"].endswith("/v1/embeddings"))
+        self.assertEqual(calls[0]["method"], "POST")
+        # Embeddings settle IN BAND — unlike a stream, the cost is right here.
+        self.assertEqual(result.receipt.cost_nano_usd, 40)
+        self.assertEqual(result.receipt.request_id, "gw-emb-1")
+        # Input tokens only: there is no completion, so no completion_tokens.
+        self.assertEqual(result.usage["prompt_tokens"], 2)
+        self.assertNotIn("completion_tokens", result.usage)
+
+    def test_base64_is_requested_by_default_and_decoded_for_the_caller(self):
+        calls, transport = scripted(
+            (200, self.RECEIPT, {"data": [{"index": 0, "embedding": self.THREE_FLOATS}]})
+        )
+        result = client(transport).embed(
+            EmbeddingsRequest(model="text-embedding-3-small", input="hello world")
+        )
+        # The wire asked for base64 (3x smaller than a JSON float array) …
+        self.assertEqual(calls[0]["body"]["encoding_format"], "base64")
+        # … and the caller never has to know that.
+        self.assertEqual(vector_of(result), [1.0, -2.0, 0.5])
+        # The provider's own body survives untouched, base64 included.
+        self.assertEqual(result.raw["data"][0]["embedding"], self.THREE_FLOATS)
+
+    def test_float_is_honored_when_explicitly_asked_for(self):
+        calls, transport = scripted(
+            (200, self.RECEIPT, {"data": [{"index": 0, "embedding": [1.0, -2.0, 0.5]}]})
+        )
+        result = client(transport).embed(
+            EmbeddingsRequest(
+                model="text-embedding-3-small", input="hello world", encoding_format="float"
+            )
+        )
+        self.assertEqual(calls[0]["body"]["encoding_format"], "float")
+        # Same numbers either way. That property is what makes the base64
+        # default safe to apply silently.
+        self.assertEqual(vector_of(result), [1.0, -2.0, 0.5])
+
+    def test_a_batch_keeps_one_vector_per_input_in_order(self):
+        _, transport = scripted(
+            (
+                200,
+                self.RECEIPT,
+                {"data": [{"index": i, "embedding": self.THREE_FLOATS} for i in range(3)]},
+            )
+        )
+        result = client(transport).embed(
+            EmbeddingsRequest(model="text-embedding-3-small", input=["alpha", "beta", "gamma"])
+        )
+        self.assertEqual([d.index for d in result.data], [0, 1, 2])
+        for entry in result.data:
+            self.assertEqual(entry.embedding, [1.0, -2.0, 0.5])
+
+    def test_token_id_input_is_refused_before_any_spend(self):
+        calls, transport = scripted()
+        with self.assertRaises(ConiferPortabilityError) as caught:
+            client(transport).embed(
+                EmbeddingsRequest(model="text-embedding-3-small", input=[[1, 2, 3]])
+            )
+        self.assertEqual(caught.exception.field, "input")
+        # The point of refusing client-side: no request was made at all.
+        self.assertEqual(len(calls), 0)
+
+    def test_the_body_carries_only_fields_this_door_has(self):
+        body = embeddings_body(
+            EmbeddingsRequest(
+                model="text-embedding-3-large", input="hi", dimensions=256, user="user-1"
+            )
+        )
+        self.assertEqual(
+            body,
+            {
+                "model": "text-embedding-3-large",
+                "input": "hi",
+                "encoding_format": "base64",
+                "dimensions": 256,
+                "user": "user-1",
+            },
+        )
+        # No max_tokens, no temperature, no stream: an embedding has no
+        # completion, so those knobs would imply a control the wire lacks.
+        for absent in ("max_tokens", "temperature", "top_p", "stream", "messages"):
+            self.assertNotIn(absent, body)
+
+    def test_ceiling_and_attribution_ride_as_headers_exactly_as_on_chat(self):
+        headers = embeddings_headers(
+            EmbeddingsRequest(
+                model="m", input="hi", max_cost_nano_usd=1_000_000, client="my-app", request_id="r1"
+            ),
+            "idem-1",
+        )
+        self.assertEqual(headers["x-conifer-max-cost-nanousd"], "1000000")
+        self.assertEqual(headers["x-conifer-client"], "my-app")
+        self.assertEqual(headers["x-request-id"], "r1")
+        # Every POST is idempotent, so a transport retry cannot bill twice.
+        self.assertEqual(headers["idempotency-key"], "idem-1")
+
+    def test_a_fractional_ceiling_is_refused_rather_than_rounded(self):
+        with self.assertRaises(ConiferPortabilityError):
+            embeddings_headers(
+                EmbeddingsRequest(model="m", input="hi", max_cost_nano_usd=1.5), "idem-1"
+            )
+
+    def test_decode_refuses_to_guess_at_an_unrecognized_shape(self):
+        # A WRONG vector is far worse than a missing one: it sails through a
+        # cosine similarity and returns nonsense rankings forever.
+        for junk in ("!!!not base64!!!", None, 42, "AAA="):
+            self.assertEqual(decode_vector(junk), [])
+        # And the shapes it DOES recognize still work.
+        self.assertEqual(decode_vector(self.THREE_FLOATS), [1.0, -2.0, 0.5])
+        self.assertEqual(decode_vector([1, 2, 3]), [1.0, 2.0, 3.0])
+
+    def test_decoding_is_little_endian_regardless_of_the_host(self):
+        # Stated explicitly ("<") rather than inherited, so this decodes the
+        # same on a big-endian machine.
+        self.assertEqual(decode_vector("AACAPw=="), [1.0])
+
+    def test_both_languages_decode_the_same_bytes_to_the_same_vector(self):
+        """Parity on the one payload whose numbers ARE the product.
+
+        Measured live on 2026-08-27: this is the first vector
+        `text-embedding-3-small` returned for "hello world", and the
+        TypeScript twin decodes the identical values from the identical bytes.
+        """
+        # The first 12 bytes (3 float32s) of the vector the live gateway
+        # returned, copied off the wire rather than hand-assembled.
+        live_prefix = "AKDeuwCAIL0AwAs9"
+        self.assertEqual(
+            [round(x, 9) for x in decode_vector(live_prefix)],
+            [-0.006793976, -0.03918457, 0.034118652],
+        )
+
+    def test_an_empty_vector_list_does_not_invent_a_vector(self):
+        _, transport = scripted((200, self.RECEIPT, {"data": []}))
+        result = client(transport).embed(EmbeddingsRequest(model="m", input="hi"))
+        self.assertEqual(result.data, [])
+        self.assertIsNone(vector_of(result))
+
+
+class RequestIdentity(unittest.TestCase):
+    """``request_id`` used to be inert, and that is worth a test of its own.
+
+    The gateway derives its request id from the FIRST of ``idempotency-key``
+    then ``x-request-id`` (its own ``request_id()``, confirmed live
+    2026-08-27). Because the SDK always sends an idempotency key, the second
+    name was never once reached: a caller who set ``request_id`` to their trace
+    id got a generated ``idem-<uuid>`` back in the receipt and could not
+    correlate a support question with their own logs. On this gateway the two
+    are ONE identity, so the SDK feeds ``request_id`` into the key that is
+    actually read. Twin of the same assertions in tests/client.test.ts.
+    """
+
+    def test_an_explicit_request_id_becomes_the_id_the_gateway_echoes(self):
+        calls, transport = scripted(
+            (200, {"x-conifer-request-id": "trace-42"}, COMPLETION)
+        )
+        answer = client(transport).chat(
+            ChatRequest(model="m", messages=[], request_id="trace-42")
+        )
+        # The header the gateway READS carries the caller's id …
+        self.assertEqual(calls[0]["headers"]["idempotency-key"], "trace-42")
+        # … and the one it merely logs carries it too, for anything between.
+        self.assertEqual(calls[0]["headers"]["x-request-id"], "trace-42")
+        # So the id the caller chose is the id that comes back.
+        self.assertEqual(answer.receipt.request_id, "trace-42")
+
+    def test_an_explicit_idempotency_key_still_wins(self):
+        # The two remain separable: idempotency is about not billing twice, and
+        # a caller whose trace ids are not unique per turn must be able to say so.
+        calls, transport = scripted((200, {}, COMPLETION))
+        client(transport).chat(
+            ChatRequest(model="m", messages=[], request_id="trace-42", idempotency_key="key-1")
+        )
+        self.assertEqual(calls[0]["headers"]["idempotency-key"], "key-1")
+        self.assertEqual(calls[0]["headers"]["x-request-id"], "trace-42")
+
+    def test_with_neither_id_the_turn_is_still_idempotent(self):
+        calls, transport = scripted((200, {}, COMPLETION))
+        client(transport).chat(ChatRequest(model="m", messages=[]))
+        # A retry that cannot double-bill is the whole point, so the key is
+        # never optional — only its SOURCE is.
+        self.assertTrue(calls[0]["headers"]["idempotency-key"].startswith("idem-"))
+        self.assertNotIn("x-request-id", calls[0]["headers"])
+
+    def test_the_embeddings_door_resolves_identity_the_same_way(self):
+        calls, transport = scripted((200, {}, {"data": []}))
+        client(transport).embed(
+            EmbeddingsRequest(model="text-embedding-3-small", input="hi", request_id="trace-9")
+        )
+        self.assertEqual(calls[0]["headers"]["idempotency-key"], "trace-9")
+
+
+class DeferredJobs(unittest.TestCase):
+    """The deferred-job plane. Twin of tests/deferred.test.ts.
+
+    WHY THIS EXISTS. The SDK accepted ``defer=True`` from the start and had no
+    way to collect the result. Worse than missing: the gateway answers a
+    deferred submit with 202 and a JOB ENVELOPE, which ``chat()`` coerced into
+    a Completion — so a turn that had been accepted AND DEBITED came back as
+    ``choices=[]``, indistinguishable at the call site from a model that
+    answered with nothing.
+
+    Every status string below was observed against api.conifer.build on
+    2026-08-27, including a full round trip: queued -> submitted -> ended ->
+    (fetch) -> fetched, settling at 470000 nanodollars.
+    """
+
+    ACCEPTED = {
+        "job_id": "job-gw-abc",
+        "status": "queued",
+        "deadline_utc": 1787900264,
+        "poll_url": "/v1/deferred/job-gw-abc",
+    }
+
+    def test_chat_refuses_a_deferred_turn_rather_than_returning_nothing(self):
+        calls, transport = scripted()
+        with self.assertRaises(ConiferPortabilityError) as caught:
+            client(transport).chat(ChatRequest(model="m", messages=[], defer=True))
+        self.assertEqual(caught.exception.field, "defer")
+        # The message must name the way forward, not just the problem.
+        self.assertIn("defer()", caught.exception.message)
+        # Refused before the request: no money moved to produce this error.
+        self.assertEqual(len(calls), 0)
+
+    def test_defer_submits_with_the_gateways_floor_and_returns_the_job(self):
+        calls, transport = scripted((202, {}, self.ACCEPTED))
+        job = client(transport).defer(ChatRequest(model="m", messages=[]))
+        body = calls[0]["body"]
+        self.assertEqual(body["defer"], "allow")
+        # The gateway REFUSES a narrower window, so defaulting to the floor is
+        # what makes the common call work rather than 400.
+        self.assertEqual(body["completion_window_seconds"], MIN_DEFER_WINDOW_SECONDS)
+        self.assertEqual(calls[0]["headers"]["x-conifer-defer"], "allow")
+        self.assertEqual(job.job_id, "job-gw-abc")
+        self.assertEqual(job.status, "queued")
+
+    def test_an_explicit_deadline_is_not_overwritten_by_the_floor(self):
+        calls, transport = scripted((202, {}, self.ACCEPTED))
+        client(transport).defer(ChatRequest(model="m", messages=[], deadline_seconds=172_800))
+        self.assertEqual(calls[0]["body"]["completion_window_seconds"], 172_800)
+
+    def test_a_fallback_chain_cannot_ride_a_deferred_job(self):
+        calls, transport = scripted()
+        with self.assertRaises(ConiferPortabilityError):
+            client(transport).defer(
+                ChatRequest(
+                    model="m", messages=[], fallback_models=["b"], allow_client_fallback=True
+                )
+            )
+        self.assertEqual(len(calls), 0)
+
+    def test_status_result_and_cancel_hit_the_published_paths(self):
+        calls, transport = scripted(
+            (200, {}, {"job_id": "job-gw-abc", "status": "submitted", "model": "claude-fable-5"}),
+            (
+                200,
+                {"x-conifer-cost-nanousd": "470000"},
+                {"choices": [{"message": {"role": "assistant", "content": "pinecone"}}]},
+            ),
+            (200, {}, {"job_id": "job-gw-abc", "status": "cancelled"}),
+        )
+        conifer = client(transport)
+
+        status = conifer.job_status("job-gw-abc")
+        self.assertTrue(calls[0]["url"].endswith("/v1/deferred/job-gw-abc"))
+        self.assertEqual(status.status, "submitted")
+
+        answer = conifer.job_result("job-gw-abc")
+        self.assertTrue(calls[1]["url"].endswith("/v1/deferred/job-gw-abc/result"))
+        self.assertEqual(answer.text, "pinecone")
+        # A deferred result settles in band, exactly like a non-streamed turn.
+        self.assertEqual(answer.receipt.cost_nano_usd, 470_000)
+
+        cancelled = conifer.job_cancel("job-gw-abc")
+        self.assertTrue(calls[2]["url"].endswith("/v1/deferred/job-gw-abc/cancel"))
+        self.assertEqual(calls[2]["method"], "POST")
+        self.assertEqual(cancelled.status, "cancelled")
+
+    def test_a_job_id_is_escaped_so_it_cannot_walk_out_of_its_path(self):
+        calls, transport = scripted((200, {}, {"job_id": "x", "status": "queued"}))
+        client(transport).job_status("../../v1/balance")
+        self.assertFalse(calls[0]["url"].endswith("/v1/balance"))
+
+    def test_wait_polls_to_the_end_and_returns_the_settled_result(self):
+        calls, transport = scripted(
+            (200, {}, {"job_id": "j", "status": "queued"}),
+            (200, {}, {"job_id": "j", "status": "submitted"}),
+            (200, {}, {"job_id": "j", "status": "ended"}),
+            (
+                200,
+                {"x-conifer-cost-nanousd": "470000"},
+                {"choices": [{"message": {"role": "assistant", "content": "pinecone"}}]},
+            ),
+        )
+        seen = []
+        answer = client(transport).jobs_wait(
+            "j", poll_seconds=0.001, on_poll=lambda job: seen.append(job.status)
+        )
+        # The live sequence, condensed.
+        self.assertEqual(seen, ["queued", "submitted", "ended"])
+        self.assertEqual(answer.text, "pinecone")
+        self.assertEqual(answer.receipt.cost_nano_usd, 470_000)
+        self.assertEqual(len(calls), 4)
+
+    def test_wait_stops_on_a_terminal_state_instead_of_polling_forever(self):
+        # The loop-that-cannot-exit bug, prevented by construction.
+        for status in ("cancelled", "failed", "expired"):
+            calls, transport = scripted((200, {}, {"job_id": "j", "status": status}))
+            with self.assertRaises(ConiferConflictError) as caught:
+                client(transport).jobs_wait("j", poll_seconds=0.001)
+            self.assertIn(status, caught.exception.message)
+            # Exactly one poll: it learned the answer and stopped.
+            self.assertEqual(len(calls), 1, f"{status} must not be polled twice")
+
+    def test_wait_honors_a_timeout_without_cancelling_paid_work(self):
+        calls, transport = scripted((200, {}, {"job_id": "j", "status": "queued"}))
+        with self.assertRaises(ConiferTimeoutError) as caught:
+            client(transport).jobs_wait("j", poll_seconds=0.001, timeout_seconds=0)
+        # The message must say the job survived, or a reader will assume the
+        # opposite and re-submit work they have already paid for.
+        self.assertIn("NOT cancelled", caught.exception.message)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(any(c["url"].endswith("/cancel") for c in calls))
+
+    def test_the_terminal_set_matches_the_gateways_state_machine(self):
+        # `ended` is deliberately NOT terminal: it is the state where a result
+        # becomes fetchable, and treating it as an end would skip collecting it.
+        self.assertEqual(TERMINAL_JOB_STATUSES, ("fetched", "expired", "cancelled", "failed"))
+        self.assertFalse(is_terminal_job("ended"))
+        self.assertFalse(is_terminal_job("queued"))
+        self.assertTrue(is_terminal_job("fetched"))
+        self.assertFalse(is_terminal_job(None))
+
+    def test_the_job_envelope_parses_without_losing_what_was_sent(self):
+        job = to_deferred_job({**self.ACCEPTED, "surprise_field": 1})
+        self.assertEqual(job.job_id, "job-gw-abc")
+        self.assertEqual(job.poll_url, "/v1/deferred/job-gw-abc")
+        # Nothing the gateway said is dropped behind our field names.
+        self.assertEqual(job.raw["surprise_field"], 1)
+
+
+class Receipts(unittest.TestCase):
+    """Receipts for the client you ALREADY use. Twin of tests/receipts.test.ts.
+
+    The exact per-turn cost is the one thing Conifer has that other gateways do
+    not, and it rides the RESPONSE HEADERS — which every mainstream client
+    throws away. This collector reads them off any response-like object, so a
+    team keeps their existing ``openai`` client and still sees the money.
+    """
+
+    #: The receipt headers a real chat turn carries, measured 2026-08-27.
+    RECEIPT = {
+        "x-conifer-effective-model": "claude-fable-5",
+        "x-conifer-cost-nanousd": "580000",
+        "x-conifer-cost-components-nanousd": "fresh=80000,cache_write=0,cache_read=0,output=500000",
+        "x-conifer-request-id": "gw-1",
+    }
+
+    class FakeResponse:
+        """Duck-typed like httpx.Response: headers + url, and NO body access."""
+
+        def __init__(self, headers, url="https://api.conifer.build/v1/chat/completions"):
+            self.headers = headers
+            self.url = url
+
+    def test_the_receipt_is_captured_off_headers_alone(self):
+        rc = ReceiptCollector()
+        rc.httpx_hook(self.FakeResponse(self.RECEIPT))
+        self.assertEqual(rc.last.cost_nano_usd, 580_000)
+        self.assertEqual(rc.last.effective_model, "claude-fable-5")
+        self.assertEqual(rc.last.receipt.cost_components_nano_usd.fresh, 80_000)
+        self.assertEqual(rc.last.url, "https://api.conifer.build/v1/chat/completions")
+
+    def test_a_response_with_no_receipt_is_ignored_not_counted_as_free(self):
+        # Not every call through a wrapped client is an inference turn — a
+        # /models read, a health check. Counting those as zero-cost turns would
+        # quietly deflate the average cost per turn.
+        rc = ReceiptCollector()
+        self.assertIsNone(rc.observe({"content-type": "application/json"}))
+        self.assertEqual(rc.total.turns, 0)
+        self.assertIsNone(rc.last)
+
+    def test_the_total_sums_exactly_in_integers(self):
+        rc = ReceiptCollector()
+        rc.observe({**self.RECEIPT, "x-conifer-cost-nanousd": "580000"})
+        rc.observe({**self.RECEIPT, "x-conifer-cost-nanousd": "590000"})
+        total = rc.total
+        self.assertEqual(total.turns, 2)
+        # Integer nanodollars, never floating dollars: 0.00058 + 0.00059 in
+        # floats is not 0.00117, and money that does not add up is worse than
+        # no money.
+        self.assertEqual(total.cost_nano_usd, 1_170_000)
+        self.assertEqual(total.cost_usd, "0.001170000")
+
+    def test_the_counterfactual_is_summed_over_its_own_subset(self):
+        # The gateway omits this header unless the routed predicate holds, so a
+        # naive sum invites comparing it against a cost drawn from more turns
+        # and reporting a savings number that was never true.
+        rc = ReceiptCollector()
+        rc.observe({**self.RECEIPT, "x-conifer-counterfactual-nanousd": "900000"})
+        rc.observe(self.RECEIPT)
+        total = rc.total
+        self.assertEqual(total.turns, 2)
+        self.assertEqual(total.counterfactual_turns, 1, "the subset size must be visible")
+        self.assertEqual(total.counterfactual_nano_usd, 900_000)
+
+    def test_the_total_stays_exact_after_the_retention_cap_drops_receipts(self):
+        # A spend figure that quietly stopped counting would be worse than none.
+        rc = ReceiptCollector(retain=2)
+        for _ in range(4):
+            rc.observe(self.RECEIPT)
+        self.assertEqual(len(rc.all), 2, "the retained tail is bounded")
+        self.assertEqual(rc.total.turns, 4, "but the count is of every turn")
+        self.assertEqual(rc.total.cost_nano_usd, 4 * 580_000)
+
+    def test_a_throwing_callback_cannot_corrupt_the_total(self):
+        # The caller already paid for that turn. Their bad metrics hook must
+        # not turn a successful, billed inference call into a failure.
+        def explode(_):
+            raise RuntimeError("the caller's metrics backend is down")
+
+        rc = ReceiptCollector(on_receipt=explode)
+        rc.observe(self.RECEIPT)  # must not raise
+        self.assertEqual(rc.total.cost_nano_usd, 580_000)
+
+    def test_reset_clears_the_tail_and_the_total(self):
+        rc = ReceiptCollector()
+        rc.observe(self.RECEIPT)
+        rc.reset()
+        self.assertEqual(len(rc.all), 0)
+        self.assertEqual(rc.total.turns, 0)
+        self.assertEqual(rc.total.cost_nano_usd, 0)
+
+    def test_the_collector_is_thread_safe(self):
+        # An `openai` client is routinely shared across threads, and a spend
+        # total that silently loses increments under concurrency would be
+        # worse than no total at all.
+        import threading
+
+        rc = ReceiptCollector(retain=0)
+        def hammer():
+            for _ in range(200):
+                rc.observe(self.RECEIPT)
+
+        threads = [threading.Thread(target=hammer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(rc.total.turns, 1600)
+        self.assertEqual(rc.total.cost_nano_usd, 1600 * 580_000)
+
+    def test_a_spend_budget_refuses_the_next_call_once_spent(self):
+        budget = SpendBudget(1_000_000)
+        self.assertEqual(budget.remaining_nano_usd, 1_000_000)
+        budget.check()  # under budget: fine
+
+        budget.collector.observe(self.RECEIPT)  # 580000
+        self.assertEqual(budget.remaining_nano_usd, 420_000)
+        self.assertFalse(budget.exhausted)
+        budget.check()  # still fine
+
+        # The second turn crosses the line. It is NOT refused — the cost is
+        # only known once it settles, which is why the worst case is
+        # budget + one turn.
+        budget.collector.observe(self.RECEIPT)
+        self.assertTrue(budget.exhausted)
+        self.assertEqual(budget.remaining_nano_usd, 0, "clamped, never negative")
+        with self.assertRaises(SpendBudgetExceeded) as caught:
+            budget.check()
+        # The message must say the refusal was ours, or a reader will hunt for
+        # a gateway 402 that never happened.
+        self.assertIn("CLIENT-SIDE", str(caught.exception))
+
+    def test_a_fractional_or_negative_budget_is_refused(self):
+        with self.assertRaises(ValueError):
+            SpendBudget(1.5)
+        with self.assertRaises(ValueError):
+            SpendBudget(-1)
+
+class EmptyCompletions(unittest.TestCase):
+    """The empty-completion trap. Twin of the same tests in client.test.ts.
+
+    Measured live 2026-08-27 on BOTH wires: a reasoning model spends
+    ``max_tokens`` on its thinking block FIRST, so a small budget is consumed
+    before the visible answer starts. You get ``content: ""``,
+    ``finish_reason: "length"``, and a bill for every one of those output
+    tokens. `claude-fable-5` at max_tokens=16 does exactly this.
+
+    That empty string is indistinguishable, at the call site, from a refusal, a
+    content filter, or a broken SDK — and the distinguishing field is one most
+    callers never read.
+    """
+
+    @staticmethod
+    def _completion(choices, usage=None):
+        return Completion(choices=choices, receipt=Receipt(), fallback_index=0, usage=usage)
+
+    def test_an_empty_completion_explains_itself(self):
+        truncated = self._completion(
+            [{"finish_reason": "length", "message": {"role": "assistant", "content": ""}}]
+        )
+        why = truncated.empty_reason
+        self.assertIn("max_tokens", why)
+        self.assertIn("thinking block is spent FIRST", why)
+
+        # With the reasoning breakdown it gets specific about where the budget
+        # actually went.
+        detailed = self._completion(
+            [{"finish_reason": "length", "message": {"content": ""}}],
+            usage={"completion_tokens": 20, "completion_tokens_details": {"reasoning_tokens": 20}},
+        )
+        self.assertIn("20 of 20 output tokens went to thinking", detailed.empty_reason)
+
+    def test_a_completion_with_text_has_nothing_to_explain(self):
+        fine = self._completion(
+            [{"finish_reason": "stop", "message": {"content": "pinecone"}}]
+        )
+        self.assertIsNone(fine.empty_reason)
+
+    def test_a_tool_call_is_an_answer_not_an_absence(self):
+        # Empty text beside a tool call is CORRECT; calling it a failure would
+        # send people chasing a bug in the one case working as designed.
+        tool = self._completion(
+            [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {"content": None, "tool_calls": [{"id": "1"}]},
+                }
+            ]
+        )
+        self.assertIsNone(tool.empty_reason)
+
+    def test_a_filter_and_a_no_choices_body_are_named(self):
+        filtered = self._completion(
+            [{"finish_reason": "content_filter", "message": {"content": ""}}]
+        )
+        # Worth stating plainly: the filter is the PROVIDER's, not ours.
+        self.assertIn("applies no moderation of its own", filtered.empty_reason)
+
+        # The shape a deferred 202 used to be coerced into. Point at the fix.
+        self.assertIn("defer()", self._completion([]).empty_reason)
+
+
+#: OpenRouter's OWN request-field list, transcribed from their published schema
+#: on 2026-08-27. Not ours — that is the entire point: every other portability
+#: test checks the shim against OUR card, which cannot catch the failure that
+#: actually happened (the vendor's API grew fields our card never heard of, and
+#: the converter dropped each one without a word).
+OPENROUTER_REQUEST_FIELDS = (
+    # Converted to a real Conifer input.
+    "messages", "model", "response_format", "stop", "stream", "max_tokens",
+    "temperature", "tools", "tool_choice", "top_p", "models", "user",
+    # Refused: a server feature Conifer does not have.
+    "prompt", "plugins", "route", "provider",
+    # Unmodelled: forwarded only under an explicit opt-in.
+    "seed", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty",
+    "logit_bias", "top_logprobs", "min_p", "top_a", "prediction", "debug",
+)
+
+
+class OpenRouterDrift(unittest.TestCase):
+    """The anti-drift gate. Twin of the same test in portability.test.ts.
+
+    Five fields were being silently dropped until this list was checked against
+    the vendor's schema: frequency_penalty, presence_penalty, top_logprobs,
+    prediction and debug. Silent dropping violates the first law on the
+    portability card, and a suite that only asks our own documents cannot see it.
+    """
+
+    def test_no_openrouter_request_field_is_silently_dropped(self):
+        structural = {"messages", "model", "stream"}
+        def sample(field):
+            if field == "models":
+                return ["b"]
+            if field == "logit_bias":
+                return {1: 1}
+            return "x"
+
+        for field in OPENROUTER_REQUEST_FIELDS:
+            if field in structural:
+                continue
+            request = {"model": "m", "messages": [], field: sample(field)}
+            try:
+                converted = from_openrouter(
+                    request, allow_client_fallback=True, passthrough_unknown=True
+                )
+            except ConiferPortabilityError:
+                continue  # refused loudly: one of the three acceptable outcomes
+            # Otherwise it must be VISIBLE somewhere in the result.
+            survived = (
+                sample(field) in converted.__dict__.values()
+                or field in (converted.extra_body or {})
+                or converted.client == sample(field)
+                or converted.fallback_models == sample(field)
+            )
+            self.assertTrue(
+                survived,
+                f"OpenRouter's `{field}` was accepted and then SILENTLY DROPPED. Refuse it, "
+                "or add it to _UNMODELLED — the one thing the card forbids is losing it "
+                "quietly.",
+            )
+
+    def test_a_marketplace_only_header_refuses_instead_of_vanishing(self):
+        # Conifer has no marketplace, so there is nothing for it to become —
+        # and a lenient reading would return it as the app NAME, mislabelling
+        # every turn's attribution.
+        with self.assertRaises(ConiferPortabilityError):
+            attribution_from_openrouter({"X-OpenRouter-Categories": "roleplay"})
+        # The title headers DO have an equivalent, under either spelling.
+        self.assertEqual(attribution_from_openrouter({"X-OpenRouter-Title": "a"}), "a")
+        self.assertEqual(attribution_from_openrouter({"X-Title": "a"}), "a")
+        self.assertEqual(
+            attribution_from_openrouter({"HTTP-Referer": "https://x.com"}), "https://x.com"
+        )
+
+
+class VercelGatewayControls(unittest.TestCase):
+    """The Vercel shim had the same silent-drop flaw as OpenRouter's.
+
+    It refused ``order`` and ``only``, converted ``models``, and let every other
+    ``providerOptions.gateway`` key fall out of the dict unremarked. For routing
+    keys that is a quality regression nobody can trace. For ``zdr`` and
+    ``dataCollection`` it is worse than a bug: those are PRIVACY constraints,
+    the request still succeeds, nothing errors, and a promise the caller made to
+    their own users has quietly stopped being kept.
+    """
+
+    CONTROLS = (
+        "order", "only", "ignore", "sort", "allowFallbacks", "requireParameters",
+        "require_parameters", "quantizations", "maxPrice", "dataCollection", "zdr",
+    )
+
+    def test_every_gateway_control_is_converted_or_refused(self):
+        for key in self.CONTROLS:
+            with self.assertRaises(ConiferPortabilityError, msg=key):
+                from_vercel_provider_options({"gateway": {key: "x"}}, allow_client_fallback=True)
+
+    def test_an_unknown_gateway_control_refuses_rather_than_vanishing(self):
+        # The case that matters most for a shim that must survive the vendor
+        # shipping something new: we cannot judge whether an unrecognized
+        # control mattered, so we must not decide it did not on the caller's
+        # behalf.
+        with self.assertRaises(ConiferPortabilityError) as caught:
+            from_vercel_provider_options({"gateway": {"someFutureControl": True}})
+        self.assertIn("does not recognize", caught.exception.message)
+        self.assertIn("someFutureControl", caught.exception.field)
+
+    def test_the_privacy_controls_name_themselves_as_promises(self):
+        # Wording matters more here than anywhere else in the shim: a reader
+        # who skims must understand this is something they may have told THEIR
+        # users.
+        for key in ("zdr", "dataCollection"):
+            with self.assertRaises(ConiferPortabilityError) as caught:
+                from_vercel_provider_options({"gateway": {key: True}})
+            self.assertIn("MUST NOT be dropped", caught.exception.message)
+            self.assertIn("conifer.build/privacy", caught.exception.message)
+
+    def test_what_the_shim_should_convert_still_converts(self):
+        # A fail-closed rule is only correct if it does not break the paths that
+        # were working.
+        fields, passthrough = from_vercel_provider_options(
+            {"gateway": {"models": ["b"]}, "anthropic": {"thinking": True}},
+            allow_client_fallback=True,
+        )
+        self.assertEqual(fields["fallback_models"], ["b"])
+        self.assertTrue(fields["allow_client_fallback"])
+        self.assertEqual(passthrough, {"anthropic": {"thinking": True}})
+
+
+class HeliconeHeaderCoverage(unittest.TestCase):
+    """The Helicone shim had the flaw too — including on its privacy headers.
+
+    ``Helicone-Omit-Request`` and ``Helicone-Omit-Response`` are the caller
+    telling their observability layer NOT to retain prompts or completions.
+    Both were being dropped: the request succeeded, nothing errored, and a
+    commitment the caller may have made to their own users quietly stopped
+    being kept. ``Helicone-Auth`` was dropped too, which is its own trap: it
+    means the caller still believes they are proxying through Helicone.
+    """
+
+    def test_every_unrecognized_or_unhonorable_header_refuses(self):
+        for header in (
+            "Helicone-Omit-Request",
+            "Helicone-Omit-Response",
+            "Helicone-Auth",
+            "Helicone-Retry-Enabled",
+            "Helicone-Some-Future-Header",
+        ):
+            with self.assertRaises(ConiferPortabilityError, msg=header) as caught:
+                from_helicone_headers({header: "v"})
+            # Reported in canonical lowercase: HTTP headers are
+            # case-insensitive, and the shim normalizes before matching so the
+            # two spellings cannot behave differently.
+            self.assertEqual(caught.exception.field, header.lower())
+
+    def test_the_privacy_headers_name_themselves_as_promises(self):
+        for header in ("Helicone-Omit-Request", "Helicone-Omit-Response"):
+            with self.assertRaises(ConiferPortabilityError) as caught:
+                from_helicone_headers({header: "true"})
+            self.assertIn("MUST NOT be dropped", caught.exception.message)
+            self.assertIn("conifer.build/privacy", caught.exception.message)
+
+    def test_what_the_shim_should_convert_still_converts(self):
+        fields, properties = from_helicone_headers(
+            {
+                "Helicone-User-Id": "user-1",
+                "Helicone-Request-Id": "req-1",
+                "Helicone-Property-App": "my-app",
+                "Helicone-Cache-Enabled": "false",
+            }
+        )
+        self.assertEqual(fields["client"], "user-1")
+        self.assertEqual(fields["request_id"], "req-1")
+        self.assertEqual(fields["prompt_cache"], "off")
+        # Properties are handed BACK, not stored: Conifer keeps no property
+        # index and the shim will not pretend it does.
+        self.assertEqual(properties, {"app": "my-app"})
+
+
+class CostOnTheBody(unittest.TestCase):
+    """The settled cost rides the BODY as well as the headers.
+
+    OpenRouter puts cost in ``usage.cost``; Conifer's is on
+    ``x-conifer-cost-nanousd``. Every logging pipeline, request recorder,
+    LangChain/LiteLLM callback and JSON-dumping debug line keeps the body and
+    discards the headers — so a team migrating from OpenRouter loses their cost
+    column and the fix is somewhere they are not looking.
+
+    It matters more here than elsewhere: a normal caller cannot read their usage
+    history back (``/admin/usage/*`` is owner-only), so the receipt on the turn
+    is their only record of what they spent. Twin of the same tests in
+    client.test.ts.
+    """
+
+    def test_the_cost_is_copied_onto_usage_matching_the_header(self):
+        usage = with_cost(
+            {"prompt_tokens": 8, "completion_tokens": 34},
+            Receipt(cost_nano_usd=1_780_000),
+        )
+        # Integer nanodollars are the authority; `cost` is the
+        # OpenRouter-shaped decimal-USD float existing code already reads.
+        self.assertEqual(usage["cost_nanousd"], 1_780_000)
+        self.assertAlmostEqual(usage["cost"], 0.00178)
+        # Nothing the gateway sent is disturbed.
+        self.assertEqual(usage["prompt_tokens"], 8)
+        self.assertEqual(usage["completion_tokens"], 34)
+
+    def test_no_disclosed_cost_means_no_cost_field(self):
+        # The stream case: the head is sent before the first token, so the cost
+        # headers are genuinely absent. Inventing a 0 would tell every
+        # dashboard the turn was free.
+        usage = with_cost({"prompt_tokens": 8}, Receipt())
+        self.assertNotIn("cost", usage)
+        self.assertNotIn("cost_nanousd", usage)
+        self.assertEqual(usage, {"prompt_tokens": 8})
+        # Absent usage stays absent rather than becoming a cost-only object.
+        self.assertIsNone(with_cost(None, Receipt()))
+
+    def test_a_server_sent_cost_always_wins(self):
+        # Additive only: if the gateway ever sends its own usage.cost, that is
+        # the authoritative number.
+        usage = with_cost({"cost": 0.42}, Receipt(cost_nano_usd=1_780_000))
+        self.assertEqual(usage["cost"], 0.42)
+        self.assertNotIn("cost_nanousd", usage, "no half-overwrite either")
+
+    def test_a_completion_carries_the_cost_in_its_body(self):
+        _, transport = scripted((200, RECEIPT_HEADERS, COMPLETION))
+        answer = client(transport).chat(ChatRequest(model="m", messages=[]))
+        # Same number, two places: whichever half of the response a tool keeps.
+        self.assertEqual(answer.usage["cost_nanousd"], answer.receipt.cost_nano_usd)
+        self.assertEqual(answer.usage["cost_nanousd"], 1_250_000)
+
+
+class EmbeddingDimensions(unittest.TestCase):
+    """The catalog's vector width is a DDL decision, so it is typed.
+
+    A pgvector column is declared ``vector(1536)`` BEFORE the first call, and
+    getting it wrong means a migration on a populated table. The catalog
+    publishes ``embedding_dimensions`` so you can size the column without
+    spending a token — and llms.txt tells agents to do exactly that — so the
+    SDK should not be the one place it is reachable only through untyped
+    ``raw``. Twin of the same tests in embeddings.test.ts.
+    """
+
+    def test_the_vector_width_is_a_typed_field(self):
+        model = to_catalog_model(
+            {"id": "text-embedding-3-small", "caps": ["embeddings"], "embedding_dimensions": 1536}
+        )
+        self.assertEqual(model.embedding_dimensions, 1536)
+        # Nothing the catalog sent is lost behind the typed name.
+        self.assertEqual(model.raw["embedding_dimensions"], 1536)
+
+    def test_a_chat_seat_has_no_width_rather_than_a_zero(self):
+        # Absent means "not an embedding model", which differs from "an
+        # embedding model of width 0" — and a 0 would size a column to nothing.
+        chat = to_catalog_model({"id": "claude-fable-5", "caps": ["tools"]})
+        self.assertIsNone(chat.embedding_dimensions)
 
 
 if __name__ == "__main__":

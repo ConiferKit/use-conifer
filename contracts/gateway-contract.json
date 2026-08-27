@@ -42,7 +42,13 @@
       "unsupported_parameter",
       "invalid_value"
     ],
-    "retired_types": ["unauthorized", "invalid_request", "rate_limited"]
+    "retired_types": [
+      "unauthorized",
+      "invalid_request",
+      "rate_limited"
+    ],
+    "retryable_409_marker": "retry shortly",
+    "_409_comment": "The gateway authors three 409s under `request_in_progress` and only two are retryable. Both transient ones end in the literal phrase 'retry shortly'; the terminal one ('idempotency key was already used with a different request body') does not. The SDK keys on that phrase because the status cannot distinguish them."
   },
   "timeouts_secs": {
     "edge_silent_cut": 300,

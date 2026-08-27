@@ -13,6 +13,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+import { TOOLS } from "../mcp/server.ts";
+
 const root = fileURLToPath(new URL("..", import.meta.url));
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -109,7 +111,10 @@ test("the MCP bin answers over stdio instead of exiting silently", () => {
   });
   assert.notEqual(out.trim(), "", "the bin produced no output at all");
   const reply = JSON.parse(out.trim().split("\n")[0] as string);
-  assert.equal(reply.result.tools.length, 5);
+  // The count is asserted against the built dist/, not the sources, so a tool
+  // added to mcp/server.ts without a rebuild fails here rather than shipping
+  // a package whose advertised surface differs from its compiled one.
+  assert.equal(reply.result.tools.length, TOOLS.length);
 });
 
 test("`npm test` runs on every Node the engines floor advertises", () => {
@@ -155,4 +160,98 @@ test("the Python suite declares its test-only dependency somewhere a clone can f
   // The house rule, enforced rather than trusted: no runtime dependency.
   const runtime = /^dependencies = (\[\]|\[\s*\])$/m.test(pyproject);
   assert.ok(runtime, "the published package must still install with an empty dependency list");
+});
+
+/**
+ * The Python package must offer the CA-bundle escape hatch, and must NOT make
+ * it mandatory.
+ *
+ * Found in a fresh-venv install test: a python.org macOS install whose
+ * "Install Certificates.command" was never run has an EMPTY trust store, and so
+ * does every venv built on it. It cannot verify any HTTPS host, so the SDK's
+ * very first call dies with CERTIFICATE_VERIFY_FAILED — which is how a new user
+ * would have met this package. `[tls]` is the one-command fix.
+ *
+ * It stays an EXTRA because zero runtime dependencies is a real feature (this
+ * drops into a lambda or a locked-down build image with no package tree to
+ * audit), and most environments already have a working store.
+ */
+test("the Python package offers a `tls` extra without depending on it", () => {
+  const pyproject = readFileSync(
+    fileURLToPath(new URL("../python/pyproject.toml", import.meta.url)),
+    "utf8",
+  );
+  // The runtime dependency list must stay empty.
+  assert.match(pyproject, /dependencies = \[\]/);
+  // And the escape hatch must exist, spelled the way the README tells people.
+  assert.match(pyproject, /tls = \["certifi"\]/);
+  const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+  assert.match(readme, /\[tls\]/, "the README must document the extra it tells people to install");
+});
+
+/**
+ * The Python package must actually SHIP a description.
+ *
+ * Found by inspecting a built wheel rather than trusting the build's exit code:
+ * `readme = "README.md"` named a file that did not exist in `python/`, and
+ * setuptools resolved it to nothing WITHOUT a warning. The build succeeded, the
+ * metadata carried `Description-Content-Type: text/markdown`, and the body was
+ * EMPTY — which renders as a blank PyPI project page. On a launch, the first
+ * thing most people would have seen of this SDK is nothing at all.
+ *
+ * The fix is a symlink to the repo README, because two copies of a 400-line
+ * document drift and the stale one is always the one a user reads. (A relative
+ * `../README.md` does not work: setuptools refuses to read outside the package
+ * root, and fails the build loudly.)
+ */
+test("the Python package ships the README it declares", () => {
+  const readme = new URL("../python/README.md", import.meta.url);
+  assert.ok(existsSync(readme), "python/README.md is missing — PyPI would render a blank page");
+
+  // It must be the SAME document, not a copy that can drift.
+  const shipped = readFileSync(fileURLToPath(readme), "utf8");
+  const canonical = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+  assert.equal(shipped, canonical, "python/README.md has drifted from the repo README");
+  assert.ok(shipped.length > 1000, "the shipped README is suspiciously short");
+
+  // And the declaration must point at it by the name setuptools can resolve.
+  const pyproject = readFileSync(
+    fileURLToPath(new URL("../python/pyproject.toml", import.meta.url)),
+    "utf8",
+  );
+  assert.match(pyproject, /readme = "README\.md"/);
+});
+
+test("the two packages carry the same version", () => {
+  // `package.json` and `pyproject.toml` have no shared source of truth, so a
+  // mismatched pair ships silently — and then `pip install conifer-sdk==0.2.0`
+  // and `npm i @conifer/sdk@0.2.0` are different software under one name,
+  // which is the sort of thing nobody debugs quickly.
+  const npmVersion = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+  ).version as string;
+  const pyproject = readFileSync(
+    fileURLToPath(new URL("../python/pyproject.toml", import.meta.url)),
+    "utf8",
+  );
+  const pyVersion = /^version = "([^"]+)"/m.exec(pyproject)?.[1];
+  assert.equal(
+    pyVersion,
+    npmVersion,
+    `python/pyproject.toml is ${pyVersion} but package.json is ${npmVersion}`,
+  );
+});
+
+test("the README does not claim a registry that has no package", () => {
+  // The install block currently says, correctly, that neither registry has
+  // this package. Leaving that text after publishing — or removing it before —
+  // is the kind of small dishonesty that costs trust on the day it matters.
+  // RELEASING.md makes updating it a step; this makes forgetting it visible.
+  const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+  const claimsNotPublished = /not on npm/i.test(readme);
+  const showsRegistryInstall = /npm i @conifer\/sdk(?!\.)|pip install conifer-sdk\b/.test(readme);
+  assert.ok(
+    claimsNotPublished !== showsRegistryInstall,
+    "the README both claims the package is unpublished AND shows a registry install (or neither). Pick one — see RELEASING.md.",
+  );
 });
