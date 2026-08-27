@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://conifer.build/docs/sdk/
+    about: Setup, the API reference, and migration guides.
+  - name: Security vulnerability
+    url: https://github.com/ConiferKit/use-conifer/security/advisories/new
+    about: Report privately. Please do not open a public issue.

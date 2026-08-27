@@ -21,7 +21,9 @@
     "dist",
     "bin",
     "cards",
-    "README.md"
+    "contracts",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -33,7 +35,27 @@
     "node": ">=18"
   },
   "devDependencies": {
+    "@types/node": "^22.20.1",
     "typescript": "^5.6.0"
   },
-  "license": "UNLICENSED"
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ConiferKit/use-conifer.git"
+  },
+  "homepage": "https://conifer.build/docs/sdk/conifer/",
+  "bugs": {
+    "url": "https://github.com/ConiferKit/use-conifer/issues"
+  },
+  "keywords": [
+    "conifer",
+    "llm",
+    "openai",
+    "anthropic",
+    "gateway",
+    "ai",
+    "sdk",
+    "mcp"
+  ],
+  "author": "Conifer"
 }

@@ -1,0 +1,30 @@
+name: Integration problem
+description: A client, framework, editor, or agent that does not work against the gateway
+labels: ["integration"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        These are the most valuable reports we get. Please do not include an API
+        key, an account-linked request id, or a full production response body.
+  - type: input
+    id: client
+    attributes:
+      label: Client and version
+      placeholder: "openai-python 3.5.0 / Claude Code 2.1 / Cursor 0.44"
+    validations:
+      required: true
+  - type: textarea
+    id: request
+    attributes:
+      label: What you ran
+      description: The request, config, or command. Redact the key.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected versus actual
+    validations:
+      required: true

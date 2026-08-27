@@ -1,0 +1,22 @@
+{
+  "_comment": "The Conifer gateway's public wire contract, vendored here and pinned by the test suites in both languages. Generated from the gateway's live constants and published for downstream clients to vendor; do not edit by hand. If the gateway adds a receipt header, this file changes and the card tests fail until the SDK parses it — which is the point.",
+  "version": 1,
+  "receipt_headers": [
+    "x-conifer-requested-model",
+    "x-conifer-effective-model",
+    "x-conifer-receipt-reason",
+    "x-conifer-endpoint",
+    "x-conifer-cost-nanousd",
+    "x-conifer-cost-components-nanousd",
+    "x-conifer-service-tier",
+    "x-conifer-receipt-venue",
+    "x-conifer-counterfactual-nanousd"
+  ],
+  "request_id_header": "x-conifer-request-id",
+  "timeouts_secs": {
+    "edge_silent_cut": 300,
+    "upstream": 280,
+    "stream_max": 2400,
+    "stream_idle": 120
+  }
+}

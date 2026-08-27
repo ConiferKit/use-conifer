@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The SUITE needs Node >= 22: it runs the .ts sources directly through
+  # --experimental-strip-types, which older Node does not have. That is a
+  # contributor requirement, not a consumer one — the package ships compiled
+  # ESM and supports Node >= 18, which the `consumer` job below proves.
+  typescript:
+    name: TypeScript (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # Guards the `engines` floor: the BUILT package must import and run on the
+  # oldest Node we advertise. Catches an accidental ES2023+ emit.
+  consumer:
+    name: Built package on Node 18
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+      - name: import the built entry point
+        run: node -e "import('./dist/src/index.js').then(m => { if (typeof m.Conifer !== 'function') { throw new Error('Conifer missing from the built package'); } console.log('built package imports on', process.version); })"
+
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # The package declares no runtime dependencies, so the suite needs only
+      # a test runner. Keep it that way: see CONTRIBUTING.md.
+      - run: pip install pytest
+      - run: python -m pytest tests -q
+        working-directory: python

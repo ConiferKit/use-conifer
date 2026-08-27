@@ -513,10 +513,13 @@ class ParityTests(unittest.TestCase):
     def test_the_timeout_matches_the_gateways_edge_cut(self):
         from conifer_sdk import DEFAULT_TIMEOUT_SECONDS
 
+        # The vendored gateway contract (see contracts/gateway-contract.json and
+        # the note in tests/cards.test.ts): pinned in-repo so this suite runs
+        # offline in any clone, and so both languages check the same bytes.
         contract = json.loads(
             (
-                Path(__file__).resolve().parents[3]
-                / "typhoon/contracts/gateway-contract.json"
+                Path(__file__).resolve().parents[2]
+                / "contracts/gateway-contract.json"
             ).read_text()
         )
         self.assertEqual(DEFAULT_TIMEOUT_SECONDS, contract["timeouts_secs"]["edge_silent_cut"])
