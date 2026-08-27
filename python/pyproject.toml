@@ -17,6 +17,14 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
+# TEST-ONLY, never installed for a user of the SDK: `pip install -e ".[dev]"`
+# (or `pip install -r requirements-dev.txt`) is the documented way to get a
+# runner. `dependencies` above stays empty on purpose — see CONTRIBUTING.md.
+# The suite itself is stdlib `unittest` and runs with no extras at all via
+# `python -m unittest discover -s tests -t .`.
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
 [project.urls]
 Homepage = "https://conifer.build"
 Documentation = "https://conifer.build/docs/sdk/conifer/"

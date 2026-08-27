@@ -111,3 +111,48 @@ test("the MCP bin answers over stdio instead of exiting silently", () => {
   const reply = JSON.parse(out.trim().split("\n")[0] as string);
   assert.equal(reply.result.tools.length, 5);
 });
+
+test("`npm test` runs on every Node the engines floor advertises", () => {
+  // The suite imports `.ts` sources, so it used to be spelled
+  // `node --experimental-strip-types --test tests/*.test.ts`. On the Node 20
+  // that `engines` itself advertises, that is not a version error, it is
+  // `node: bad option` — a message that names neither Node 22 nor this repo,
+  // on a version the package claims to support. Found on 2026-08-27 by a
+  // contributor doing exactly `npm ci && npm test`.
+  //
+  // The runner now picks a path per Node: strip types where that exists,
+  // compile-then-run where it does not. This test pins the invariant that the
+  // test script must not hard-code a flag that a supported Node rejects.
+  assert.ok(
+    !/--experimental-strip-types/.test(pkg.scripts.test),
+    "the test script must not hard-code a flag Node 20 rejects with `bad option`",
+  );
+
+  const floor = Number(String(pkg.engines.node).replace(/[^\d.]/g, "").split(".")[0]);
+  assert.ok(Number.isFinite(floor), "engines.node must name a major version");
+
+  // The runner exists, and knows both routes.
+  const runner = readFileSync(new URL("../scripts/run-tests.mjs", import.meta.url), "utf8");
+  assert.match(runner, /experimental-strip-types/, "the fast path must still strip types");
+  assert.match(runner, /tsc|typescript/i, "there must be a compile fallback for older Node");
+});
+
+test("the Python suite declares its test-only dependency somewhere a clone can find", () => {
+  // `python -m pytest tests -q`, straight from CONTRIBUTING, met `No module
+  // named pytest` in a fresh clone with no requirements file and no extra to
+  // point at. A documented command that cannot work as written is a bug in the
+  // docs or the packaging; this pins the packaging half.
+  //
+  // pytest must stay TEST-ONLY: `[project] dependencies` stays empty.
+  const requirements = new URL("../python/requirements-dev.txt", import.meta.url);
+  assert.ok(existsSync(requirements), "python/requirements-dev.txt must exist");
+  assert.match(readFileSync(requirements, "utf8"), /pytest/);
+
+  const pyproject = readFileSync(new URL("../python/pyproject.toml", import.meta.url), "utf8");
+  assert.match(pyproject, /\[project\.optional-dependencies\]/, "declare a dev extra too");
+  assert.match(pyproject, /dev = \[[^\]]*pytest/, "the dev extra is where pytest belongs");
+
+  // The house rule, enforced rather than trusted: no runtime dependency.
+  const runtime = /^dependencies = (\[\]|\[\s*\])$/m.test(pyproject);
+  assert.ok(runtime, "the published package must still install with an empty dependency list");
+});

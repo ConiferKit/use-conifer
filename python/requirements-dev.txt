@@ -1,0 +1,15 @@
+# Test-only dependencies for the Python suite.
+#
+#   python -m pip install -r requirements-dev.txt
+#   python -m pytest tests -q
+#
+# The PACKAGE has no dependencies and never will (see CONTRIBUTING.md, "no new
+# runtime dependencies"): nothing here is installed for a user of the SDK. This
+# file exists because a fresh clone otherwise met `No module named pytest` with
+# no documented way to fix it, and the honest answer to "how do I run the
+# tests?" cannot be "guess".
+#
+# The suite is written on stdlib `unittest`, so `python -m unittest discover -s
+# tests -t tests` needs none of this. pytest is the nicer runner, not a requirement
+# of the tests themselves.
+pytest>=7.0

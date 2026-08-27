@@ -20,20 +20,31 @@ make sense, say so and we will find another way.
 
 ## Running the suites
 
-**Node 22 or newer is required to run the TypeScript suite**, which executes
-the `.ts` sources directly through `--experimental-strip-types`. That is a
-contributor requirement only: the published package is compiled ESM and
-supports Node 18 and up, which CI proves on every push.
+`npm test` runs on **any Node the package supports, 18 and up**. On Node 22.6+
+it executes the `.ts` sources directly through `--experimental-strip-types`; on
+anything older it compiles the same sources to `.test-build/` with the
+TypeScript already in `devDependencies` and runs them there. Same tests, same
+assertions, no flag to remember, and no new dependency either way. Set
+`CONIFER_TEST_COMPILE=1` to take the compile path deliberately.
+
+The Python suite needs a runner and nothing else, because the package itself
+has no dependencies. It is written on stdlib `unittest`, so
+`python -m unittest discover -s tests -t tests` works with an empty environment;
+pytest is the nicer output and is declared as a **test-only** dependency in two
+places, `python/requirements-dev.txt` and the `dev` extra in
+`python/pyproject.toml`.
 
 ```bash
 git clone https://github.com/ConiferKit/use-conifer
 cd use-conifer
 
 npm ci
-npm test            # TypeScript
+npm test            # TypeScript, any Node >= 18
 npm run typecheck
+npm run build
 
 cd python
+python -m pip install -r requirements-dev.txt   # or: pip install -e ".[dev]"
 python -m pytest tests -q
 ```
 
