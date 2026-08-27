@@ -275,6 +275,19 @@ await check("embeddings decode losslessly, base64 and float alike", async () => 
   return `${decoded.length} dims, decode exact, run-to-run drift ${drift.toExponential(1)}`;
 });
 
+await check("the catalog's advertised vector width is the width you get", async () => {
+  // The claim a caller acts on BEFORE spending anything: `vector(1536)` in a
+  // migration, sized from the catalog. If the advertised width and the real
+  // one ever diverged, the failure would land in someone's database schema
+  // rather than in their code, which is a far worse place to find it.
+  const model = (await conifer.models()).find((entry) => entry.id === embedModel);
+  const advertised = model?.embeddingDimensions;
+  if (advertised === undefined) throw new Error(`${embedModel} advertises no embedding_dimensions`);
+  const actual = vectorOf(await conifer.embeddings.create({ model: embedModel, input: "hi" }))?.length;
+  eq(actual, advertised, "advertised vs actual vector width");
+  return `${embedModel} advertises ${advertised}, returns ${actual}`;
+});
+
 await check("a batch returns one vector per input, in order", async () => {
   const batch = await conifer.embeddings.create({
     model: embedModel,

@@ -139,6 +139,18 @@ class CatalogModel:
     max_tools: Optional[int] = None
     #: Declared capabilities. ``None`` means UNDECLARED, not unsupported.
     caps: Optional[List[str]] = None
+    #: The vector width an embedding seat returns, on rows whose ``caps``
+    #: include ``embeddings``.
+    #:
+    #: Typed rather than left in ``raw`` because it is a DDL decision, not a
+    #: curiosity: a pgvector column is declared ``vector(1536)`` before the
+    #: first call, and getting it wrong means a migration on a populated
+    #: table. The catalog publishes it so you can size the column without
+    #: spending a token, and llms.txt tells agents to do exactly that.
+    #:
+    #: This is the seat's NATIVE width; passing ``dimensions`` on the request
+    #: (Matryoshka shortening) overrides it.
+    embedding_dimensions: Optional[int] = None
     #: The AS-CHARGED price for THIS entry's lane only. Never both lanes.
     pricing: Optional[Dict[str, Any]] = None
     #: BYOK take rate as a percent. Display-only.

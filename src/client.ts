@@ -750,6 +750,7 @@ export function toCatalogModel(entry: Record<string, unknown>): CatalogModel {
     maxOutputTokens: entry.max_output_tokens as number | undefined,
     maxTools: entry.max_tools as number | undefined,
     caps: entry.caps as string[] | undefined,
+    embeddingDimensions: entry.embedding_dimensions as number | undefined,
     pricing: entry.pricing as CatalogModel["pricing"],
     feePct: entry.fee_pct as number | undefined,
     unavailable: entry.unavailable as boolean | undefined,

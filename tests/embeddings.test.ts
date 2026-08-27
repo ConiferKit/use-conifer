@@ -16,6 +16,7 @@ import {
   decodeVector,
   embeddingsBody,
   embeddingsHeaders,
+  toCatalogModel,
   vectorOf,
 } from "../src/index.ts";
 
@@ -253,4 +254,31 @@ test("an empty vector list is handled without inventing a vector", async () => {
   const result = await client(fetchImpl).embeddings.create({ model: "m", input: "hi" });
   assert.deepEqual(result.data, []);
   assert.equal(vectorOf(result), undefined);
+});
+
+/**
+ * The catalog's vector width is a DDL decision, so it is typed.
+ *
+ * A pgvector column is declared `vector(1536)` BEFORE the first call, and
+ * getting it wrong means a migration on a populated table. The catalog
+ * publishes `embedding_dimensions` precisely so you can size the column without
+ * spending a token — and `llms.txt` tells agents to do exactly that — so the
+ * SDK should not be the one place it is reachable only through untyped `raw`.
+ */
+test("an embedding seat's vector width is a typed field, not a raw lookup", () => {
+  const model = toCatalogModel({
+    id: "text-embedding-3-small",
+    caps: ["embeddings"],
+    embedding_dimensions: 1536,
+  });
+  assert.equal(model.embeddingDimensions, 1536);
+  // And nothing the catalog sent is lost behind the typed name.
+  assert.equal(model.raw.embedding_dimensions, 1536);
+});
+
+test("a chat seat simply has no vector width, rather than a zero", () => {
+  // Absent means "not an embedding model", which is a different statement from
+  // "an embedding model of width 0" — and a 0 would size a column to nothing.
+  const chat = toCatalogModel({ id: "claude-fable-5", caps: ["tools"] });
+  assert.equal(chat.embeddingDimensions, undefined);
 });

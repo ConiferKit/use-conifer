@@ -178,7 +178,10 @@ Three things worth knowing, because they are decisions rather than defaults:
   a test, compare with a tolerance rather than `==`.
 
 `conifer.cheapestFor(["embeddings"])` picks the cheapest embedding seat the
-catalog actually declares.
+catalog actually declares, and each catalog row carries `embeddingDimensions`
+(`embedding_dimensions` in Python) so you can size a `vector(1536)` column
+before spending a token — getting that wrong means a migration on a populated
+table.
 
 ## Deferred jobs
 
@@ -466,7 +469,7 @@ npm run build     # emit dist/ (ESM + .d.ts)
 npm test          # 145 tests, offline
 npm run typecheck
 
-cd python && python3 -m pytest -q   # 103 tests, offline
+cd python && python3 -m pytest -q   # 105 tests, offline
 ```
 
 Most assertions run with an injected transport: no network, no mock framework,
@@ -484,8 +487,8 @@ a deferred turn that was billed and returned nothing readable. So there is a
 second, deliberate gate:
 
 ```bash
-CONIFER_API_KEY=sk-… npm run qa:live                     # 19 checks
-CONIFER_API_KEY=sk-… node scripts/live-qa.mjs --include-deferred   # 21
+CONIFER_API_KEY=sk-… npm run qa:live                     # 20 checks
+CONIFER_API_KEY=sk-… node scripts/live-qa.mjs --include-deferred   # 22
 
 cd python && CONIFER_API_KEY=sk-… python3 scripts/live_qa.py --include-deferred
 ```
@@ -514,7 +517,7 @@ Stated here so you find out now rather than mid-migration:
 The offline suites use injected transports and no network, so they can only
 confirm what we already believed. Every claim in this README is also checked
 against production by `scripts/live-qa.mjs` and `python/scripts/live_qa.py`
-(19 TS / 18 Python checks, plus 2 more with `--include-deferred`), in both languages, plus a
+(20 TS / 18 Python checks, plus 2 more with `--include-deferred`), in both languages, plus a
 fresh-install pass that installs the packed tarball and the Python package into
 clean projects and uses them as a consumer does.
 
