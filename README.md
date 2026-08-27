@@ -236,7 +236,7 @@ exists for the four things the OpenAI client structurally cannot give you:
 | | |
 | --- | --- |
 | **The receipt** | Every response carries the exact integer nanodollar cost of *that call*, itemized across fresh input, cache write, cache read, and output. No second stats request, no float dollars, no estimating from token counts and a price table. |
-| **Named refusals** | A 402 is either "the account is out of credit" or "your own ceiling refused this turn". Those have opposite remedies, so they are `ConiferPaymentError` and `ConiferCostCeilingError`, not one status number. |
+| **Named refusals** | A 402 is *three* different problems: the account is out of credit, your own per-request ceiling refused this turn, or this key's lifetime cap is spent. The remedies are unrelated — top up, raise the ceiling, or rotate the key — so they are `ConiferPaymentError`, `ConiferCostCeilingError` and `ConiferKeySpendCapError`, not one status number. A 409 splits the same way: two of them mean "retry shortly" and are retried for you; the third never will be. |
 | **The spend ceiling** | `maxCostNanoUsd` is a hard, server-enforced bound checked *before* any upstream call. The gateway refuses rather than serves. |
 | **Portability** | Migration shims that refuse what Conifer cannot honor instead of dropping it silently. |
 
@@ -390,10 +390,10 @@ Verified from a real `npm i`: an ES2022 consumer typechecks clean under
 
 ```bash
 npm run build     # emit dist/ (ESM + .d.ts)
-npm test          # 129 tests, offline
+npm test          # 131 tests, offline
 npm run typecheck
 
-cd python && python3 -m pytest -q   # 84 tests, offline
+cd python && python3 -m pytest -q   # 85 tests, offline
 ```
 
 Most assertions run with an injected transport: no network, no mock framework,
@@ -438,11 +438,29 @@ Stated here so you find out now rather than mid-migration:
 
 ## Verified against the live gateway
 
-The offline suites (injected transports, no network) are backed by end-to-end
-runs against production: real completions with exact itemized receipts, the
-cost ceiling refusing before any spend, streaming with the terminal usage
-chunk, model-not-found behavior, and the MCP server over stdio from a fresh
-install. Both languages, same results.
+The offline suites use injected transports and no network, so they can only
+confirm what we already believed. Every claim in this README is also checked
+against production by `scripts/live-qa.mjs` and `python/scripts/live_qa.py`
+(16 checks each, 18 with `--include-deferred`), in both languages, plus a
+fresh-install pass that installs the packed tarball and the Python package into
+clean projects and uses them as a consumer does.
+
+That second gate is not ceremony. It is where every defect in the 2026-08-27
+pass was found, and none of them were visible offline:
+
+- three error classes were **unreachable** in production, because the gateway
+  had moved to the industry error vocabulary while the fixtures kept the retired
+  names — so every 401 and 400 arrived as a bare `ConiferError` and every 429
+  silently discarded the server's own `retry-after`;
+- `requestId` was **inert**: the gateway reads `idempotency-key` first, and the
+  SDK always sent one, so a caller's trace id was never once consulted;
+- `chat({ defer: true })` returned an **empty completion** for a turn that had
+  been accepted *and debited*;
+- transient `409`s were treated as terminal, and then, once retried, were given
+  0.75s to resolve a cross-replica convergence;
+- a fresh Python venv could not make its **first call at all**, because a
+  python.org install has an empty CA trust store and no `certifi` to fall back
+  to.
 
 ## License
 
