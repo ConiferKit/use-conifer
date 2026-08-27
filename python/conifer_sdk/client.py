@@ -687,6 +687,7 @@ def to_catalog_model(entry: Mapping[str, Any]) -> CatalogModel:
         max_output_tokens=entry.get("max_output_tokens"),
         max_tools=entry.get("max_tools"),
         caps=entry.get("caps"),
+        embedding_dimensions=entry.get("embedding_dimensions"),
         pricing=entry.get("pricing"),
         fee_pct=entry.get("fee_pct"),
         unavailable=entry.get("unavailable"),

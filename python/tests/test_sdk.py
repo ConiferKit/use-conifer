@@ -50,6 +50,7 @@ from conifer_sdk import (  # noqa: E402
     resolve_base_url,
 )
 from conifer_sdk.client import (  # noqa: E402
+    to_catalog_model,
     minimum_backoff_seconds,
     decode_vector,
     embeddings_body,
@@ -1654,6 +1655,32 @@ class CostOnTheBody(unittest.TestCase):
         # Same number, two places: whichever half of the response a tool keeps.
         self.assertEqual(answer.usage["cost_nanousd"], answer.receipt.cost_nano_usd)
         self.assertEqual(answer.usage["cost_nanousd"], 1_250_000)
+
+
+class EmbeddingDimensions(unittest.TestCase):
+    """The catalog's vector width is a DDL decision, so it is typed.
+
+    A pgvector column is declared ``vector(1536)`` BEFORE the first call, and
+    getting it wrong means a migration on a populated table. The catalog
+    publishes ``embedding_dimensions`` so you can size the column without
+    spending a token — and llms.txt tells agents to do exactly that — so the
+    SDK should not be the one place it is reachable only through untyped
+    ``raw``. Twin of the same tests in embeddings.test.ts.
+    """
+
+    def test_the_vector_width_is_a_typed_field(self):
+        model = to_catalog_model(
+            {"id": "text-embedding-3-small", "caps": ["embeddings"], "embedding_dimensions": 1536}
+        )
+        self.assertEqual(model.embedding_dimensions, 1536)
+        # Nothing the catalog sent is lost behind the typed name.
+        self.assertEqual(model.raw["embedding_dimensions"], 1536)
+
+    def test_a_chat_seat_has_no_width_rather_than_a_zero(self):
+        # Absent means "not an embedding model", which differs from "an
+        # embedding model of width 0" — and a 0 would size a column to nothing.
+        chat = to_catalog_model({"id": "claude-fable-5", "caps": ["tools"]})
+        self.assertIsNone(chat.embedding_dimensions)
 
 
 if __name__ == "__main__":

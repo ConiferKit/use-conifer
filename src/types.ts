@@ -217,6 +217,21 @@ export interface CatalogModel {
   maxTools?: number;
   /** Declared capabilities. ABSENT means undeclared, NOT unsupported. */
   caps?: string[];
+  /**
+   * The vector width an embedding seat returns, on rows whose `caps` include
+   * `embeddings`.
+   *
+   * Typed rather than left in `raw` because it is a DDL decision, not a
+   * curiosity: a pgvector column is declared `vector(1536)` before the first
+   * call, and getting it wrong means a migration on a populated table. The
+   * catalog publishes it precisely so you can size the column without spending
+   * a token, and `llms.txt` tells agents to do exactly that — so the SDK
+   * should not be the one place it is hard to reach.
+   *
+   * Note this is the seat's NATIVE width. Passing `dimensions` on the request
+   * (Matryoshka shortening, where the model supports it) overrides it.
+   */
+  embeddingDimensions?: number;
   /** The AS-CHARGED price for THIS entry's lane only. */
   pricing?: Pricing;
   /** BYOK take rate as a percent. Display-only. */

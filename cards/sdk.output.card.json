@@ -37,6 +37,7 @@
     "maxOutputTokens": "number | absent",
     "maxTools": "number | absent",
     "caps": "string[] | absent — declared capabilities. ABSENT means undeclared, NOT unsupported.",
+    "embeddingDimensions": "the vector width an embedding seat returns, on rows whose caps include `embeddings`. TYPED rather than left in `raw` because it is a DDL decision, not a curiosity: a pgvector column is declared vector(1536) BEFORE the first call, and getting it wrong means a migration on a populated table. This is the seat's NATIVE width — passing `dimensions` on the request (Matryoshka shortening) overrides it. Absent on a chat seat, which is a different statement from a width of 0.",
     "pricing": "the AS-CHARGED price for THIS entry's lane only. Never both lanes.",
     "feePct": "the BYOK take rate, on byok entries only. Display-only.",
     "unavailable": "true only when BYOK custody is degraded for a model you hold a key for"
