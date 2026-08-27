@@ -103,8 +103,13 @@
       "Helicone-Moderations-Enabled / Helicone-LLM-Security-Enabled": "no moderation or injection-scanning layer. Throws — a security feature that silently does nothing is worse than an error.",
       "Helicone-Token-Limit-Exception-Handler": "no server-side truncation or middle-out. The gateway refuses an over-window request with a typed 400 naming the window instead. Throws.",
       "Helicone-Session-Id / Session-Path / Session-Name": "no session tree in Conifer's observability. Throws.",
-      "Helicone-Posthog-*": "no third-party fan-out."
-    }
+      "Helicone-Posthog-*": "no third-party fan-out.",
+      "Helicone-Omit-Request": "PRIVACY. Conifer has no per-request switch to omit the prompt from what it retains. Cannot be honored and MUST NOT be dropped — it is a promise the caller may have made to THEIR OWN users. Throws, pointing at https://conifer.build/privacy.",
+      "Helicone-Omit-Response": "PRIVACY. Same as Helicone-Omit-Request, for the completion. Throws.",
+      "Helicone-Auth": "your HELICONE credential — its presence means the caller still believes they are proxying through Helicone. Conifer is the destination. Throws.",
+      "Helicone-Retry-Enabled": "Helicone retries SERVER-side on its own policy. This SDK retries in the CLIENT, narrowly, reusing one idempotency key so it cannot double-bill. A server-side retry you cannot see is not something Conifer will imitate. Throws."
+    },
+    "unknown_headers": "ANY unrecognized `helicone-*` header throws. We cannot judge whether a control we have never heard of carried a constraint, so we must not decide on the caller's behalf that it did not. Fail closed."
   },
   "receipt_superset": {
     "note": "What Conifer gives that none of the three do on the response of the SAME call: exact integer nanodollar cost, itemized across the four billed token classes, plus the requested-vs-effective model spelling and the serving endpoint. `costComponentsNanoUsd` always sums to `costNanoUsd`; when that identity cannot be guaranteed the header is omitted rather than approximated.",

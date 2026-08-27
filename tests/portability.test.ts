@@ -428,3 +428,60 @@ test("what the Vercel shim SHOULD convert still converts", () => {
   assert.equal(request.allowClientFallback, true);
   assert.deepEqual(passthrough, { anthropic: { thinking: { type: "enabled" } } });
 });
+
+/**
+ * The Helicone shim had the flaw too — including on its privacy headers.
+ *
+ * `Helicone-Omit-Request` and `Helicone-Omit-Response` are the caller telling
+ * their observability layer NOT to retain prompts or completions. Both were
+ * being dropped: the request succeeded, nothing errored, and a commitment the
+ * caller may have made to their own users quietly stopped being kept.
+ *
+ * `Helicone-Auth` was dropped too, which is its own small trap: it means the
+ * caller still believes they are proxying through Helicone.
+ */
+test("every unrecognized or unhonorable Helicone header refuses", () => {
+  for (const header of [
+    "Helicone-Omit-Request",
+    "Helicone-Omit-Response",
+    "Helicone-Auth",
+    "Helicone-Retry-Enabled",
+    "Helicone-Some-Future-Header",
+  ]) {
+    // Sent in the caller's casing, reported in the canonical lowercase — HTTP
+    // headers are case-insensitive, and the shim normalizes before matching so
+    // `Helicone-Auth` and `helicone-auth` cannot behave differently.
+    refuses(header.toLowerCase(), () => fromHeliconeHeaders({ [header]: "v" }));
+  }
+});
+
+test("the Helicone privacy headers name themselves as promises", () => {
+  for (const header of ["Helicone-Omit-Request", "Helicone-Omit-Response"]) {
+    const error = (() => {
+      try {
+        fromHeliconeHeaders({ [header]: "true" });
+        return undefined;
+      } catch (thrown) {
+        return thrown as ConiferPortabilityError;
+      }
+    })();
+    assert.match(error?.message ?? "", /MUST NOT be dropped/);
+    assert.match(error?.message ?? "", /conifer\.build\/privacy/);
+  }
+});
+
+test("what the Helicone shim SHOULD convert still converts", () => {
+  // Fail-closed is only correct if it does not break the working paths.
+  const { request, properties } = fromHeliconeHeaders({
+    "Helicone-User-Id": "user-1",
+    "Helicone-Request-Id": "req-1",
+    "Helicone-Property-App": "my-app",
+    "Helicone-Cache-Enabled": "false",
+  });
+  assert.equal(request.client, "user-1");
+  assert.equal(request.requestId, "req-1");
+  assert.equal(request.promptCache, "off");
+  // Properties are handed BACK, not stored: Conifer keeps no property index
+  // and the shim will not pretend it does.
+  assert.deepEqual(properties, { app: "my-app" });
+});

@@ -1551,5 +1551,55 @@ class VercelGatewayControls(unittest.TestCase):
         self.assertEqual(passthrough, {"anthropic": {"thinking": True}})
 
 
+class HeliconeHeaderCoverage(unittest.TestCase):
+    """The Helicone shim had the flaw too — including on its privacy headers.
+
+    ``Helicone-Omit-Request`` and ``Helicone-Omit-Response`` are the caller
+    telling their observability layer NOT to retain prompts or completions.
+    Both were being dropped: the request succeeded, nothing errored, and a
+    commitment the caller may have made to their own users quietly stopped
+    being kept. ``Helicone-Auth`` was dropped too, which is its own trap: it
+    means the caller still believes they are proxying through Helicone.
+    """
+
+    def test_every_unrecognized_or_unhonorable_header_refuses(self):
+        for header in (
+            "Helicone-Omit-Request",
+            "Helicone-Omit-Response",
+            "Helicone-Auth",
+            "Helicone-Retry-Enabled",
+            "Helicone-Some-Future-Header",
+        ):
+            with self.assertRaises(ConiferPortabilityError, msg=header) as caught:
+                from_helicone_headers({header: "v"})
+            # Reported in canonical lowercase: HTTP headers are
+            # case-insensitive, and the shim normalizes before matching so the
+            # two spellings cannot behave differently.
+            self.assertEqual(caught.exception.field, header.lower())
+
+    def test_the_privacy_headers_name_themselves_as_promises(self):
+        for header in ("Helicone-Omit-Request", "Helicone-Omit-Response"):
+            with self.assertRaises(ConiferPortabilityError) as caught:
+                from_helicone_headers({header: "true"})
+            self.assertIn("MUST NOT be dropped", caught.exception.message)
+            self.assertIn("conifer.build/privacy", caught.exception.message)
+
+    def test_what_the_shim_should_convert_still_converts(self):
+        fields, properties = from_helicone_headers(
+            {
+                "Helicone-User-Id": "user-1",
+                "Helicone-Request-Id": "req-1",
+                "Helicone-Property-App": "my-app",
+                "Helicone-Cache-Enabled": "false",
+            }
+        )
+        self.assertEqual(fields["client"], "user-1")
+        self.assertEqual(fields["request_id"], "req-1")
+        self.assertEqual(fields["prompt_cache"], "off")
+        # Properties are handed BACK, not stored: Conifer keeps no property
+        # index and the shim will not pretend it does.
+        self.assertEqual(properties, {"app": "my-app"})
+
+
 if __name__ == "__main__":
     unittest.main()

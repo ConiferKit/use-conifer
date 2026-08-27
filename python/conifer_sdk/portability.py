@@ -188,6 +188,44 @@ _HELICONE_REFUSALS: Dict[str, str] = {
     "helicone-session-name": "see Helicone-Session-Id.",
     "helicone-posthog-key": "Conifer does not fan out to third-party analytics.",
     "helicone-posthog-host": "see Helicone-Posthog-Key.",
+    # PRIVACY. Dropping either is the worst case in this file: the request
+    # succeeds, nothing errors, and a promise the caller made to THEIR OWN
+    # users — that prompts or completions are not retained — has quietly lapsed.
+    "helicone-omit-request": (
+        "Conifer has no per-request switch to omit the prompt from what it retains, so "
+        "this cannot be honored and MUST NOT be dropped — it is a promise you may have "
+        "made to your own users. See https://conifer.build/privacy for what the gateway "
+        "retains, and decide with that in hand."
+    ),
+    "helicone-omit-response": (
+        "Conifer has no per-request switch to omit the completion from what it retains, "
+        "so this cannot be honored and MUST NOT be dropped — it is a promise you may have "
+        "made to your own users. See https://conifer.build/privacy for what the gateway "
+        "retains, and decide with that in hand."
+    ),
+    "helicone-auth": (
+        "this is your HELICONE credential, and it means the request was going through "
+        "Helicone as a proxy. Conifer is the destination: drop it and authenticate with "
+        "CONIFER_API_KEY."
+    ),
+    "helicone-retry-enabled": (
+        "Helicone retries server-side on its own policy. This SDK retries in the CLIENT, "
+        "narrowly (transport faults and 409/429/502/503/504), and every retry reuses one "
+        "idempotency key so it cannot double-bill. Set max_retries for a different budget "
+        "— but a server-side retry you cannot see is not something Conifer will imitate."
+    ),
+}
+
+#: Helicone headers that are OBSERVED rather than converted: they change what
+#: Helicone recorded, not what the model did, so there is nothing to refuse and
+#: nothing to send. Listed so the catch-all can tell "deliberately inert" from
+#: "we have never heard of this".
+_HELICONE_INERT = {
+    "helicone-cache-enabled",
+    "helicone-request-id",
+    "helicone-user-id",
+    "helicone-fallbacks",
+    "helicone-ratelimit-policy",
 }
 
 
@@ -235,6 +273,31 @@ def from_helicone_headers(
 
     if "helicone-ratelimit-policy" in lowered:
         fields["max_cost_nano_usd"] = ceiling_from_policy(lowered["helicone-ratelimit-policy"])
+
+    # Anything left is a Helicone header we have never heard of. NOT safe to
+    # ignore: an unknown header is exactly the case where we cannot judge
+    # whether it carried a constraint, and this shim exists so that a
+    # constraint cannot go missing in transit. (Two of the headers above are
+    # privacy promises that were being dropped here until 2026-08-27.)
+    unknown = [
+        key
+        for key in lowered
+        if key.startswith("helicone-")
+        and not key.startswith("helicone-property-")
+        and key not in _HELICONE_INERT
+        and key not in _HELICONE_REFUSALS
+    ]
+    if unknown:
+        joined = "`, `".join(unknown)
+        raise ConiferPortabilityError(
+            unknown[0],
+            f"`{joined}` "
+            f"{'is a Helicone header' if len(unknown) == 1 else 'are Helicone headers'} "
+            "this shim does not recognize. It is refused rather than ignored, because an "
+            "observability or privacy control that vanishes in migration is the one "
+            "failure this shim exists to prevent. Remove it, or open an issue if Conifer "
+            "should honor it.",
+        )
 
     return fields, properties
 
