@@ -16,6 +16,7 @@ from .client import (
     Conifer,
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT_SECONDS,
+    decode_vector,
     parse_frame,
     resolve_base_url,
 )
@@ -46,7 +47,16 @@ from .portability import (
     from_vercel_provider_options,
     parse_fallbacks,
 )
-from .types import Balance, CatalogModel, ChatRequest, Completion
+from .types import (
+    Balance,
+    CatalogModel,
+    ChatRequest,
+    Completion,
+    Embedding,
+    EmbeddingsRequest,
+    EmbeddingsResponse,
+    vector_of,
+)
 
 __all__ = [
     "Conifer",
@@ -54,6 +64,11 @@ __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
     "resolve_base_url",
     "parse_frame",
+    "decode_vector",
+    "Embedding",
+    "EmbeddingsRequest",
+    "EmbeddingsResponse",
+    "vector_of",
     "ConiferError",
     "ConiferAuthError",
     "ConiferPaymentError",

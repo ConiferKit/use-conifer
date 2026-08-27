@@ -98,3 +98,76 @@ class Balance:
     included_nano_usd: Optional[int] = None
     allowance_remaining_nano_usd: Optional[int] = None
     credits_remaining_nano_usd: Optional[int] = None
+
+
+# ------------------------------------------------------------------ embeddings
+
+
+@dataclass
+class EmbeddingsRequest:
+    """One embeddings turn.
+
+    The gateway bills embeddings on INPUT ONLY — there is no completion, so
+    there is no output term and the catalog carries a zero output rate for
+    every embedding seat. That is why this request has no ``max_tokens``, no
+    sampling knobs and no stream: none of them mean anything here, and offering
+    them would imply a control the wire does not have.
+    """
+
+    #: Must DECLARE ``caps: ["embeddings"]``. A chat model is refused with a
+    #: 400 naming the chat door.
+    model: str
+    #: Text, or a batch of texts. A batch returns one vector per member, in the
+    #: order you sent them. Token-id arrays are NOT accepted: the gateway
+    #: cannot size a spend hold from token ids it did not tokenize.
+    input: Any
+    #: Matryoshka shortening, on models that support it. Forwarded verbatim.
+    dimensions: Optional[int] = None
+    #: The WIRE encoding, which is not the same question as what you get back.
+    #: Leave it alone unless you need the raw provider bytes: the SDK requests
+    #: ``base64`` by default and decodes it for you (same numbers, ~3x less
+    #: network). See :meth:`conifer_sdk.client.Embeddings.create`.
+    encoding_format: Optional[str] = None
+    #: Opaque end-user id, forwarded verbatim for the provider's abuse tooling.
+    user: Optional[str] = None
+
+    #: HARD ceiling on the caller-total worst case, in integer nanodollars.
+    max_cost_nano_usd: Optional[int] = None
+    idempotency_key: Optional[str] = None
+    request_id: Optional[str] = None
+    #: Your app's name, for your own usage attribution.
+    client: Optional[str] = None
+    headers: Dict[str, str] = field(default_factory=dict)
+    #: Fields the SDK does not model, merged into the body at your own risk.
+    extra_body: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Embedding:
+    """One vector, always as floats whatever the wire encoding was."""
+
+    index: int
+    embedding: List[float]
+    object: Optional[str] = None
+
+
+@dataclass
+class EmbeddingsResponse:
+    """One embeddings turn's result, with the settled cost of that call."""
+
+    data: List[Embedding]
+    #: The x-conifer-* disclosure, parsed. Embeddings settle in-band, so unlike
+    #: a stream the cost IS present here.
+    receipt: Receipt
+    model: Optional[str] = None
+    object: Optional[str] = None
+    #: Input tokens only. There is no ``completion_tokens``: there is no
+    #: completion.
+    usage: Optional[Dict[str, Any]] = None
+    #: The provider's own body, untouched — base64 strings included.
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
+def vector_of(response: EmbeddingsResponse) -> Optional[List[float]]:
+    """The first vector, for the overwhelmingly common single-input call."""
+    return response.data[0].embedding if response.data else None

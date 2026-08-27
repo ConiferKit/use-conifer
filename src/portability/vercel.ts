@@ -87,15 +87,54 @@ export function fromVercelProviderOptions(
   return { request, passthrough };
 }
 
-/** Doors Conifer does not serve. Named so a migration fails at the call site. */
+/**
+ * Refuse, at the CALL SITE, a surface this gateway does not serve.
+ *
+ * The alternative is a 404 at runtime, in production, with a provider name in
+ * it and no indication of what to do — which is exactly how a migration
+ * "succeeds" and then fails on the one code path nobody exercised. Every entry
+ * below was probed against api.conifer.build on 2026-08-27; the gateway's own
+ * 404 prose is the source for each remedy.
+ *
+ * Note what is NOT here: `embeddings`. It was listed until the gateway shipped
+ * `/v1/embeddings` on 2026-08-26, and the SDK now serves that door directly
+ * (`conifer.embeddings.create`). A shim that refuses a surface the gateway
+ * actually serves is as wrong as one that admits a surface it does not.
+ */
 export function assertSupportedVercelSurface(surface: string): void {
   const unsupported: Record<string, string> = {
     "image-generation":
       "Conifer serves no image-output door. Keep image generation on your current provider.",
     oidc:
       "there is no Conifer OIDC exchange. Mint a key at https://conifer.build/console#/keys and set CONIFER_API_KEY.",
+    // Verified live 2026-08-27: each of these answers 404 with `unknown_url`.
+    rerank:
+      "Conifer does not serve reranking. The embedding models on this gateway (GET /v1/models, caps includes \"embeddings\") can rank by cosine similarity, or keep reranking on your current provider.",
+    moderations:
+      "Conifer serves no moderation door, and never silently applies one either — what you send is what runs. Keep moderation on your current provider.",
+    audio:
+      "Conifer serves no audio door (neither speech nor transcription). Keep audio on your current provider.",
+    files:
+      "Conifer serves no Files API. There is no server-side document store to upload to; send content in the request itself.",
+    batches:
+      "Conifer serves no Batches API. The nearest equivalent is the deferred-job protocol: set `defer: true` with a wide `deadlineSeconds` on a chat turn, and poll the job.",
   };
-  const why = unsupported[surface];
+  // Aliases, so a caller who spells the surface the way THEIR old SDK spelled
+  // it gets the explanation rather than silence.
+  const aliases: Record<string, string> = {
+    image: "image-generation",
+    images: "image-generation",
+    moderation: "moderations",
+    reranking: "rerank",
+    speech: "audio",
+    transcription: "audio",
+    "audio-speech": "audio",
+    "audio-transcription": "audio",
+    batch: "batches",
+    file: "files",
+  };
+  const key = aliases[surface] ?? surface;
+  const why = unsupported[key];
   if (why !== undefined) throw new ConiferPortabilityError(surface, why);
 }
 

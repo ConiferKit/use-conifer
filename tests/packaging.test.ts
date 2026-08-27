@@ -13,6 +13,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+import { TOOLS } from "../mcp/server.ts";
+
 const root = fileURLToPath(new URL("..", import.meta.url));
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -109,7 +111,10 @@ test("the MCP bin answers over stdio instead of exiting silently", () => {
   });
   assert.notEqual(out.trim(), "", "the bin produced no output at all");
   const reply = JSON.parse(out.trim().split("\n")[0] as string);
-  assert.equal(reply.result.tools.length, 5);
+  // The count is asserted against the built dist/, not the sources, so a tool
+  // added to mcp/server.ts without a rebuild fails here rather than shipping
+  // a package whose advertised surface differs from its compiled one.
+  assert.equal(reply.result.tools.length, TOOLS.length);
 });
 
 test("`npm test` runs on every Node the engines floor advertises", () => {

@@ -49,7 +49,7 @@ interface ToolDefinition {
   run(args: Record<string, unknown>, client: Conifer): Promise<unknown>;
 }
 
-/** The four tools. Each maps to one real gateway read or one real turn. */
+/** The six tools. Each maps to one real gateway read or one real turn. */
 export const TOOLS: ToolDefinition[] = [
   {
     name: "conifer_list_models",
@@ -214,6 +214,57 @@ export const TOOLS: ToolDefinition[] = [
         return costA - costB;
       });
       return { results: settled };
+    },
+  },
+  {
+    name: "conifer_embed",
+    description:
+      "Turn text into embedding vectors, with the exact settled cost of that call. Send one string or a batch; you get one vector per input, in the order you sent them. Use it to build or query a semantic index mid-task, or to rank candidates by cosine similarity (this gateway serves no rerank door, and embeddings are the honest substitute). Only models whose caps include \"embeddings\" answer here — call conifer_choose_model with caps:[\"embeddings\"] to pick the cheapest one.",
+    inputSchema: {
+      type: "object",
+      required: ["model", "input"],
+      properties: {
+        model: {
+          type: "string",
+          description: 'A model DECLARING caps:["embeddings"]. A chat model is refused, naming the chat door.',
+        },
+        input: {
+          description: "A string, or an array of strings for a batch.",
+          anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+        },
+        dimensions: {
+          type: "number",
+          description: "Matryoshka shortening, on models that support it.",
+        },
+        max_cost_nanousd: {
+          type: "number",
+          description: "Refuse the call before spending if it could cost more than this.",
+        },
+      },
+    },
+    async run(args, client) {
+      const result = await client.embeddings.create({
+        model: String(args.model),
+        input: args.input as string | string[],
+        dimensions: args.dimensions as number | undefined,
+        maxCostNanoUsd: args.max_cost_nanousd as number | undefined,
+        client: "conifer-mcp",
+      });
+      // The vectors themselves are deliberately NOT returned in full: a single
+      // 1536-dimension embedding is ~30 KB of digits, and a batch would blow
+      // any agent's context window for numbers no model can read anyway. The
+      // caller gets the shape, the cost, and a short preview to confirm the
+      // call worked; a program that needs the values should use the SDK.
+      return {
+        model: result.model,
+        count: result.data.length,
+        dimensions: result.data[0]?.embedding.length,
+        preview: result.data[0]?.embedding.slice(0, 4),
+        prompt_tokens: result.usage?.prompt_tokens,
+        cost_nanousd: result.receipt.costNanoUsd,
+        cost_usd: result.receipt.costUsd,
+        request_id: result.receipt.requestId,
+      };
     },
   },
   {

@@ -62,6 +62,13 @@
     "ConiferUnavailableError": "503 service_available=false",
     "ConiferTimeoutError": "client-side abort \u2014 no gateway verdict, so no billing claim is made either way"
   },
+  "embeddings": {
+    "note": "The result of `POST /v1/embeddings`. Unlike a stream, an embeddings turn settles IN BAND, so the COST fields of the receipt are present on this very response.",
+    "data": "one entry per input, index ascending. `embedding` is ALWAYS plain numbers, whatever the wire encoding was \u2014 the SDK requests base64 by default (~3x less network) and decodes it, which is exactly lossless. An unrecognized encoding decodes to an EMPTY vector rather than a guess: a wrong vector sails through a cosine similarity and returns nonsense rankings forever, where a missing one fails loudly.",
+    "usage": "input tokens only. There is no `completion_tokens` because there is no completion.",
+    "receipt": "the same parsed x-conifer-* disclosure as a chat turn, cost included.",
+    "raw": "the provider's own body, untouched \u2014 base64 strings included, for a caller who wants the bytes rather than the numbers."
+  },
   "consumers": [
     "sdk/mcp (the MCP server)",
     "sdk/python (the parity implementation, same cards)",

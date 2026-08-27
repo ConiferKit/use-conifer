@@ -13,6 +13,8 @@ import type {
   ChatRequest,
   Completion,
   CompletionStream,
+  EmbeddingsRequest,
+  EmbeddingsResponse,
   StreamChunk,
 } from "./types.ts";
 
@@ -63,6 +65,8 @@ export class Conifer {
   readonly transport: Transport;
   /** BYOK custody: your own provider keys, held by the gateway. */
   readonly keys: KeysApi;
+  /** `POST /v1/embeddings`. Same receipts, same money ceiling as chat. */
+  readonly embeddings: Embeddings;
 
   constructor(options: ConiferOptions = {}) {
     const env = (globalThis as { process?: { env?: Record<string, string | undefined> } })
@@ -96,6 +100,7 @@ export class Conifer {
       defaultHeaders: options.defaultHeaders ?? {},
     });
     this.keys = new KeysApi(this.transport);
+    this.embeddings = new Embeddings(this.transport);
   }
 
   /**
@@ -107,7 +112,7 @@ export class Conifer {
     let lastError: ConiferError | undefined;
     // One idempotency key for the LOGICAL turn: every transport retry of a
     // chain member reuses it, so a retry cannot bill twice.
-    const idempotencyKey = request.idempotencyKey ?? randomId("idem");
+    const idempotencyKey = turnIdentity(request);
 
     for (let index = 0; index < chain.length; index += 1) {
       const model = chain[index] as string;
@@ -155,7 +160,7 @@ export class Conifer {
       method: "POST",
       path: "/v1/chat/completions",
       body: chatBody(request, true),
-      headers: chatHeaders(request, request.idempotencyKey ?? randomId("idem")),
+      headers: chatHeaders(request, turnIdentity(request)),
       signal: request.signal,
       raw: true,
     });
@@ -204,6 +209,176 @@ export class Conifer {
     const models = await this.models();
     return pickCheapest(models, caps, options);
   }
+}
+
+/**
+ * The embeddings door: `POST /v1/embeddings`.
+ *
+ * Reached as `conifer.embeddings.create(...)`, matching the shape every OpenAI
+ * client already uses, so a migration is a base-URL change and not a rewrite.
+ */
+export class Embeddings {
+  private readonly transport: Transport;
+
+  constructor(transport: Transport) {
+    this.transport = transport;
+  }
+
+  /**
+   * One embeddings turn, with the exact settled cost of that call.
+   *
+   * BASE64 BY DEFAULT, DECODED FOR YOU. Unless you ask otherwise, the SDK
+   * requests `encoding_format: "base64"` and decodes the result into plain
+   * numbers. This is not a micro-optimization: a JSON float array spends ~20
+   * bytes per dimension, and the same vector in base64 float32 spends 5.33 —
+   * roughly a 3x smaller response, which on a 3072-dimension model batched
+   * 100 deep is the difference between ~6 MB and ~1.6 MB per call.
+   *
+   * It is safe to do this silently ONLY because the transformation is exactly
+   * lossless, which was verified against the live gateway rather than assumed:
+   * `text-embedding-3-small` returned the identical 1536 values both ways,
+   * max absolute difference 0.0. The bytes are little-endian float32, and the
+   * JSON arm is float32 widened to double, so the two agree bit for bit. (The
+   * official OpenAI Python SDK makes the same call for the same reason.)
+   *
+   * Pass `encodingFormat: "float"` to send JSON floats instead. Either way,
+   * `raw` holds the provider's own body untouched.
+   */
+  async create(request: EmbeddingsRequest): Promise<EmbeddingsResponse> {
+    // Refuse client-side rather than spend a turn discovering it. The gateway
+    // refuses token-id input too, but it does so AFTER admission; catching the
+    // obvious shape here makes the reason legible at the call site.
+    if (Array.isArray(request.input) && request.input.some((item) => typeof item !== "string")) {
+      throw new ConiferPortabilityError(
+        "input",
+        "embeddings input must be text (a string, or an array of strings). Token-id arrays are refused: the gateway cannot size a spend hold from token ids it did not tokenize.",
+      );
+    }
+    const { data, response } = await this.transport.request({
+      method: "POST",
+      path: "/v1/embeddings",
+      body: embeddingsBody(request),
+      headers: embeddingsHeaders(request, turnIdentity(request)),
+      signal: request.signal,
+    });
+    const payload = (data ?? {}) as Record<string, unknown>;
+    const entries = (payload.data ?? []) as Record<string, unknown>[];
+    return {
+      object: payload.object as string | undefined,
+      model: payload.model as string | undefined,
+      data: entries.map((entry, position) => ({
+        ...entry,
+        index: typeof entry.index === "number" ? entry.index : position,
+        embedding: decodeVector(entry.embedding),
+      })),
+      usage: payload.usage as EmbeddingsResponse["usage"],
+      receipt: readReceipt(response.headers),
+      raw: payload,
+    };
+  }
+}
+
+/** The embeddings body. No sampling knobs: none of them mean anything here. */
+export function embeddingsBody(request: EmbeddingsRequest): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model: request.model,
+    input: request.input,
+    // See Embeddings.create for why base64 is the default and why it is safe.
+    encoding_format: request.encodingFormat ?? "base64",
+  };
+  if (request.dimensions !== undefined) body.dimensions = request.dimensions;
+  if (request.user !== undefined) body.user = request.user;
+  return { ...body, ...(request.extraBody ?? {}) };
+}
+
+/** The embeddings header set. The same money ceiling and attribution as chat. */
+export function embeddingsHeaders(
+  request: EmbeddingsRequest,
+  idempotencyKey: string,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    ...(request.headers ?? {}),
+    "idempotency-key": idempotencyKey,
+  };
+  if (request.maxCostNanoUsd !== undefined) {
+    if (!Number.isInteger(request.maxCostNanoUsd)) {
+      throw new ConiferPortabilityError(
+        "maxCostNanoUsd",
+        "the cost ceiling is an INTEGER nanodollar amount ($1 = 1e9). A fractional value is refused rather than rounded, because rounding a spend limit is the wrong direction half the time.",
+      );
+    }
+    headers["x-conifer-max-cost-nanousd"] = String(request.maxCostNanoUsd);
+  }
+  if (request.requestId !== undefined) headers["x-request-id"] = request.requestId;
+  if (request.client !== undefined) headers["x-conifer-client"] = request.client;
+  return headers;
+}
+
+/**
+ * A vector as numbers, from either wire encoding.
+ *
+ * The base64 arm is little-endian float32, which is what every provider on
+ * this door emits and what the OpenAI clients assume. Little-endianness is
+ * read explicitly rather than inherited from the host, so this decodes the
+ * same on a big-endian machine.
+ *
+ * An unrecognized shape yields an EMPTY vector rather than a guess. A wrong
+ * vector is far worse than an obviously missing one: it would sail through
+ * a cosine-similarity call and quietly return nonsense rankings forever.
+ */
+export function decodeVector(value: unknown): number[] {
+  if (Array.isArray(value)) return value as number[];
+  if (typeof value !== "string") return [];
+  const binary = base64ToBytes(value);
+  // float32 is 4 bytes; a length that is not a multiple of 4 is not a vector.
+  if (binary.length === 0 || binary.length % 4 !== 0) return [];
+  const view = new DataView(binary.buffer, binary.byteOffset, binary.byteLength);
+  const out = new Array<number>(binary.length / 4);
+  for (let index = 0; index < out.length; index += 1) {
+    out[index] = view.getFloat32(index * 4, true);
+  }
+  return out;
+}
+
+/** base64 -> bytes, on both Node and the browser/edge runtimes. */
+function base64ToBytes(value: string): Uint8Array {
+  const fromBuffer = (globalThis as { Buffer?: { from(s: string, e: string): Uint8Array } }).Buffer;
+  if (fromBuffer !== undefined) return new Uint8Array(fromBuffer.from(value, "base64"));
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+/**
+ * The idempotency key for one logical turn.
+ *
+ * THE COLLAPSE (read the gateway's `request_id()`, measured live 2026-08-27).
+ * The gateway derives the request id from the FIRST of `idempotency-key` then
+ * `x-request-id`. The SDK always sends an idempotency key, so `x-request-id`
+ * was never once consulted: a caller who set `requestId` to their own trace id
+ * got a generated `idem-<uuid>` back in the receipt and had no way to correlate
+ * a support question with their own logs. The field was inert.
+ *
+ * So on this gateway the two ARE one identity, and the SDK stops pretending
+ * otherwise: an explicit `requestId` becomes the idempotency key. That makes
+ * the id you chose the id that comes back, in the receipt and in the gateway's
+ * own logs.
+ *
+ * The consequence is real and worth stating: the gateway binds an idempotency
+ * key to the request BODY, so reusing one `requestId` across two different
+ * bodies is a 409 `request_in_progress` rather than two turns. That is the
+ * correct answer to "the same request id for a different request", and it is
+ * loud rather than silent. Pass `idempotencyKey` explicitly to control the two
+ * separately when your ids are not unique per turn.
+ */
+export function turnIdentity(request: {
+  idempotencyKey?: string;
+  requestId?: string;
+}): string {
+  return request.idempotencyKey ?? request.requestId ?? randomId("idem");
 }
 
 /** BYOK custody. Your provider key lives on your account; callers keep using CONIFER_API_KEY. */
@@ -300,6 +475,10 @@ export function chatHeaders(request: ChatRequest, idempotencyKey: string): Recor
   if (request.defer === true) headers["x-conifer-defer"] = "allow";
   if (request.venue !== undefined) headers["x-conifer-venue"] = request.venue;
   if (request.promptCache === "off") headers["x-conifer-cache"] = "off";
+  // `x-request-id` is sent too, so a proxy or log shipper between you and the
+  // gateway still sees the id. The GATEWAY itself reads `idempotency-key`
+  // first (see turnIdentity), which is why `requestId` now feeds that key
+  // rather than only this header.
   if (request.requestId !== undefined) headers["x-request-id"] = request.requestId;
   if (request.client !== undefined) headers["x-conifer-client"] = request.client;
   return headers;

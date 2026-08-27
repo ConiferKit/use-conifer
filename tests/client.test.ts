@@ -452,3 +452,71 @@ test("a stray OPENAI_BASE_URL cannot redirect Conifer traffic elsewhere", () => 
 test("a missing key fails at construction, not at the first call", () => {
   assert.throws(() => new Conifer({ apiKey: "", fetch: (async () => new Response("")) as any }), /CONIFER_API_KEY/);
 });
+
+/**
+ * `requestId` used to be inert, and that is worth a test of its own.
+ *
+ * The gateway derives its request id from the FIRST of `idempotency-key` then
+ * `x-request-id` (its own `request_id()`, confirmed live 2026-08-27). Because
+ * the SDK always sends an idempotency key, the second name was never once
+ * reached: a caller who set `requestId` to their trace id got a generated
+ * `idem-<uuid>` back in the receipt and could not correlate a support question
+ * with their own logs. On this gateway the two are ONE identity, so the SDK
+ * feeds `requestId` into the key that is actually read.
+ */
+test("an explicit requestId becomes the id the gateway actually echoes", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse(COMPLETION, { headers: { ...RECEIPT_HEADERS, "x-conifer-request-id": "trace-42" } }),
+  ]);
+  const conifer = new Conifer({ apiKey: "k", fetch: fetchImpl });
+  const answer = await conifer.chat({
+    model: "m",
+    messages: [{ role: "user", content: "hi" }],
+    requestId: "trace-42",
+  });
+
+  // The header the gateway READS carries the caller's id …
+  assert.equal(calls[0]?.init.headers["idempotency-key"], "trace-42");
+  // … and the one it merely logs carries it too, for anything in between.
+  assert.equal(calls[0]?.init.headers["x-request-id"], "trace-42");
+  // So the id the caller chose is the id that comes back.
+  assert.equal(answer.receipt.requestId, "trace-42");
+});
+
+test("an explicit idempotencyKey still wins over requestId", async () => {
+  // The two remain separable: idempotency is about not billing twice, and a
+  // caller whose trace ids are not unique per turn must be able to say so.
+  const { calls, fetchImpl } = stubFetch([jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS })]);
+  await new Conifer({ apiKey: "k", fetch: fetchImpl }).chat({
+    model: "m",
+    messages: [{ role: "user", content: "hi" }],
+    requestId: "trace-42",
+    idempotencyKey: "key-1",
+  });
+  assert.equal(calls[0]?.init.headers["idempotency-key"], "key-1");
+  assert.equal(calls[0]?.init.headers["x-request-id"], "trace-42");
+});
+
+test("with neither id, a generated key still makes the turn idempotent", async () => {
+  const { calls, fetchImpl } = stubFetch([jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS })]);
+  await new Conifer({ apiKey: "k", fetch: fetchImpl }).chat({
+    model: "m",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  // A retry that cannot double-bill is the whole point, so the key is never
+  // optional — only its SOURCE is.
+  assert.match(calls[0]?.init.headers["idempotency-key"] as string, /^idem-/);
+  assert.equal(calls[0]?.init.headers["x-request-id"], undefined);
+});
+
+test("the embeddings door resolves the same identity the same way", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse({ data: [] }, { headers: { "x-conifer-request-id": "trace-9" } }),
+  ]);
+  await new Conifer({ apiKey: "k", fetch: fetchImpl }).embeddings.create({
+    model: "text-embedding-3-small",
+    input: "hi",
+    requestId: "trace-9",
+  });
+  assert.equal(calls[0]?.init.headers["idempotency-key"], "trace-9");
+});

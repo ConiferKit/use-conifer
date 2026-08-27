@@ -6,7 +6,9 @@
 // look clean while changing what runs and what it costs.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   ConiferPortabilityError,
@@ -19,6 +21,14 @@ import {
   fromVercelProviderOptions,
   parseFallbacks,
 } from "../src/index.ts";
+
+/** The migration contract itself, so the refusal list is driven FROM the card. */
+const portability = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("../cards/portability.card.json", import.meta.url)),
+    "utf8",
+  ),
+) as Record<string, any>;
 
 function refuses(field: string, run: () => unknown) {
   const error = (() => {
@@ -196,9 +206,68 @@ test("gateway provider pinning refuses; gateway model fallbacks convert", () => 
 test("doors Conifer does not serve fail at the call site, not at a 404", () => {
   refuses("image-generation", () => assertSupportedVercelSurface("image-generation"));
   refuses("oidc", () => assertSupportedVercelSurface("oidc"));
+  // Probed live on 2026-08-27: each of these answers 404 `unknown_url`. A 404
+  // in production, on the one code path nobody exercised, is exactly how a
+  // migration "succeeds" and then fails.
+  refuses("rerank", () => assertSupportedVercelSurface("rerank"));
+  refuses("moderations", () => assertSupportedVercelSurface("moderations"));
+  refuses("audio", () => assertSupportedVercelSurface("audio"));
+  refuses("files", () => assertSupportedVercelSurface("files"));
+  refuses("batches", () => assertSupportedVercelSurface("batches"));
+
   assert.doesNotThrow(() => assertSupportedVercelSurface("chat"));
   // The gateway shipped /v1/embeddings on 2026-08-26, so the shim must NOT
   // refuse it any more — a client that keeps throwing here would send people
   // to another provider for a door Conifer now serves.
   assert.doesNotThrow(() => assertSupportedVercelSurface("embeddings"));
+});
+
+test("a surface spelled the way another SDK spells it still gets the reason", () => {
+  // Silence is the failure mode worth preventing: an unknown surface name
+  // passes through, and the caller learns nothing until the 404.
+  for (const alias of [
+    "image",
+    "images",
+    "moderation",
+    "reranking",
+    "speech",
+    "transcription",
+    "audio-speech",
+    "audio-transcription",
+    "batch",
+    "file",
+  ]) {
+    refuses(alias, () => assertSupportedVercelSurface(alias));
+  }
+});
+
+/**
+ * The card is the contract, so the refusal list is driven FROM it. An entry
+ * added to the card without a matching refusal in code (or the reverse) fails
+ * here — which is the only thing that keeps a migration document honest as the
+ * gateway's served surface changes.
+ */
+test("every unserved door the card names actually refuses, and the served ones do not", () => {
+  const vercel = portability.vercel_ai_gateway;
+  // The card's keys are prose ("audio (speech and transcription)"); the first
+  // word is the surface token the shim is called with.
+  const token = (label: string) => label.split(" ")[0]!.toLowerCase();
+  for (const label of Object.keys(vercel.unsupported_refused)) {
+    const surface = token(label);
+    if (surface === "oidc") continue; // spelled the same, covered above
+    assert.throws(
+      () => assertSupportedVercelSurface(surface),
+      ConiferPortabilityError,
+      `the card refuses "${label}" but assertSupportedVercelSurface("${surface}") does not`,
+    );
+  }
+  // And the inverse: a door the card records as NOW SERVED must not throw.
+  for (const label of Object.keys(vercel.now_served)) {
+    if (label === "note") continue;
+    const surface = label.replace(/^POST \/+/, "");
+    assert.doesNotThrow(
+      () => assertSupportedVercelSurface(surface),
+      `the card says ${label} is served, but the shim still refuses "${surface}"`,
+    );
+  }
 });

@@ -7,7 +7,6 @@
     "Never invent a server feature client-side and present it as one. Client-side chains report themselves as client-side (`fallbackIndex`, `x-conifer-client`).",
     "Model ids migrate untouched. `vendor/model` resolves through the gateway's own last-segment rule; the SDK does no rewriting of its own."
   ],
-
   "openrouter": {
     "base_url_they_use": "https://openrouter.ai/api/v1",
     "conifer_equivalent": "https://api.conifer.build/v1",
@@ -39,7 +38,6 @@
     },
     "generation_stats_endpoint": "OpenRouter's GET /api/v1/generation has no equivalent: Conifer settles the cost onto the SAME response's receipt headers, so the stats are already in hand when the call returns. The shim reads them there rather than making a second call."
   },
-
   "vercel_ai_gateway": {
     "base_url_they_use": "https://ai-gateway.vercel.sh/v1",
     "conifer_equivalent": "https://api.conifer.build/v1",
@@ -59,10 +57,18 @@
     },
     "unsupported_refused": {
       "image generation": "no image-output door. Throws.",
-      "OIDC auto-auth": "there is no Conifer OIDC exchange; supply CONIFER_API_KEY."
+      "OIDC auto-auth": "there is no Conifer OIDC exchange; supply CONIFER_API_KEY.",
+      "rerank": "no reranking door. The gateway's embedding seats can rank by cosine similarity instead. Throws.",
+      "moderations": "no moderation door — and none is silently applied either; what you send is what runs. Throws.",
+      "audio (speech and transcription)": "no audio door. Throws.",
+      "files": "no Files API; there is no server-side document store. Throws.",
+      "batches": "no Batches API. The nearest equivalent is the deferred-job protocol (defer + a wide deadline). Throws."
+    },
+    "now_served": {
+      "note": "Surfaces that USED to be refused here and are now served. A shim that refuses a door the gateway actually serves is as wrong as one that admits a door it does not, so this list is part of the contract.",
+      "POST /embeddings": "SHIPPED 2026-08-26. Served by the SDK directly: `conifer.embeddings.create()` (TS) / `client.embed()` (Python). The shim must NOT refuse it."
     }
   },
-
   "helicone": {
     "base_url_they_use": "https://gateway.helicone.ai/v1",
     "conifer_equivalent": "https://api.conifer.build/v1",
@@ -88,7 +94,6 @@
       "Helicone-Posthog-*": "no third-party fan-out."
     }
   },
-
   "receipt_superset": {
     "note": "What Conifer gives that none of the three do on the response of the SAME call: exact integer nanodollar cost, itemized across the four billed token classes, plus the requested-vs-effective model spelling and the serving endpoint. `costComponentsNanoUsd` always sums to `costNanoUsd`; when that identity cannot be guaranteed the header is omitted rather than approximated.",
     "headers": [

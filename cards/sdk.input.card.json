@@ -38,26 +38,108 @@
   },
   "request_options": {
     "note": "Per-call knobs. Each maps to a REAL gateway input; nothing here is invented client-side except `fallbackModels`, which is explicitly a client-side chain (see portability.card.json).",
-    "model": { "wire": "body.model", "note": "Accepts `vendor/model` spellings; the gateway resolves the last segment when the full id is absent." },
-    "messages": { "wire": "body.messages" },
-    "maxTokens": { "wire": "body.max_tokens" },
-    "temperature": { "wire": "body.temperature" },
-    "topP": { "wire": "body.top_p" },
-    "stop": { "wire": "body.stop" },
-    "tools": { "wire": "body.tools" },
-    "toolChoice": { "wire": "body.tool_choice" },
-    "stream": { "wire": "body.stream", "note": "SSE. `stream_options.include_usage` is set for you when `stream: true`, so the final usage chunk always arrives." },
-    "maxCostNanoUsd": { "wire": "header x-conifer-max-cost-nanousd", "note": "HARD ceiling on the caller-total worst case. Over-ceiling requests are REFUSED (402/`cost_ceiling_exceeded`) before any upstream call." },
-    "deadlineSeconds": { "wire": "body.completion_window_seconds + header x-conifer-deadline", "note": "ADVISORY. Only widens how a turn may be served (flex tier). Never changes auth, model, or price." },
-    "defer": { "wire": "body.defer = \"allow\"", "note": "Opts a wide-window turn into the 202 deferred-job protocol. An explicit marker that cannot be honored is a 400, never a silent sync serve." },
-    "venue": { "wire": "header x-conifer-venue", "note": "HARD constraint. This gateway is the cloud venue; `local` is refused, never silently satisfied." },
-    "idempotencyKey": { "wire": "header idempotency-key", "note": "Bound to the request body by the gateway. Reusing a key with a different body is refused, not served the prior result." },
-    "promptCache": { "wire": "header x-conifer-cache", "note": "Only `\"off\"` is meaningful: it opts this one request out of prompt-cache annotation, so no +25% cache-write class is charged. The header can never turn caching ON." },
-    "requestId": { "wire": "header x-request-id" },
-    "client": { "wire": "header x-conifer-client", "note": "Your app's name, for your own usage attribution." },
+    "model": {
+      "wire": "body.model",
+      "note": "Accepts `vendor/model` spellings; the gateway resolves the last segment when the full id is absent."
+    },
+    "messages": {
+      "wire": "body.messages"
+    },
+    "maxTokens": {
+      "wire": "body.max_tokens"
+    },
+    "temperature": {
+      "wire": "body.temperature"
+    },
+    "topP": {
+      "wire": "body.top_p"
+    },
+    "stop": {
+      "wire": "body.stop"
+    },
+    "tools": {
+      "wire": "body.tools"
+    },
+    "toolChoice": {
+      "wire": "body.tool_choice"
+    },
+    "stream": {
+      "wire": "body.stream",
+      "note": "SSE. `stream_options.include_usage` is set for you when `stream: true`, so the final usage chunk always arrives."
+    },
+    "maxCostNanoUsd": {
+      "wire": "header x-conifer-max-cost-nanousd",
+      "note": "HARD ceiling on the caller-total worst case. Over-ceiling requests are REFUSED (402/`cost_ceiling_exceeded`) before any upstream call."
+    },
+    "deadlineSeconds": {
+      "wire": "body.completion_window_seconds + header x-conifer-deadline",
+      "note": "ADVISORY. Only widens how a turn may be served (flex tier). Never changes auth, model, or price."
+    },
+    "defer": {
+      "wire": "body.defer = \"allow\"",
+      "note": "Opts a wide-window turn into the 202 deferred-job protocol. An explicit marker that cannot be honored is a 400, never a silent sync serve."
+    },
+    "venue": {
+      "wire": "header x-conifer-venue",
+      "note": "HARD constraint. This gateway is the cloud venue; `local` is refused, never silently satisfied."
+    },
+    "idempotencyKey": {
+      "wire": "header idempotency-key",
+      "note": "Bound to the request body by the gateway. Reusing a key with a different body is refused, not served the prior result."
+    },
+    "promptCache": {
+      "wire": "header x-conifer-cache",
+      "note": "Only `\"off\"` is meaningful: it opts this one request out of prompt-cache annotation, so no +25% cache-write class is charged. The header can never turn caching ON."
+    },
+    "requestId": {
+      "wire": "header idempotency-key + header x-request-id",
+      "note": "YOUR id for this turn, and the one that comes back in the receipt. The gateway derives its request id from the FIRST of `idempotency-key` then `x-request-id` (its own `request_id()`, confirmed live 2026-08-27) — and the SDK always sends an idempotency key, so `x-request-id` alone was NEVER reached and this field was inert. On this gateway the two are ONE identity, so an explicit requestId now feeds the idempotency key as well. Consequence, stated because it is real: the key is bound to the request BODY, so reusing one requestId across two different bodies is a 409 `request_in_progress`, not two turns. Pass idempotencyKey explicitly to control the two separately."
+    },
+    "client": {
+      "wire": "header x-conifer-client",
+      "note": "Your app's name, for your own usage attribution."
+    },
     "fallbackModels": {
       "wire": "NONE — client-side",
       "note": "OpenRouter's `models: []` has no gateway equivalent: the gateway admits exactly the model named. The SDK therefore walks the chain ITSELF, one full request per member, and reports which member served in the result's `fallbackIndex`. Honest, not free: each attempt is its own billed turn only if it reached upstream, and only retryable failures advance the chain."
+    }
+  },
+  "embeddings_request": {
+    "note": "`POST /v1/embeddings`, reached as `conifer.embeddings.create(...)` (TS) / `client.embed(...)` (Python). Embeddings bill on INPUT ONLY — there is no completion, so the catalog carries a zero output rate for every embedding seat. That is why this door has no maxTokens, no sampling knobs and no stream: none of them mean anything here, and offering them would imply a control the wire does not have.",
+    "model": {
+      "wire": "body.model",
+      "note": "Must DECLARE `caps: [\"embeddings\"]`. A chat model is a 400 naming the chat door, not an opaque upstream 404 on your money."
+    },
+    "input": {
+      "wire": "body.input",
+      "note": "A string, or an array of strings; a batch returns one vector per member, index ascending. Token-id arrays are REFUSED client-side, before any spend: the gateway cannot size a hold from token ids it did not tokenize, and serving an unpriced turn is the one thing the money path must never do."
+    },
+    "dimensions": {
+      "wire": "body.dimensions",
+      "note": "Matryoshka shortening. Forwarded verbatim; the upstream validates it."
+    },
+    "encodingFormat": {
+      "wire": "body.encoding_format",
+      "note": "DEFAULTS TO `base64`, which the SDK then decodes for you into plain numbers. A JSON float array spends ~20 bytes per dimension against base64 float32's 5.33, so this is ~3x less network on the one payload that is actually large. Safe to do silently ONLY because it is exactly lossless: verified live 2026-08-27, text-embedding-3-small returned identical values both ways, max abs difference 0.0. Pass `\"float\"` for JSON floats on the wire; `raw` always holds the provider's own body."
+    },
+    "user": {
+      "wire": "body.user",
+      "note": "Opaque end-user id, forwarded verbatim for the provider's own abuse tooling."
+    },
+    "maxCostNanoUsd": {
+      "wire": "header x-conifer-max-cost-nanousd",
+      "note": "Same HARD ceiling as chat."
+    },
+    "idempotencyKey": {
+      "wire": "header idempotency-key",
+      "note": "Same rule as chat: every POST carries one, so a transport retry cannot bill twice."
+    },
+    "requestId": {
+      "wire": "header idempotency-key + header x-request-id",
+      "note": "YOUR id for this turn, and the one that comes back in the receipt. The gateway derives its request id from the FIRST of `idempotency-key` then `x-request-id` (its own `request_id()`, confirmed live 2026-08-27) — and the SDK always sends an idempotency key, so `x-request-id` alone was NEVER reached and this field was inert. On this gateway the two are ONE identity, so an explicit requestId now feeds the idempotency key as well. Consequence, stated because it is real: the key is bound to the request BODY, so reusing one requestId across two different bodies is a 409 `request_in_progress`, not two turns. Pass idempotencyKey explicitly to control the two separately."
+    },
+    "client": {
+      "wire": "header x-conifer-client"
     }
   },
   "environment": {

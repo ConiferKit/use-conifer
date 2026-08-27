@@ -1,10 +1,13 @@
 // index.ts — the SDK's one public seam. Consumers import from here.
 
-export { Conifer, KeysApi, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS } from "./client.ts";
+export { Conifer, Embeddings, KeysApi, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS } from "./client.ts";
 export type { ConiferOptions } from "./client.ts";
 export {
   chatBody,
   chatHeaders,
+  decodeVector,
+  embeddingsBody,
+  embeddingsHeaders,
   pickCheapest,
   priceOf,
   resolveBaseUrl,
@@ -13,7 +16,7 @@ export {
   parseFrame,
 } from "./client.ts";
 
-export { textOf } from "./types.ts";
+export { textOf, vectorOf } from "./types.ts";
 export type {
   Balance,
   CatalogModel,
@@ -21,6 +24,9 @@ export type {
   Choice,
   Completion,
   CompletionStream,
+  Embedding,
+  EmbeddingsRequest,
+  EmbeddingsResponse,
   Message,
   Role,
   StreamChunk,

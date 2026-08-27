@@ -12,6 +12,8 @@ import { test } from "node:test";
 import {
   ConiferPortabilityError,
   chatHeaders,
+  embeddingsBody,
+  embeddingsHeaders,
   fromHeliconeHeaders,
   fromOpenRouter,
   readReceipt,
@@ -105,6 +107,54 @@ test("every header the input card claims is actually sent", () => {
   for (const name of new Set(claimed)) {
     assert.ok(name in sent, `the card claims ${name} but the client never sends it`);
   }
+});
+
+/**
+ * The embeddings door gets the same card binding as chat: a header renamed in
+ * code without its card entry, or a body field the card claims and the client
+ * never sends, fails here rather than in a user's integration.
+ */
+test("every embeddings field the input card claims is actually on the wire", () => {
+  const headers = embeddingsHeaders(
+    { model: "m", input: "hi", maxCostNanoUsd: 1, requestId: "r", client: "c" },
+    "idem",
+  );
+  const body: Record<string, unknown> = embeddingsBody({
+    model: "m",
+    input: "hi",
+    dimensions: 8,
+    user: "u",
+  });
+
+  for (const [field, spec] of Object.entries(input.embeddings_request)) {
+    const wire = (spec as { wire?: string })?.wire;
+    if (typeof wire !== "string") continue; // the prose `note` key
+    for (const name of wire.match(/x-[a-z-]+|idempotency-key/g) ?? []) {
+      assert.ok(name in headers, `the card claims ${name} for ${field}, but it is never sent`);
+    }
+    const bodyField = wire.startsWith("body.") ? wire.slice("body.".length) : undefined;
+    if (bodyField !== undefined) {
+      assert.ok(
+        bodyField in body,
+        `the card maps ${field} to body.${bodyField}, but the client never sends it`,
+      );
+    }
+  }
+});
+
+test("the card's base64 claim matches what the client actually requests", () => {
+  // The card documents `encoding_format` as defaulting to base64 and being
+  // decoded transparently. That is a promise about bytes AND about money
+  // (~3x less egress), so it is checked rather than described.
+  const spec = (input.embeddings_request as any).encodingFormat.note as string;
+  assert.match(spec, /base64/);
+  assert.equal(embeddingsBody({ model: "m", input: "hi" }).encoding_format, "base64");
+  // And it must remain overridable, or the "raw provider bytes" escape hatch
+  // the card promises would not exist.
+  assert.equal(
+    embeddingsBody({ model: "m", input: "hi", encodingFormat: "float" }).encoding_format,
+    "float",
+  );
 });
 
 test("every field the portability card calls unsupported actually refuses", () => {

@@ -69,6 +69,52 @@ is the wire being honest rather than a gap: the response head is sent before the
 first token and the money settles after the last. Reconcile a stream from its
 terminal `usage` chunk, which the SDK always requests.
 
+## Embeddings
+
+Same key, same receipts, same cost ceiling — and the vectors arrive as plain
+numbers whatever the wire did.
+
+```ts
+const result = await conifer.embeddings.create({
+  model: "text-embedding-3-small",
+  input: ["alpha", "beta"],       // one vector per input, in order
+});
+
+console.log(result.data[0].embedding.length); // 1536
+console.log(result.receipt.costUsd);          // "0.000000040" — settled, in band
+```
+
+```python
+from conifer_sdk import EmbeddingsRequest, vector_of
+
+result = conifer.embed(EmbeddingsRequest(
+    model="text-embedding-3-small",
+    input="hello world",
+))
+print(len(vector_of(result)), result.receipt.cost_nano_usd)
+```
+
+Three things worth knowing, because they are decisions rather than defaults:
+
+- **base64 on the wire, numbers in your hands.** The SDK requests
+  `encoding_format: "base64"` and decodes it for you. A JSON float array spends
+  ~20 bytes per dimension against base64 float32's 5.33, so this is roughly 3x
+  less network on the one payload that is actually large. It is applied silently
+  only because it is exactly lossless — verified live, `text-embedding-3-small`
+  returns identical values both ways, max absolute difference 0.0. Pass
+  `encodingFormat: "float"` for JSON floats; `raw` always holds the provider's
+  own body either way.
+- **Embeddings bill on input only.** There is no completion, so there is no
+  output term, no `max_tokens`, no sampling knobs and no stream. Unlike a
+  streamed chat turn, the cost is on this very response.
+- **Refusals are legible.** A chat model sent here is a 400 naming the chat
+  door, not an opaque upstream 404 charged to you; token-id input is refused
+  client-side before any spend, because the gateway cannot price token ids it
+  did not tokenize.
+
+`conifer.cheapestFor(["embeddings"])` picks the cheapest embedding seat the
+catalog actually declares.
+
 ## Why this exists when the OpenAI SDK already works
 
 It still does, and it remains the right choice for a plain drop-in. This package
@@ -161,10 +207,11 @@ Once `@conifer/sdk` is published this becomes
 step goes away. It is written as a path today because the npx form would 404
 until the package is on the registry.
 
-Five tools, each one real gateway call:
+Six tools, each one real gateway call:
 
 - `conifer_complete` — ask any model a question, or hand it a whole conversation. The answer returns **with what it cost**, and `max_cost_nanousd` bounds the spend before the call.
 - `conifer_compare` — the same prompt across 2–5 models in parallel, each answer beside its cost, cheapest first. The ceiling caps each turn, not the total.
+- `conifer_embed` — text to embedding vectors, with the settled cost. Returns the shape, the cost and a short preview rather than the raw vectors: a single 1536-dimension embedding is ~30 KB of digits that no model can read, and a batch would swallow the context window.
 - `conifer_list_models` — the catalog, with declared capabilities and as-charged prices.
 - `conifer_choose_model` — the cheapest model *declaring* the capabilities you need. It skips models with undeclared capabilities rather than assuming them, and unpriced models rather than assuming they are free.
 - `conifer_balance` — remaining credit.
@@ -244,7 +291,11 @@ package as a CONSUMER receives it, because that is where two real defects hid
 
 Stated here so you find out now rather than mid-migration:
 
-- **No image generation.** `assertSupportedVercelSurface` throws rather than letting you discover it as a 404. (Embeddings WERE listed here; the gateway shipped `/v1/embeddings` on 2026-08-26 and the shim no longer refuses it.)
+- **No image generation, reranking, moderation, audio, Files, or Batches.**
+  `assertSupportedVercelSurface` throws at the call site, naming the remedy,
+  rather than letting you find out as a 404 in production on the one code path
+  nobody exercised. (Embeddings WERE on this list; the gateway shipped
+  `/v1/embeddings` on 2026-08-26 and the SDK now serves that door directly.)
 - **No provider pinning.** The gateway chooses the host for the model you named, by price and health. The model is never substituted.
 - **No server-side prompt compression, moderation, injection scanning, or prompt registry.**
 - **No mid-stream fallback.** The first token commits the turn, so a chain cannot be attached to a stream.

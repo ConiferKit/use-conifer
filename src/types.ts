@@ -178,3 +178,77 @@ export interface Balance {
   creditsRemainingNanoUsd?: number;
   remainingUsd: string;
 }
+
+// ----------------------------------------------------------------- embeddings
+
+/**
+ * One embeddings turn.
+ *
+ * The gateway bills embeddings on INPUT ONLY — there is no completion, so
+ * there is no output term and the catalog carries a zero output rate for every
+ * embedding seat. That is why this request has no `maxTokens`, no sampling
+ * knobs and no stream: none of them mean anything here, and offering them
+ * would imply a control the wire does not have.
+ */
+export interface EmbeddingsRequest {
+  /** Must DECLARE `caps: ["embeddings"]`. A chat model is refused with a 400 naming the chat door. */
+  model: string;
+  /**
+   * Text, or a batch of texts. A batch returns one vector per member, in the
+   * order you sent them.
+   *
+   * Token-id arrays are NOT accepted: the gateway cannot size a spend hold
+   * from token ids it did not tokenize, and serving an unpriced turn is the
+   * one thing the money path must never do. Send text.
+   */
+  input: string | string[];
+  /** Matryoshka shortening, on models that support it. Forwarded verbatim; the provider validates it. */
+  dimensions?: number;
+  /**
+   * The WIRE encoding, which is not the same question as what you get back.
+   *
+   * Leave this alone unless you need the raw provider bytes. The SDK requests
+   * `base64` by default and decodes it for you — same numbers, ~3x less
+   * network. See {@link Embeddings.create}. Set `"float"` to send JSON floats
+   * on the wire, or read `raw` for whatever the provider actually sent.
+   */
+  encodingFormat?: "float" | "base64";
+  /** Opaque end-user id, forwarded verbatim for the provider's own abuse tooling. */
+  user?: string;
+
+  /** HARD ceiling on the caller-total worst case, in integer nanodollars. */
+  maxCostNanoUsd?: number;
+  idempotencyKey?: string;
+  requestId?: string;
+  /** Your app's name, for your own usage attribution. */
+  client?: string;
+  headers?: Record<string, string>;
+  /** Fields the SDK does not model, merged into the body at your own risk. */
+  extraBody?: Record<string, unknown>;
+  signal?: AbortSignal;
+}
+
+export interface Embedding {
+  index: number;
+  /** The vector, always as numbers, whatever the wire encoding was. */
+  embedding: number[];
+  object?: string;
+  [extra: string]: unknown;
+}
+
+export interface EmbeddingsResponse {
+  object?: string;
+  model?: string;
+  data: Embedding[];
+  /** Input tokens only. `completion_tokens` is absent because there is no completion. */
+  usage?: Usage;
+  /** The x-conifer-* disclosure, parsed. Embeddings settle in-band, so the cost IS here. */
+  receipt: Receipt;
+  /** The provider's own body, untouched — including base64 strings if that is what it sent. */
+  raw: Record<string, unknown>;
+}
+
+/** The first vector, for the overwhelmingly common single-input call. */
+export function vectorOf(response: EmbeddingsResponse): number[] | undefined {
+  return response.data[0]?.embedding;
+}

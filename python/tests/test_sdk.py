@@ -26,6 +26,8 @@ from conifer_sdk import (  # noqa: E402
     ConiferPaymentError,
     ConiferPortabilityError,
     ConiferRateLimitError,
+    EmbeddingsRequest,
+    vector_of,
     ceiling_from_policy,
     conifer_openai_compatible_config,
     from_helicone_headers,
@@ -37,6 +39,9 @@ from conifer_sdk import (  # noqa: E402
     resolve_base_url,
 )
 from conifer_sdk.client import (  # noqa: E402
+    decode_vector,
+    embeddings_body,
+    embeddings_headers,
     chat_body,
     parse_frame,
     chat_headers,
@@ -494,6 +499,54 @@ class PortabilityTests(unittest.TestCase):
         assert_supported_vercel_surface("embeddings")
         self.refuses("oidc", lambda: assert_supported_vercel_surface("oidc"))
 
+        # Probed live 2026-08-27: each of these answers 404 `unknown_url`. A
+        # 404 in production, on the one path nobody exercised, is exactly how
+        # a migration "succeeds" and then fails.
+        for surface in ("rerank", "moderations", "audio", "files", "batches"):
+            self.refuses(surface, lambda s=surface: assert_supported_vercel_surface(s))
+
+        # Spelled the way ANOTHER SDK spells it, the caller still gets the
+        # reason rather than silence.
+        for alias in (
+            "image",
+            "images",
+            "moderation",
+            "reranking",
+            "speech",
+            "transcription",
+            "audio-speech",
+            "audio-transcription",
+            "batch",
+            "file",
+        ):
+            self.refuses(alias, lambda a=alias: assert_supported_vercel_surface(a))
+
+    def test_the_card_and_the_shim_agree_on_which_doors_are_served(self):
+        """The card is the contract, so the refusal list is driven FROM it.
+
+        An entry added to the card without a matching refusal in code (or the
+        reverse) fails here, which is the only thing that keeps a migration
+        document honest as the gateway's served surface changes. Twin of the
+        same assertion in tests/portability.test.ts.
+        """
+        vercel = json.loads(
+            (Path(__file__).resolve().parents[2] / "cards/portability.card.json").read_text()
+        )["vercel_ai_gateway"]
+        for label in vercel["unsupported_refused"]:
+            # The card's keys are prose ("audio (speech and transcription)");
+            # the first word is the surface token the shim is called with.
+            surface = label.split(" ")[0].lower()
+            if surface == "oidc":
+                continue  # spelled the same, covered above
+            with self.assertRaises(ConiferPortabilityError, msg=f"card refuses {label}"):
+                assert_supported_vercel_surface(surface)
+        # And the inverse: a door the card records as NOW SERVED must not throw.
+        for label in vercel["now_served"]:
+            if label == "note":
+                continue
+            surface = label.split("/")[-1]
+            assert_supported_vercel_surface(surface)
+
 
 class ParityTests(unittest.TestCase):
     """Both languages must refuse the same things, or "one SDK" is a slogan."""
@@ -683,6 +736,229 @@ class ErrorVocabulary(unittest.TestCase):
                 hasattr(sys.modules["conifer_sdk"], name),
                 f"{name} is documented in the output card but not exported from conifer_sdk",
             )
+
+
+class Embeddings(unittest.TestCase):
+    """The embeddings door. Twin of tests/embeddings.test.ts.
+
+    The base64 fixture is not invented: ``AACAPwAAAMAAAAA/`` is three
+    little-endian float32s (1, -2, 0.5), checked by hand so the expectation
+    does not depend on our own encoder.
+    """
+
+    RECEIPT = {
+        "x-conifer-requested-model": "text-embedding-3-small",
+        "x-conifer-effective-model": "text-embedding-3-small",
+        "x-conifer-cost-nanousd": "40",
+        "x-conifer-request-id": "gw-emb-1",
+    }
+    THREE_FLOATS = "AACAPwAAAMAAAAA/"
+
+    def test_an_embeddings_turn_hits_its_door_and_returns_its_settled_cost(self):
+        calls, transport = scripted(
+            (
+                200,
+                self.RECEIPT,
+                {
+                    "object": "list",
+                    "model": "text-embedding-3-small",
+                    "data": [{"object": "embedding", "index": 0, "embedding": self.THREE_FLOATS}],
+                    "usage": {"prompt_tokens": 2, "total_tokens": 2},
+                },
+            )
+        )
+        result = client(transport).embed(
+            EmbeddingsRequest(model="text-embedding-3-small", input="hello world")
+        )
+        self.assertTrue(calls[0]["url"].endswith("/v1/embeddings"))
+        self.assertEqual(calls[0]["method"], "POST")
+        # Embeddings settle IN BAND — unlike a stream, the cost is right here.
+        self.assertEqual(result.receipt.cost_nano_usd, 40)
+        self.assertEqual(result.receipt.request_id, "gw-emb-1")
+        # Input tokens only: there is no completion, so no completion_tokens.
+        self.assertEqual(result.usage["prompt_tokens"], 2)
+        self.assertNotIn("completion_tokens", result.usage)
+
+    def test_base64_is_requested_by_default_and_decoded_for_the_caller(self):
+        calls, transport = scripted(
+            (200, self.RECEIPT, {"data": [{"index": 0, "embedding": self.THREE_FLOATS}]})
+        )
+        result = client(transport).embed(
+            EmbeddingsRequest(model="text-embedding-3-small", input="hello world")
+        )
+        # The wire asked for base64 (3x smaller than a JSON float array) …
+        self.assertEqual(calls[0]["body"]["encoding_format"], "base64")
+        # … and the caller never has to know that.
+        self.assertEqual(vector_of(result), [1.0, -2.0, 0.5])
+        # The provider's own body survives untouched, base64 included.
+        self.assertEqual(result.raw["data"][0]["embedding"], self.THREE_FLOATS)
+
+    def test_float_is_honored_when_explicitly_asked_for(self):
+        calls, transport = scripted(
+            (200, self.RECEIPT, {"data": [{"index": 0, "embedding": [1.0, -2.0, 0.5]}]})
+        )
+        result = client(transport).embed(
+            EmbeddingsRequest(
+                model="text-embedding-3-small", input="hello world", encoding_format="float"
+            )
+        )
+        self.assertEqual(calls[0]["body"]["encoding_format"], "float")
+        # Same numbers either way. That property is what makes the base64
+        # default safe to apply silently.
+        self.assertEqual(vector_of(result), [1.0, -2.0, 0.5])
+
+    def test_a_batch_keeps_one_vector_per_input_in_order(self):
+        _, transport = scripted(
+            (
+                200,
+                self.RECEIPT,
+                {"data": [{"index": i, "embedding": self.THREE_FLOATS} for i in range(3)]},
+            )
+        )
+        result = client(transport).embed(
+            EmbeddingsRequest(model="text-embedding-3-small", input=["alpha", "beta", "gamma"])
+        )
+        self.assertEqual([d.index for d in result.data], [0, 1, 2])
+        for entry in result.data:
+            self.assertEqual(entry.embedding, [1.0, -2.0, 0.5])
+
+    def test_token_id_input_is_refused_before_any_spend(self):
+        calls, transport = scripted()
+        with self.assertRaises(ConiferPortabilityError) as caught:
+            client(transport).embed(
+                EmbeddingsRequest(model="text-embedding-3-small", input=[[1, 2, 3]])
+            )
+        self.assertEqual(caught.exception.field, "input")
+        # The point of refusing client-side: no request was made at all.
+        self.assertEqual(len(calls), 0)
+
+    def test_the_body_carries_only_fields_this_door_has(self):
+        body = embeddings_body(
+            EmbeddingsRequest(
+                model="text-embedding-3-large", input="hi", dimensions=256, user="user-1"
+            )
+        )
+        self.assertEqual(
+            body,
+            {
+                "model": "text-embedding-3-large",
+                "input": "hi",
+                "encoding_format": "base64",
+                "dimensions": 256,
+                "user": "user-1",
+            },
+        )
+        # No max_tokens, no temperature, no stream: an embedding has no
+        # completion, so those knobs would imply a control the wire lacks.
+        for absent in ("max_tokens", "temperature", "top_p", "stream", "messages"):
+            self.assertNotIn(absent, body)
+
+    def test_ceiling_and_attribution_ride_as_headers_exactly_as_on_chat(self):
+        headers = embeddings_headers(
+            EmbeddingsRequest(
+                model="m", input="hi", max_cost_nano_usd=1_000_000, client="my-app", request_id="r1"
+            ),
+            "idem-1",
+        )
+        self.assertEqual(headers["x-conifer-max-cost-nanousd"], "1000000")
+        self.assertEqual(headers["x-conifer-client"], "my-app")
+        self.assertEqual(headers["x-request-id"], "r1")
+        # Every POST is idempotent, so a transport retry cannot bill twice.
+        self.assertEqual(headers["idempotency-key"], "idem-1")
+
+    def test_a_fractional_ceiling_is_refused_rather_than_rounded(self):
+        with self.assertRaises(ConiferPortabilityError):
+            embeddings_headers(
+                EmbeddingsRequest(model="m", input="hi", max_cost_nano_usd=1.5), "idem-1"
+            )
+
+    def test_decode_refuses_to_guess_at_an_unrecognized_shape(self):
+        # A WRONG vector is far worse than a missing one: it sails through a
+        # cosine similarity and returns nonsense rankings forever.
+        for junk in ("!!!not base64!!!", None, 42, "AAA="):
+            self.assertEqual(decode_vector(junk), [])
+        # And the shapes it DOES recognize still work.
+        self.assertEqual(decode_vector(self.THREE_FLOATS), [1.0, -2.0, 0.5])
+        self.assertEqual(decode_vector([1, 2, 3]), [1.0, 2.0, 3.0])
+
+    def test_decoding_is_little_endian_regardless_of_the_host(self):
+        # Stated explicitly ("<") rather than inherited, so this decodes the
+        # same on a big-endian machine.
+        self.assertEqual(decode_vector("AACAPw=="), [1.0])
+
+    def test_both_languages_decode_the_same_bytes_to_the_same_vector(self):
+        """Parity on the one payload whose numbers ARE the product.
+
+        Measured live on 2026-08-27: this is the first vector
+        `text-embedding-3-small` returned for "hello world", and the
+        TypeScript twin decodes the identical values from the identical bytes.
+        """
+        # The first 12 bytes (3 float32s) of the vector the live gateway
+        # returned, copied off the wire rather than hand-assembled.
+        live_prefix = "AKDeuwCAIL0AwAs9"
+        self.assertEqual(
+            [round(x, 9) for x in decode_vector(live_prefix)],
+            [-0.006793976, -0.03918457, 0.034118652],
+        )
+
+    def test_an_empty_vector_list_does_not_invent_a_vector(self):
+        _, transport = scripted((200, self.RECEIPT, {"data": []}))
+        result = client(transport).embed(EmbeddingsRequest(model="m", input="hi"))
+        self.assertEqual(result.data, [])
+        self.assertIsNone(vector_of(result))
+
+
+class RequestIdentity(unittest.TestCase):
+    """``request_id`` used to be inert, and that is worth a test of its own.
+
+    The gateway derives its request id from the FIRST of ``idempotency-key``
+    then ``x-request-id`` (its own ``request_id()``, confirmed live
+    2026-08-27). Because the SDK always sends an idempotency key, the second
+    name was never once reached: a caller who set ``request_id`` to their trace
+    id got a generated ``idem-<uuid>`` back in the receipt and could not
+    correlate a support question with their own logs. On this gateway the two
+    are ONE identity, so the SDK feeds ``request_id`` into the key that is
+    actually read. Twin of the same assertions in tests/client.test.ts.
+    """
+
+    def test_an_explicit_request_id_becomes_the_id_the_gateway_echoes(self):
+        calls, transport = scripted(
+            (200, {"x-conifer-request-id": "trace-42"}, COMPLETION)
+        )
+        answer = client(transport).chat(
+            ChatRequest(model="m", messages=[], request_id="trace-42")
+        )
+        # The header the gateway READS carries the caller's id …
+        self.assertEqual(calls[0]["headers"]["idempotency-key"], "trace-42")
+        # … and the one it merely logs carries it too, for anything between.
+        self.assertEqual(calls[0]["headers"]["x-request-id"], "trace-42")
+        # So the id the caller chose is the id that comes back.
+        self.assertEqual(answer.receipt.request_id, "trace-42")
+
+    def test_an_explicit_idempotency_key_still_wins(self):
+        # The two remain separable: idempotency is about not billing twice, and
+        # a caller whose trace ids are not unique per turn must be able to say so.
+        calls, transport = scripted((200, {}, COMPLETION))
+        client(transport).chat(
+            ChatRequest(model="m", messages=[], request_id="trace-42", idempotency_key="key-1")
+        )
+        self.assertEqual(calls[0]["headers"]["idempotency-key"], "key-1")
+        self.assertEqual(calls[0]["headers"]["x-request-id"], "trace-42")
+
+    def test_with_neither_id_the_turn_is_still_idempotent(self):
+        calls, transport = scripted((200, {}, COMPLETION))
+        client(transport).chat(ChatRequest(model="m", messages=[]))
+        # A retry that cannot double-bill is the whole point, so the key is
+        # never optional — only its SOURCE is.
+        self.assertTrue(calls[0]["headers"]["idempotency-key"].startswith("idem-"))
+        self.assertNotIn("x-request-id", calls[0]["headers"])
+
+    def test_the_embeddings_door_resolves_identity_the_same_way(self):
+        calls, transport = scripted((200, {}, {"data": []}))
+        client(transport).embed(
+            EmbeddingsRequest(model="text-embedding-3-small", input="hi", request_id="trace-9")
+        )
+        self.assertEqual(calls[0]["headers"]["idempotency-key"], "trace-9")
 
 
 if __name__ == "__main__":

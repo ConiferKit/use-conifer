@@ -6,9 +6,11 @@ tests drive real request bytes without a network and without a mock framework.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import random
+import struct
 import time
 import ssl
 import urllib.error
@@ -24,7 +26,15 @@ from .errors import (
     error_from,
 )
 from .receipt import Receipt, nano_usd_to_usd_string, read_receipt
-from .types import Balance, CatalogModel, ChatRequest, Completion
+from .types import (
+    Balance,
+    CatalogModel,
+    ChatRequest,
+    Completion,
+    Embedding,
+    EmbeddingsRequest,
+    EmbeddingsResponse,
+)
 
 DEFAULT_BASE_URL = "https://api.conifer.build"
 #: Matches the gateway's own 300s edge silent-cut, so the client never gives up
@@ -237,7 +247,7 @@ class Conifer:
                 "token commits the turn. Call chat() for a chain, or handle the failure "
                 "and re-stream yourself.",
             )
-        key = request.idempotency_key or f"idem-{uuid.uuid4()}"
+        key = turn_identity(request)
         headers = chat_headers(request, key)
         headers["accept"] = "text/event-stream"
         response = self._open_stream(chat_body(request, stream=True), headers)
@@ -276,7 +286,7 @@ class Conifer:
     def chat(self, request: ChatRequest) -> Completion:
         """One chat turn, returned with the settled cost of that exact call."""
         chain = resolve_chain(request)
-        idempotency_key = request.idempotency_key or f"idem-{uuid.uuid4()}"
+        idempotency_key = turn_identity(request)
         last: Optional[ConiferError] = None
 
         for index, model in enumerate(chain):
@@ -344,6 +354,63 @@ class Conifer:
     ) -> Optional[CatalogModel]:
         """Cheapest catalog entry DECLARING every capability asked for."""
         return pick_cheapest(self.models(), caps, min_context_window)
+
+    # ------------------------------------------------------------- embeddings
+
+    def embed(self, request: EmbeddingsRequest) -> EmbeddingsResponse:
+        """One embeddings turn, with the exact settled cost of that call.
+
+        BASE64 BY DEFAULT, DECODED FOR YOU. Unless you ask otherwise, the SDK
+        requests ``encoding_format: "base64"`` and decodes the result into
+        plain floats. This is not a micro-optimization: a JSON float array
+        spends ~20 bytes per dimension and the same vector in base64 float32
+        spends 5.33 — roughly a 3x smaller response, which on a 3072-dimension
+        model batched 100 deep is the difference between ~6 MB and ~1.6 MB.
+
+        Doing it silently is safe ONLY because the transformation is exactly
+        lossless, which was verified against the live gateway rather than
+        assumed: ``text-embedding-3-small`` returned the identical 1536 values
+        both ways, max absolute difference 0.0. (The official OpenAI Python SDK
+        makes the same call for the same reason.)
+
+        Pass ``encoding_format="float"`` to send JSON floats instead. Either
+        way, :attr:`EmbeddingsResponse.raw` holds the provider's own body.
+        """
+        # Refuse client-side rather than spend a turn discovering it. The
+        # gateway refuses token-id input too, but only AFTER admission.
+        if isinstance(request.input, (list, tuple)) and any(
+            not isinstance(item, str) for item in request.input
+        ):
+            raise ConiferPortabilityError(
+                "input",
+                "embeddings input must be text (a string, or a list of strings). Token-id "
+                "arrays are refused: the gateway cannot size a spend hold from token ids it "
+                "did not tokenize.",
+            )
+        key = turn_identity(request)
+        data, headers = self.request(
+            "POST",
+            "/v1/embeddings",
+            embeddings_body(request),
+            embeddings_headers(request, key),
+        )
+        payload = data if isinstance(data, dict) else {}
+        entries = payload.get("data") or []
+        return EmbeddingsResponse(
+            data=[
+                Embedding(
+                    index=entry.get("index", position),
+                    embedding=decode_vector(entry.get("embedding")),
+                    object=entry.get("object"),
+                )
+                for position, entry in enumerate(entries)
+            ],
+            receipt=read_receipt(headers),
+            model=payload.get("model"),
+            object=payload.get("object"),
+            usage=payload.get("usage"),
+            raw=payload,
+        )
 
 
 # --------------------------------------------------------------- pure helpers
@@ -416,6 +483,9 @@ def chat_headers(request: ChatRequest, idempotency_key: str) -> Dict[str, str]:
     if request.prompt_cache == "off":
         headers["x-conifer-cache"] = "off"
     if request.request_id is not None:
+        # Sent too, so a proxy or log shipper between you and the gateway still
+        # sees the id. The GATEWAY itself reads `idempotency-key` first (see
+        # turn_identity), which is why request_id now feeds that key as well.
         headers["x-request-id"] = request.request_id
     if request.client is not None:
         headers["x-conifer-client"] = request.client
@@ -522,9 +592,104 @@ def parse_frame(frame: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def turn_identity(request: Any) -> str:
+    """The idempotency key for one logical turn.
+
+    THE COLLAPSE (read the gateway's ``request_id()``, measured live
+    2026-08-27). The gateway derives the request id from the FIRST of
+    ``idempotency-key`` then ``x-request-id``. The SDK always sends an
+    idempotency key, so ``x-request-id`` was never once consulted: a caller who
+    set ``request_id`` to their own trace id got a generated ``idem-<uuid>``
+    back in the receipt and had no way to correlate a support question with
+    their own logs. The field was inert.
+
+    So on this gateway the two ARE one identity, and the SDK stops pretending
+    otherwise: an explicit ``request_id`` becomes the idempotency key, which
+    makes the id you chose the id that comes back.
+
+    The consequence is real and worth stating: the gateway binds an idempotency
+    key to the request BODY, so reusing one ``request_id`` across two different
+    bodies is a 409 ``request_in_progress`` rather than two turns. That is the
+    correct answer to "the same request id for a different request", and it is
+    loud rather than silent. Pass ``idempotency_key`` explicitly to control the
+    two separately when your ids are not unique per turn.
+    """
+    return request.idempotency_key or request.request_id or f"idem-{uuid.uuid4()}"
+
+
 def backoff_seconds(attempt: int) -> float:
     """Exponential backoff with jitter: 0.25s, 0.5s, 1s, …"""
     return 0.25 * (2**attempt) + random.random() * 0.1
+
+
+# ------------------------------------------------------- embeddings helpers
+
+
+def embeddings_body(request: EmbeddingsRequest) -> Dict[str, Any]:
+    """The embeddings body. No sampling knobs: none of them mean anything."""
+    body: Dict[str, Any] = {
+        "model": request.model,
+        "input": request.input,
+        # See Conifer.embed for why base64 is the default and why it is safe.
+        "encoding_format": request.encoding_format or "base64",
+    }
+    if request.dimensions is not None:
+        body["dimensions"] = request.dimensions
+    if request.user is not None:
+        body["user"] = request.user
+    body.update(request.extra_body)
+    return body
+
+
+def embeddings_headers(request: EmbeddingsRequest, idempotency_key: str) -> Dict[str, str]:
+    """The embeddings headers. Same money ceiling and attribution as chat."""
+    headers = dict(request.headers)
+    headers["idempotency-key"] = idempotency_key
+    if request.max_cost_nano_usd is not None:
+        if not isinstance(request.max_cost_nano_usd, int) or isinstance(
+            request.max_cost_nano_usd, bool
+        ):
+            raise ConiferPortabilityError(
+                "max_cost_nano_usd",
+                "the cost ceiling is an INTEGER nanodollar amount ($1 = 1e9). A fractional "
+                "value is refused rather than rounded, because rounding a spend limit is "
+                "the wrong direction half the time.",
+            )
+        headers["x-conifer-max-cost-nanousd"] = str(request.max_cost_nano_usd)
+    if request.request_id is not None:
+        # Sent too, so a proxy or log shipper between you and the gateway still
+        # sees the id. The GATEWAY itself reads `idempotency-key` first (see
+        # turn_identity), which is why request_id now feeds that key as well.
+        headers["x-request-id"] = request.request_id
+    if request.client is not None:
+        headers["x-conifer-client"] = request.client
+    return headers
+
+
+def decode_vector(value: Any) -> List[float]:
+    """A vector as floats, from either wire encoding.
+
+    The base64 arm is little-endian float32, which is what every provider on
+    this door emits and what the OpenAI clients assume. Endianness is stated
+    explicitly (``"<"``) rather than inherited from the host, so this decodes
+    the same on a big-endian machine.
+
+    An unrecognized shape yields an EMPTY vector rather than a guess. A wrong
+    vector is far worse than an obviously missing one: it would sail through a
+    cosine-similarity call and quietly return nonsense rankings forever.
+    """
+    if isinstance(value, (list, tuple)):
+        return [float(x) for x in value]
+    if not isinstance(value, str):
+        return []
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        return []
+    # float32 is 4 bytes; a length that is not a multiple of 4 is not a vector.
+    if not raw or len(raw) % 4 != 0:
+        return []
+    return list(struct.unpack(f"<{len(raw) // 4}f", raw))
 
 
 def _parse_json(text: str, status: int) -> Any:
