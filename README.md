@@ -1,19 +1,49 @@
+<div align="center">
+
+<a href="https://conifer.build">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://conifer.build/conifer-mark-spin-dark.png">
+    <img alt="Conifer" src="https://conifer.build/conifer-mark-spin-light.png" width="132">
+  </picture>
+</a>
+
 # The Conifer SDK
+
+**One API key in front of every major model — and the exact cost of every call.**
 
 [![CI](https://github.com/ConiferKit/use-conifer/actions/workflows/ci.yml/badge.svg)](https://github.com/ConiferKit/use-conifer/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-conifer.build-1f6f4a.svg)](https://conifer.build/docs/sdk/)
+
+[Docs](https://conifer.build/docs/sdk/) ·
+[Migrating](https://conifer.build/docs/sdk/migrate/) ·
+[Issues](https://github.com/ConiferKit/use-conifer/issues) ·
+[Contributing](CONTRIBUTING.md)
+
+</div>
 
 One client for the [Conifer](https://conifer.build) gateway, in TypeScript and
 Python, plus an MCP server so tools that speak no OpenAI wire can still call it.
 
-Conifer is one API key in front of every major model, on the OpenAI and
-Anthropic wires. Credits are charged at the model's list price, and every call
-returns its exact settled cost — down to the nanodollar, itemized. Bring your
-own provider keys and Conifer proxies them for a small fee on list price.
+Conifer speaks the OpenAI and Anthropic wires, so the base URL and the key are
+most of a migration. Credits are charged at the model's list price, and every
+call returns its exact settled cost — down to the nanodollar, itemized. Bring
+your own provider keys and Conifer proxies them for a small fee on list price.
 
-**Docs:** [conifer.build/docs/sdk](https://conifer.build/docs/sdk/) ·
-**Issues:** [file one](https://github.com/ConiferKit/use-conifer/issues) ·
-**Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
+## See it run
+
+The router reads the question and picks the model. A question about a port
+number went to Kimi K3 and came back in three seconds; a question about KV cache
+limits, with the cost dial moved to *best*, went to Claude Opus 5 and took a
+minute. Same session, nothing restarted, no frame sped up.
+
+<div align="center">
+  <a href="https://conifer.build/#router">
+    <img alt="Claude Code running through Conifer's router. The router panel shows the turn routed to kimi-k3 with the cost dial on cheap; the answer, 5432, came back in 3 seconds. Click to watch the full recording on conifer.build." src="https://raw.githubusercontent.com/ConiferKit/use-conifer/main/docs/media/router-demo.jpg" width="760">
+  </a>
+  <br>
+  <sub><b><a href="https://conifer.build/#router">▶ Watch the router choose (50s, no audio)</a></b> — a real screen recording, playing on <a href="https://conifer.build">conifer.build</a></sub>
+</div>
 
 ```bash
 export CONIFER_API_KEY='sk-conifer-…'   # mint one at https://conifer.build/console#/keys
