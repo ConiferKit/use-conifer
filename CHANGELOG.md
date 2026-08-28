@@ -27,7 +27,9 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 
 - The 0.1.0 README documented `import { VERSION }` from a package that did not
   export it, so the example threw `TypeError` for anyone who copied it. The
-  docs and the artifact are back in agreement.
+  docs and the artifact are back in agreement, and a test now parses every
+  import out of the README and fails if the package does not provide it — in
+  both languages, so that class of defect cannot ship again.
 
 ## [0.1.0] - 2026-08-27
 

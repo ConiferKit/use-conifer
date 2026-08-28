@@ -1729,3 +1729,41 @@ class VersionConstant(unittest.TestCase):
 
         self.assertTrue(hasattr(conifer_sdk, "__version__"))
         self.assertIsInstance(conifer_sdk.__version__, str)
+
+
+class ReadmeImportsResolve(unittest.TestCase):
+    """Every symbol the README tells a reader to import must exist.
+
+    This is the Python side of the defect that shipped in 0.1.0: the README
+    documented a TypeScript export the package did not have, so the headline
+    example raised for anyone who copied it. Docs drift AHEAD of the artifact
+    and no ordinary test notices, because docs are not code.
+
+    Parsed from the README rather than hand-listed -- a hand-kept list is one
+    more thing to forget, and forgetting is the failure mode.
+    """
+
+    def test_every_documented_import_exists(self) -> None:
+        import re
+
+        import conifer_sdk
+
+        readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+
+        documented: set[str] = set()
+        for block in re.finditer(r"from\s+conifer_sdk\s+import\s+([^\n]{1,300})", readme):
+            for raw in block.group(1).split(","):
+                name = raw.strip().rstrip(")").strip()
+                if name.isidentifier():
+                    documented.add(name)
+
+        self.assertTrue(documented, "no conifer_sdk imports found in the README")
+
+        missing = sorted(n for n in documented if not hasattr(conifer_sdk, n))
+        self.assertEqual(
+            missing,
+            [],
+            f"the README documents import(s) conifer_sdk does not provide: {missing}. "
+            "Export them or fix the README -- a copied example that raises is "
+            "worse than no example.",
+        )

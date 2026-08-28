@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { VERSION } from "../src/index.ts";
+import * as api from "../src/index.ts";
 import { TOOLS } from "../mcp/server.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -303,11 +303,14 @@ test("VERSION is exported from the package entry point", () => {
   // The constant is worthless if it is not reachable by the name the docs
   // promise. This imports the SAME public seam a consumer does, so deleting
   // the re-export from index.ts fails here rather than in someone's editor.
-  assert.equal(typeof VERSION, "string", "VERSION is not exported from src/index.ts");
+  // Read off the namespace, NOT a named import: a named import of a missing
+  // export crashes the whole module at load, which fails the file instead of
+  // this test and buries the reason.
+  assert.equal(typeof api.VERSION, "string", "VERSION is not exported from src/index.ts");
   assert.match(
-    VERSION,
+    api.VERSION,
     /^\d+\.\d+\.\d+(?:[-+].+)?$/,
-    `VERSION is not a semver string: ${VERSION}`,
+    `VERSION is not a semver string: ${api.VERSION}`,
   );
 });
 
@@ -544,4 +547,34 @@ test("the README's version example shows the CURRENT version", () => {
       `README shows version "${v}" but the package is ${pkg.version}`,
     );
   }
+});
+
+test("every symbol the README tells you to import actually exists", () => {
+  // This is the gate for the defect class that shipped in 0.1.0: the README
+  // documented `import { VERSION } from "conifer-sdk"` for a build that did
+  // not export VERSION, so the headline example threw TypeError for anyone
+  // who copied it. Docs drifting AHEAD of the artifact is invisible to every
+  // other test here, because the docs are not code.
+  //
+  // Parsed from the README rather than listed by hand: a hand-kept list is
+  // one more thing to forget, and the point is to catch what nobody
+  // remembered.
+  const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
+
+  const documented = new Set<string>();
+  for (const m of readme.matchAll(/import\s*\{([^}]{1,300})\}\s*from\s*"conifer-sdk"/g)) {
+    for (const raw of (m[1] ?? "").split(",")) {
+      const name = raw.trim();
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) documented.add(name);
+    }
+  }
+  assert.ok(documented.size > 0, "no conifer-sdk imports found in the README — did the format change?");
+
+  const missing = [...documented].filter((n) => !(n in api));
+  assert.deepEqual(
+    missing,
+    [],
+    `the README documents import(s) the package does not export: ${missing.join(", ")}. ` +
+      "Either export them or fix the README — a copied example that throws is worse than no example.",
+  );
 });
