@@ -15,7 +15,9 @@ export interface McpExport {
 }
 
 export function exportToMcp(manifest: PluginManifest): McpExport {
-  const mcpServers: McpExport["mcpServers"] = {};
+  // Object.create(null): server names like "__proto__" must behave as normal
+  // keys for both assignment and duplicate detection. JSON output is unchanged.
+  const mcpServers: McpExport["mcpServers"] = Object.create(null);
   const skipped: McpExport["skipped"] = [];
 
   for (const spec of manifest.mcp ?? []) {
@@ -23,6 +25,14 @@ export function exportToMcp(manifest: PluginManifest): McpExport {
       throw new AgentError(
         `plugin "${manifest.name}": duplicate MCP server name "${spec.name}" — server names must be unique in an mcpServers config`,
       );
+    }
+    if (spec.toolAllowlist !== undefined) {
+      skipped.push({
+        field: `mcp/${spec.name}/toolAllowlist`,
+        reason:
+          "mcpServers config cannot express a tool allowlist, so the target harness " +
+          "will expose ALL of this server's tools; re-narrow in the target harness if needed",
+      });
     }
     if (spec.transport === "stdio") {
       mcpServers[spec.name] = {

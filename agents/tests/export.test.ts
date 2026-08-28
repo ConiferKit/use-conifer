@@ -39,3 +39,27 @@ test("CLI round-trip: file in, mcpServers JSON on stdout", () => {
   const parsed = JSON.parse(stdout);
   assert.deepEqual(parsed.mcpServers.s, { command: "x" });
 });
+
+test("toolAllowlist cannot be expressed in mcpServers and is skipped loudly", () => {
+  const out = exportToMcp(loadManifest({
+    name: "p", version: "1",
+    mcp: [{ name: "gh", transport: "stdio", command: "x", toolAllowlist: ["a", "b"] }],
+  }));
+  assert.deepEqual(out.mcpServers.gh, { command: "x" });
+  const entry = out.skipped.find((s) => s.field === "mcp/gh/toolAllowlist");
+  assert.ok(entry, "expected a skipped entry for the allowlist");
+  assert.ok(entry.reason.length > 10);
+});
+
+test("dunder server names round-trip and still hit duplicate detection", () => {
+  const out = exportToMcp(loadManifest({
+    name: "p", version: "1",
+    mcp: [{ name: "__proto__", transport: "stdio", command: "x" }],
+  }));
+  assert.deepEqual(JSON.parse(JSON.stringify(out.mcpServers)), { ["__proto__"]: { command: "x" } });
+  assert.throws(() => exportToMcp(loadManifest({
+    name: "p", version: "1",
+    mcp: [{ name: "__proto__", transport: "stdio", command: "x" },
+          { name: "__proto__", transport: "stdio", command: "y" }],
+  })), /duplicate MCP server name/);
+});
