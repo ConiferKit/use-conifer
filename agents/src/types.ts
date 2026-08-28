@@ -16,6 +16,10 @@ export interface AgentTool {
 export interface ToolContext {
   signal?: AbortSignal;
   agentName: string;
+  /** Fold a child run's aggregate into the current run's (subagent tools). */
+  fold?: (child: AggregateReceipt) => void;
+  /** The current run's event sink, so nested runs surface their events. */
+  onEvent?: (e: RunEvent) => void;
 }
 
 export type RunEvent =

@@ -2,30 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Agent } from "../src/agent.ts";
 import { BudgetExceededError, MaxTurnsError } from "../src/errors.ts";
+import { fakeClient } from "./helpers.ts";
 import type { AgentTool, RunEvent } from "../src/types.ts";
 
-type Reply = { text?: string; toolCalls?: { name: string; args: unknown }[]; costNanoUsd?: number };
-function fakeClient(replies: Reply[]) {
-  let i = 0;
-  const requests: any[] = [];
-  return {
-    requests,
-    async chat(req: any) {
-      requests.push(req);
-      const r = replies[Math.min(i++, replies.length - 1)]!;
-      const message: any = { role: "assistant", content: r.text ?? null };
-      if (r.toolCalls) message.tool_calls = r.toolCalls.map((tc, j) => ({
-        id: `call_${i}_${j}`, type: "function",
-        function: { name: tc.name, arguments: JSON.stringify(tc.args) },
-      }));
-      return {
-        id: "resp_x", model: req.model, object: "chat.completion",
-        choices: [{ index: 0, finish_reason: r.toolCalls ? "tool_calls" : "stop", message }],
-        receipt: { costNanoUsd: r.costNanoUsd ?? 1_000_000 },
-      };
-    },
-  } as any;
-}
 const echo: AgentTool = {
   name: "echo", description: "echoes", parameters: { type: "object", properties: { s: { type: "string" } } },
   execute: async (args) => `echo:${(args as any).s}`,

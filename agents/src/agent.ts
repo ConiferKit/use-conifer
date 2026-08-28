@@ -3,10 +3,10 @@
 // aggregating costs from receipts into a budget the caller can trust.
 
 import { Conifer, textOf, type ChatRequest, type Completion, type Message } from "conifer-sdk";
-import { emptyAggregate, recordCall } from "./receipts.ts";
+import { emptyAggregate, foldAggregate, recordCall } from "./receipts.ts";
 import { preflightTools, DEFAULT_TOOL_CAP } from "./limits.ts";
 import { AgentError, BudgetExceededError, MaxTurnsError } from "./errors.ts";
-import type { AgentTool, NanoUsd, RunOptions, RunResult } from "./types.ts";
+import type { AggregateReceipt, AgentTool, NanoUsd, RunOptions, RunResult } from "./types.ts";
 
 /**
  * The minimal chat surface an Agent needs. `Conifer` satisfies it, and so
@@ -143,7 +143,7 @@ export class Agent {
           content: choice?.message?.content ?? "",
           tool_calls: toolCalls,
         } as Message);
-        const results = await Promise.all(toolCalls.map((tc) => this.dispatch(tc, options)));
+        const results = await Promise.all(toolCalls.map((tc) => this.dispatch(tc, options, agg)));
         for (const r of results) {
           messages.push({ role: "tool", content: r.content, tool_call_id: r.id } as Message);
         }
@@ -164,7 +164,7 @@ export class Agent {
    * model, never a crash of the run.
    */
   private async dispatch(
-    tc: ToolCallWire, options: RunOptions,
+    tc: ToolCallWire, options: RunOptions, agg: AggregateReceipt,
   ): Promise<{ id: string; content: string }> {
     const name = tc.function?.name ?? "";
 
@@ -191,7 +191,14 @@ export class Agent {
     }
 
     try {
-      const result = await tool.execute(args, { signal: options.signal, agentName: this.name });
+      const result = await tool.execute(args, {
+        signal: options.signal,
+        agentName: this.name,
+        // Subagent plumbing: fold merges a child run's settled costs into
+        // this run's aggregate; onEvent lets nested runs surface events.
+        fold: (child) => foldAggregate(agg, child),
+        onEvent: options.onEvent,
+      });
       options.onEvent?.({ type: "tool_result", agent: this.name, tool: name, result, isError: false });
       return { id: tc.id, content: result };
     } catch (err) {
@@ -199,5 +206,45 @@ export class Agent {
       options.onEvent?.({ type: "tool_result", agent: this.name, tool: name, result: content, isError: true });
       return { id: tc.id, content };
     }
+  }
+
+  /**
+   * Expose this agent as a tool another agent can call. The child's whole
+   * run happens inside one parent tool call; its aggregate is folded into
+   * the parent's via `ctx.fold`.
+   *
+   * Budgets: the child keeps its own `maxCostNanoUsd` if configured. The
+   * parent's budget still constrains every child call, because folding
+   * happens between parent turns and the parent's preflight budget check
+   * runs at the top of each turn — a child that overspends trips the
+   * parent's BudgetExceededError before the parent's next model call.
+   */
+  asTool(opts: { name?: string; description?: string } = {}): AgentTool {
+    const name = opts.name ?? this.name;
+    const description = opts.description
+      ?? `Delegate a task to the "${this.name}" agent. ${(this.instructions ?? "").slice(0, 200)}`.trim();
+    return {
+      name,
+      description,
+      parameters: {
+        type: "object",
+        properties: { task: { type: "string", description: "The task for the subagent" } },
+        required: ["task"],
+      },
+      source: "subagent",
+      execute: async (args, ctx) => {
+        ctx.onEvent?.({ type: "subagent_start", agent: ctx.agentName, subagent: this.name });
+        const childRun = await this.run(String(args.task ?? ""), {
+          signal: ctx.signal,
+          onEvent: ctx.onEvent,
+        });
+        ctx.fold?.(childRun.receipt);
+        ctx.onEvent?.({
+          type: "subagent_end", agent: ctx.agentName, subagent: this.name,
+          costNanoUsd: childRun.receipt.totalCostNanoUsd,
+        });
+        return childRun.output;
+      },
+    };
   }
 }
