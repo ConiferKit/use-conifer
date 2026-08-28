@@ -1,0 +1,26 @@
+{
+  "name": "@conifer/sdk",
+  "version": "0.1.0",
+  "description": "Deprecated alias for conifer-sdk. Install conifer-sdk instead; this package only re-exports it.",
+  "keywords": ["conifer", "llm", "gateway", "sdk"],
+  "license": "Apache-2.0",
+  "author": "Conifer",
+  "homepage": "https://conifer.build/docs/sdk/conifer/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ConiferKit/use-conifer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ConiferKit/use-conifer/issues"
+  },
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "README.md", "LICENSE"],
+  "dependencies": {
+    "conifer-sdk": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

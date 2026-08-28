@@ -551,6 +551,27 @@ Stated here so you find out now rather than mid-migration:
 - **No server-side prompt compression, moderation, injection scanning, or prompt registry.**
 - **No mid-stream fallback.** The first token commits the turn, so a chain cannot be attached to a stream.
 
+## Reporting a problem
+
+Include the version. Both languages expose it, so a bug report can name exactly
+what ran:
+
+```ts
+import { VERSION } from "conifer-sdk";
+console.log(VERSION);            // "0.1.0"
+```
+
+```python
+import conifer_sdk
+print(conifer_sdk.__version__)   # "0.1.0"
+```
+
+A receipt's `id` identifies the turn on the gateway; quoting it alongside the
+version usually turns "it broke" into a one-look diagnosis. Please do not paste
+an API key.
+
+Changes between versions are in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 [Apache License 2.0](LICENSE). Contributions are welcome under the same license

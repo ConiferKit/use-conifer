@@ -4,7 +4,22 @@ Both packages are **live** as `conifer-sdk` (0.1.0, published 2026-08-27): npm
 and PyPI. Verified from clean installs on both: import by package name, a real
 gateway call, and a real cost receipt.
 
-NOTE ON THE NAME. It ships UNSCOPED. `@conifer/sdk` was the intent and the
+## The `@conifer/sdk` alias
+
+`alias/` is a SEPARATE, near-empty package published as `@conifer/sdk`. It
+depends on `conifer-sdk` at an exact version and re-exports it, nothing more.
+
+It exists for ONE reason: an unclaimed scope is a supply-chain hole. Anyone can
+register `@conifer` and publish something that looks official under a name our
+own docs used to mention. Holding the name closes that, and anyone who guesses
+the scoped name gets the real SDK instead of a 404.
+
+It is NOT the package to develop against, and it is not in the main tarball.
+When bumping the SDK, bump `alias/package.json` version AND its
+`dependencies.conifer-sdk` to the same number, then publish it after the real
+package (its dependency must exist first).
+
+NOTE ON THE NAME. The SDK itself ships UNSCOPED. `@conifer/sdk` was the intent and the
 `conifer` org exists with `conifer_v11` as owner, but every publish into the
 scope 404s on the PUT — the org has ZERO teams (`GET /-/org/conifer/team`
 returns `[]`, and `npm team ls conifer:developers` says "Team not found"), and
@@ -19,6 +34,23 @@ org entirely and matches the PyPI name. If the org is ever repaired, publish
 Publishing is deliberately a human action: it is public, irreversible per
 version, and npm/PyPI both refuse to reuse a version number even after an
 unpublish. This document exists so it is a checklist rather than improvisation.
+
+## Bumping the version
+
+FOUR files carry the version and all four must move together:
+
+| File | What it feeds |
+|---|---|
+| `package.json` | the npm package |
+| `python/pyproject.toml` | the PyPI package |
+| `src/version.ts` | `VERSION`, what a TS caller reports in a bug report |
+| `python/conifer_sdk/__init__.py` | `__version__`, the same for Python |
+
+You do not have to remember this: `npm test` fails if any of the four disagree,
+and fails again if `CHANGELOG.md` has no section for the new version. Add the
+changelog entry in the SAME commit as the bump — `scripts/check-changelog.mjs`
+(also run by `npm test`) rejects a release with no entry, an entry that is a
+raw commit subject, an entry citing a bare SHA, and an empty category.
 
 ## Before you publish anything
 

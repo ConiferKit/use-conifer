@@ -10,12 +10,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+import { VERSION } from "../src/index.ts";
 import { TOOLS } from "../mcp/server.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
+// The REPO root, which is not always `root`: under CONIFER_TEST_COMPILE=1 the
+// suite runs from .test-build/, a copy where every .ts source has become .js.
+// The runner sets cwd to the repo in both modes, so a test that must read a
+// SOURCE file (rather than a copied artifact) resolves from here.
+const repoRoot = process.cwd();
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
 /** Resolve an exports entry to a path on disk. */
@@ -262,6 +269,48 @@ test("the two packages carry the same version", () => {
   );
 });
 
+test("the RUNTIME version constants match the manifests", () => {
+  // A version a user can read is only useful if it is TRUE. Both constants are
+  // literals (see src/version.ts for why a package.json read is worse), so
+  // nothing but this test stops a release from bumping the manifests and
+  // shipping a client that reports the previous version in its bug reports.
+  //
+  // Four values, one truth: package.json, pyproject.toml, VERSION, __version__.
+  const npmVersion = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+  ).version as string;
+
+  // repoRoot, not root: version.ts is a SOURCE file, and under
+  // CONIFER_TEST_COMPILE=1 `root` is .test-build/ where it exists only as .js.
+  const tsSource = readFileSync(join(repoRoot, "src", "version.ts"), "utf8");
+  const tsVersion = /export const VERSION = "([^"]+)"/.exec(tsSource)?.[1];
+  assert.equal(
+    tsVersion,
+    npmVersion,
+    `src/version.ts exports ${tsVersion} but package.json is ${npmVersion}`,
+  );
+
+  const pySource = readFileSync(join(root, "python", "conifer_sdk", "__init__.py"), "utf8");
+  const pyRuntime = /^__version__ = "([^"]+)"/m.exec(pySource)?.[1];
+  assert.equal(
+    pyRuntime,
+    npmVersion,
+    `conifer_sdk.__version__ is ${pyRuntime} but package.json is ${npmVersion}`,
+  );
+});
+
+test("VERSION is exported from the package entry point", () => {
+  // The constant is worthless if it is not reachable by the name the docs
+  // promise. This imports the SAME public seam a consumer does, so deleting
+  // the re-export from index.ts fails here rather than in someone's editor.
+  assert.equal(typeof VERSION, "string", "VERSION is not exported from src/index.ts");
+  assert.match(
+    VERSION,
+    /^\d+\.\d+\.\d+(?:[-+].+)?$/,
+    `VERSION is not a semver string: ${VERSION}`,
+  );
+});
+
 test("the README does not claim a registry that has no package", () => {
   // Leaving "not on a registry" in after publishing — or removing it before —
   // is the kind of small dishonesty that costs trust on the day it matters.
@@ -284,4 +333,105 @@ test("the README does not claim a registry that has no package", () => {
     claimsNotOnPypi !== showsPypiInstall,
     "README both claims not-on-PyPI AND shows a PyPI install (or neither).",
   );
+});
+
+test("CHANGELOG.md passes its own structural gate", () => {
+  // scripts/check-changelog.mjs is the gate; this test is what makes it
+  // UNSKIPPABLE. A check that only runs when someone remembers the command is
+  // not a check, and CI running it separately still leaves a local `npm test`
+  // green on a changelog that would fail the build.
+  //
+  // The script owns the rules and the error messages; this only asserts it
+  // exits 0. Its own negative cases were exercised by hand against a
+  // deliberately broken changelog (raw commit subjects, a cited SHA, an empty
+  // category, a future date, a missing link reference).
+  const script = join(root, "scripts", "check-changelog.mjs");
+  assert.ok(existsSync(script), "scripts/check-changelog.mjs is missing");
+  // execFileSync throws on a non-zero exit, which IS the assertion.
+  execFileSync(process.execPath, [script], { cwd: root, stdio: "pipe" });
+});
+
+test("the CHANGELOG documents the version being shipped", () => {
+  // The gate above proves the file is well-formed; this proves it is CURRENT.
+  // A release that bumps package.json without a changelog entry is the single
+  // most common way a changelog stops being trustworthy.
+  const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
+  assert.ok(
+    changelog.includes(`## [${pkg.version}]`),
+    `CHANGELOG.md has no section for ${pkg.version}, the version in package.json`,
+  );
+});
+
+test("CHANGELOG.md ships inside the package", () => {
+  // A changelog the registry page cannot show is a changelog most users never
+  // read: `npm i` gives them the tarball, not the repo.
+  assert.ok(
+    (pkg.files as string[]).includes("CHANGELOG.md"),
+    "CHANGELOG.md is not in package.json 'files', so it is excluded from the tarball",
+  );
+});
+
+test("CI actually tests the version floors the package advertises", () => {
+  // `engines.node` and `requires-python` are PROMISES. The way they become
+  // lies is silent: someone raises a floor, or adds a syntax feature that the
+  // floor cannot parse, and nothing fails because CI happens to run a newer
+  // runtime. This asserts the promise and the matrix agree — the floor version
+  // itself must appear in the CI matrix, so the oldest supported runtime is
+  // exercised on every pull request rather than assumed.
+  const workflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
+
+  const nodeFloor = /(\d+)/.exec(pkg.engines?.node ?? "")?.[1];
+  assert.ok(nodeFloor, "package.json declares no engines.node floor");
+  const nodeMatrix = /node:\s*\[([^\]]+)\]/.exec(workflow)?.[1] ?? "";
+  const nodeVersions = [...nodeMatrix.matchAll(/"(\d+)"/g)].map((m) => m[1]);
+  assert.ok(
+    nodeVersions.includes(nodeFloor),
+    `engines.node is >=${nodeFloor} but the CI matrix (${nodeVersions.join(", ")}) ` +
+      "never runs that version — the floor is untested.",
+  );
+
+  const pyproject = readFileSync(join(root, "python", "pyproject.toml"), "utf8");
+  const pyFloor = /requires-python = ">=([\d.]+)"/.exec(pyproject)?.[1];
+  assert.ok(pyFloor, "pyproject.toml declares no requires-python floor");
+  const pyMatrix = /python:\s*\[([^\]]+)\]/.exec(workflow)?.[1] ?? "";
+  const pyVersions = [...pyMatrix.matchAll(/"([\d.]+)"/g)].map((m) => m[1]);
+  assert.ok(
+    pyVersions.includes(pyFloor),
+    `requires-python is >=${pyFloor} but the CI matrix (${pyVersions.join(", ")}) ` +
+      "never runs that version — the floor is untested.",
+  );
+});
+
+test("the @conifer/sdk alias tracks this exact version", () => {
+  // alias/ is the scope-defending package: it re-exports conifer-sdk so the
+  // @conifer scope cannot be squatted (see RELEASING.md). It pins an EXACT
+  // dependency version, which means a bump here without a bump there ships a
+  // scoped package that quietly installs an older SDK than its own version
+  // number claims — the exact confusion the alias exists to prevent.
+  const alias = JSON.parse(readFileSync(join(repoRoot, "alias", "package.json"), "utf8"));
+
+  assert.equal(alias.name, "@conifer/sdk", "the alias must hold the scoped name");
+  assert.equal(
+    alias.version,
+    pkg.version,
+    `alias/package.json is ${alias.version} but the SDK is ${pkg.version}`,
+  );
+  assert.equal(
+    alias.dependencies?.["conifer-sdk"],
+    pkg.version,
+    `the alias depends on conifer-sdk@${alias.dependencies?.["conifer-sdk"]}, ` +
+      `not the ${pkg.version} it ships beside. Pin it exactly.`,
+  );
+
+  // It must stay a re-export, not a fork with its own behavior.
+  const entry = readFileSync(join(repoRoot, "alias", "index.js"), "utf8");
+  assert.match(
+    entry,
+    /export \* from "conifer-sdk"/,
+    "the alias must re-export conifer-sdk verbatim",
+  );
+
+  // And it must tell the reader where the real package is.
+  const readme = readFileSync(join(repoRoot, "alias", "README.md"), "utf8");
+  assert.match(readme, /conifer-sdk/, "the alias README must name the real package");
 });

@@ -105,3 +105,6 @@ export {
   vercelEnvMigration,
 } from "./portability/vercel.ts";
 export type { VercelProviderOptions } from "./portability/vercel.ts";
+
+// The installed version, so a bug report can name what it is running.
+export { VERSION } from "./version.ts";

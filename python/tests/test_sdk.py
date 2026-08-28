@@ -1685,3 +1685,47 @@ class EmbeddingDimensions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VersionConstant(unittest.TestCase):
+    """`conifer_sdk.__version__` must be TRUE, not merely present.
+
+    A version a user can read is what turns "it broke" into a reproducible bug
+    report, so a stale one is worse than none: it sends the maintainer to the
+    wrong source. The constant is a literal (importing metadata costs a
+    filesystem read on every import and returns None for a source checkout),
+    so this test is the only thing standing between a release bump and a
+    client that lies about itself.
+
+    The TypeScript suite pins the same invariant from the other side; this one
+    exists so a Python-only contributor, who may never run `npm test`, still
+    gets the failure.
+    """
+
+    def test_matches_pyproject(self) -> None:
+        import re
+
+        import conifer_sdk
+
+        pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+        declared = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+        self.assertIsNotNone(declared, "pyproject.toml has no version line")
+        self.assertEqual(
+            conifer_sdk.__version__,
+            declared.group(1),  # type: ignore[union-attr]
+            "conifer_sdk.__version__ and pyproject.toml disagree",
+        )
+
+    def test_is_semver(self) -> None:
+        import re
+
+        import conifer_sdk
+
+        self.assertRegex(conifer_sdk.__version__, r"^\d+\.\d+\.\d+([-+].+)?$")
+
+    def test_is_exported(self) -> None:
+        """Reachable as the docs promise, from the package root."""
+        import conifer_sdk
+
+        self.assertTrue(hasattr(conifer_sdk, "__version__"))
+        self.assertIsInstance(conifer_sdk.__version__, str)
