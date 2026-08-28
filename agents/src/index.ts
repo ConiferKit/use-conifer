@@ -18,3 +18,4 @@ export {
   McpConnectionError,
 } from "./errors.ts";
 export type { ToolSourceCount } from "./errors.ts";
+export { preflightTools, DEFAULT_TOOL_CAP } from "./limits.ts";
