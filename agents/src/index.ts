@@ -25,3 +25,5 @@ export { mergeHooks } from "./hooks.ts";
 export type { HookSet, PreToolCallResult } from "./hooks.ts";
 export { definePlugin, loadManifest, resolveEnv } from "./plugins/manifest.ts";
 export type { McpServerSpec, PluginManifest, Plugin } from "./plugins/manifest.ts";
+export { McpPluginRuntime } from "./plugins/mcp.ts";
+export type { McpClientLike } from "./plugins/mcp.ts";
