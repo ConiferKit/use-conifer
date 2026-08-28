@@ -7,6 +7,7 @@ import { emptyAggregate, foldAggregate, recordCall } from "./receipts.ts";
 import { preflightTools, DEFAULT_TOOL_CAP } from "./limits.ts";
 import { AgentError, BudgetExceededError, MaxTurnsError } from "./errors.ts";
 import type { AggregateReceipt, AgentTool, NanoUsd, RunOptions, RunResult } from "./types.ts";
+import type { HookSet } from "./hooks.ts";
 
 /**
  * The minimal chat surface an Agent needs. `Conifer` satisfies it, and so
@@ -30,8 +31,8 @@ export interface AgentConfig {
   toolLimit?: number;
   /** Injected client; defaults to `new Conifer()` lazily inside run(). */
   client?: ChatClient;
-  /** Wired in Task 5. The field exists now so configs carry it forward. */
-  hooks?: unknown;
+  /** Lifecycle hooks: sessionStart/End, preToolCall (block or rewrite), postToolCall. */
+  hooks?: HookSet;
 }
 
 /** The wire shape of an incoming tool call on an assistant message. */
@@ -52,6 +53,7 @@ export class Agent {
   private readonly tools: AgentTool[];
   private readonly maxTurns: number;
   private readonly toolLimit: number;
+  private readonly hooks?: HookSet;
 
   constructor(config: AgentConfig) {
     this.name = config.name;
@@ -62,6 +64,7 @@ export class Agent {
     this.tools = config.tools ?? [];
     this.maxTurns = config.maxTurns ?? 12;
     this.toolLimit = config.toolLimit ?? DEFAULT_TOOL_CAP;
+    this.hooks = config.hooks;
   }
 
   async run(input: string, options: RunOptions = {}): Promise<RunResult> {
@@ -85,6 +88,8 @@ export class Agent {
     messages.push({ role: "user", content: input });
 
     let warnedBudget = false;
+
+    await this.hooks?.sessionStart?.({ agent: this.name, input });
 
     for (let turn = 1; ; turn++) {
       if (options.signal?.aborted) throw new AgentError(`agent "${this.name}" run aborted`, agg);
@@ -154,7 +159,9 @@ export class Agent {
       options.onEvent?.({
         type: "run_end", agent: this.name, turns: turn, costNanoUsd: agg.totalCostNanoUsd,
       });
-      return { output, receipt: agg, turns: turn, messages };
+      const result: RunResult = { output, receipt: agg, turns: turn, messages };
+      await this.hooks?.sessionEnd?.({ agent: this.name, result });
+      return result;
     }
   }
 
@@ -183,10 +190,23 @@ export class Agent {
 
     options.onEvent?.({ type: "tool_call", agent: this.name, tool: name, args });
 
+    // preToolCall may block the call (skipping execution) or rewrite its args.
+    if (this.hooks?.preToolCall) {
+      const out = await this.hooks.preToolCall({ agent: this.name, tool: name, args });
+      if (out?.block !== undefined) {
+        const content = `Blocked by hook: ${out.block}`;
+        options.onEvent?.({ type: "tool_result", agent: this.name, tool: name, result: content, isError: true });
+        await this.hooks.postToolCall?.({ agent: this.name, tool: name, args, result: content, isError: true });
+        return { id: tc.id, content };
+      }
+      if (out?.args) args = out.args;
+    }
+
     const tool = this.tools.find((t) => t.name === name);
     if (!tool) {
       const content = `Error: unknown tool "${name}"`;
       options.onEvent?.({ type: "tool_result", agent: this.name, tool: name, result: content, isError: true });
+      await this.hooks?.postToolCall?.({ agent: this.name, tool: name, args, result: content, isError: true });
       return { id: tc.id, content };
     }
 
@@ -200,10 +220,12 @@ export class Agent {
         onEvent: options.onEvent,
       });
       options.onEvent?.({ type: "tool_result", agent: this.name, tool: name, result, isError: false });
+      await this.hooks?.postToolCall?.({ agent: this.name, tool: name, args, result, isError: false });
       return { id: tc.id, content: result };
     } catch (err) {
       const content = `Error: ${err instanceof Error ? err.message : String(err)}`;
       options.onEvent?.({ type: "tool_result", agent: this.name, tool: name, result: content, isError: true });
+      await this.hooks?.postToolCall?.({ agent: this.name, tool: name, args, result: content, isError: true });
       return { id: tc.id, content };
     }
   }
