@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { orchestrate } from "../src/orchestrate.ts";
+import { PluginValidationError } from "../src/errors.ts";
 import { definePlugin } from "../src/plugins/manifest.ts";
 import { fakeClient } from "./helpers.ts";
 
@@ -56,4 +57,33 @@ test("top-level budget lands on the orchestrator", () => {
     subagents: {}, maxCostNanoUsd: 9_000_000, client: fakeClient([{ text: "x" }]),
   });
   assert.equal(team.orchestrator.maxCostNanoUsd, 9_000_000);
+});
+
+test("manifest-declared hook references without code hooks fail loudly at mount", () => {
+  // Validates fine (hooks is a legal manifest field) but nothing would run it.
+  const ghost = definePlugin({
+    name: "auditor", version: "1.0.0",
+    hooks: { preToolCall: "./hooks.js#audit" },
+  });
+  assert.throws(() => orchestrate({
+    orchestrator: { model: "m", instructions: "x", plugins: { auditor: true } },
+    subagents: {},
+    plugins: [ghost],
+    client: fakeClient([{ text: "x" }]),
+  }), (e: unknown) => {
+    assert.ok(e instanceof PluginValidationError);
+    assert.match(e.message, /not dynamically loaded/);
+    assert.match(e.message, /definePlugin/);
+    return true;
+  });
+  // With code hooks supplied the same manifest mounts fine.
+  const real = definePlugin(
+    { name: "auditor", version: "1.0.0", hooks: { preToolCall: "./hooks.js#audit" } },
+    { preToolCall: () => undefined },
+  );
+  const team = orchestrate({
+    orchestrator: { model: "m", instructions: "x", plugins: { auditor: true } },
+    subagents: {}, plugins: [real], client: fakeClient([{ text: "x" }]),
+  });
+  assert.ok(team.orchestrator);
 });

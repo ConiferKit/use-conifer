@@ -72,6 +72,13 @@ export class Agent {
     // building an Agent never needs CONIFER_API_KEY.
     const client = (this.client ??= new Conifer());
 
+    // A caller-supplied cap (asTool passing down the tree's remaining budget)
+    // tightens — never loosens — this agent's own configured budget.
+    const cap = options.budgetCapNanoUsd;
+    const budget = this.maxCostNanoUsd !== undefined && cap !== undefined
+      ? Math.min(this.maxCostNanoUsd, cap)
+      : cap ?? this.maxCostNanoUsd;
+
     const agg = emptyAggregate();
     const { warnings } = preflightTools(this.name, this.tools, this.toolLimit);
     for (const w of warnings) {
@@ -91,77 +98,99 @@ export class Agent {
 
     await this.hooks?.sessionStart?.({ agent: this.name, input });
 
-    for (let turn = 1; ; turn++) {
-      if (options.signal?.aborted) throw new AgentError(`agent "${this.name}" run aborted`, agg);
-      if (turn > this.maxTurns) {
-        throw new MaxTurnsError({ maxTurns: this.maxTurns, receipt: agg, agent: this.name });
-      }
+    let turn = 0;
+    let turnsDone = 0;
+    try {
+      for (turn = 1; ; turn++) {
+        if (options.signal?.aborted) throw new AgentError(`agent "${this.name}" run aborted`, agg);
+        if (turn > this.maxTurns) {
+          throw new MaxTurnsError({ maxTurns: this.maxTurns, receipt: agg, agent: this.name });
+        }
 
-      let remaining: NanoUsd | undefined;
-      if (this.maxCostNanoUsd !== undefined) {
-        remaining = this.maxCostNanoUsd - agg.totalCostNanoUsd;
-        // Exhausted outright, or the remainder cannot cover a call like the
-        // last one — the gateway's hard `maxCostNanoUsd` ceiling would refuse
-        // such a call anyway, so fail cleanly here with the receipt intact.
-        const lastCost = agg.calls.at(-1)?.costNanoUsd;
-        if (remaining <= 0 || (lastCost !== undefined && remaining < lastCost)) {
-          throw new BudgetExceededError({
-            budgetNanoUsd: this.maxCostNanoUsd, receipt: agg, agent: this.name,
+        let remaining: NanoUsd | undefined;
+        if (budget !== undefined) {
+          remaining = budget - agg.totalCostNanoUsd;
+          // Exhausted outright, or the remainder cannot cover a call like the
+          // last one — the gateway's hard `maxCostNanoUsd` ceiling would refuse
+          // such a call anyway, so fail cleanly here with the receipt intact.
+          const lastCost = agg.calls.at(-1)?.costNanoUsd;
+          if (remaining <= 0 || (lastCost !== undefined && remaining < lastCost)) {
+            throw new BudgetExceededError({
+              budgetNanoUsd: budget, receipt: agg, agent: this.name,
+            });
+          }
+        }
+
+        options.onEvent?.({ type: "turn_start", agent: this.name, turn });
+
+        const completion = await client.chat({
+          model: this.model,
+          messages,
+          ...(wireTools.length > 0 ? { tools: wireTools } : {}),
+          ...(remaining !== undefined ? { maxCostNanoUsd: remaining } : {}),
+        });
+
+        recordCall(agg, {
+          agent: this.name,
+          model: this.model,
+          costNanoUsd: completion.receipt?.costNanoUsd,
+          requestId: completion.id,
+        });
+
+        options.onEvent?.({ type: "model_response", agent: this.name, turn, completion });
+        turnsDone = turn;
+
+        if (budget !== undefined && !warnedBudget
+          && agg.totalCostNanoUsd >= budget * 0.8) {
+          warnedBudget = true;
+          options.onEvent?.({
+            type: "budget_warning", agent: this.name,
+            spentNanoUsd: agg.totalCostNanoUsd, budgetNanoUsd: budget,
           });
         }
-      }
 
-      options.onEvent?.({ type: "turn_start", agent: this.name, turn });
-
-      const completion = await client.chat({
-        model: this.model,
-        messages,
-        ...(wireTools.length > 0 ? { tools: wireTools } : {}),
-        ...(remaining !== undefined ? { maxCostNanoUsd: remaining } : {}),
-      });
-
-      recordCall(agg, {
-        agent: this.name,
-        model: this.model,
-        costNanoUsd: completion.receipt?.costNanoUsd,
-        requestId: completion.id,
-      });
-
-      options.onEvent?.({ type: "model_response", agent: this.name, turn, completion });
-
-      if (this.maxCostNanoUsd !== undefined && !warnedBudget
-        && agg.totalCostNanoUsd >= this.maxCostNanoUsd * 0.8) {
-        warnedBudget = true;
-        options.onEvent?.({
-          type: "budget_warning", agent: this.name,
-          spentNanoUsd: agg.totalCostNanoUsd, budgetNanoUsd: this.maxCostNanoUsd,
-        });
-      }
-
-      const choice = completion.choices[0];
-      const toolCalls = choice?.message?.tool_calls as ToolCallWire[] | undefined;
-      if (toolCalls && toolCalls.length > 0) {
-        // conifer-sdk's Message carries an index signature, so tool_calls on
-        // an assistant message is representable without widening.
-        messages.push({
-          role: "assistant",
-          content: choice?.message?.content ?? "",
-          tool_calls: toolCalls,
-        } as Message);
-        const results = await Promise.all(toolCalls.map((tc) => this.dispatch(tc, options, agg)));
-        for (const r of results) {
-          messages.push({ role: "tool", content: r.content, tool_call_id: r.id } as Message);
+        const choice = completion.choices[0];
+        const toolCalls = choice?.message?.tool_calls as ToolCallWire[] | undefined;
+        if (toolCalls && toolCalls.length > 0) {
+          // conifer-sdk's Message carries an index signature, so tool_calls on
+          // an assistant message is representable without widening.
+          messages.push({
+            role: "assistant",
+            content: choice?.message?.content ?? "",
+            tool_calls: toolCalls,
+          } as Message);
+          const results = await Promise.all(
+            toolCalls.map((tc) => this.dispatch(tc, options, agg, budget)),
+          );
+          for (const r of results) {
+            messages.push({ role: "tool", content: r.content, tool_call_id: r.id } as Message);
+          }
+          continue;
         }
-        continue;
-      }
 
-      const output = textOf(completion) ?? "";
+        const output = textOf(completion) ?? "";
+        options.onEvent?.({
+          type: "run_end", agent: this.name, turns: turn, costNanoUsd: agg.totalCostNanoUsd,
+        });
+        const result: RunResult = { output, receipt: agg, turns: turn, messages };
+        await this.hooks?.sessionEnd?.({ agent: this.name, result });
+        return result;
+      }
+    } catch (err) {
+      // Terminal error path (BudgetExceededError, MaxTurnsError, abort, …):
+      // still emit run_end and fire sessionEnd with a partial RunResult so
+      // observers see turns and cost so far. A throwing sessionEnd must never
+      // mask the original error, so its failures are swallowed here.
       options.onEvent?.({
-        type: "run_end", agent: this.name, turns: turn, costNanoUsd: agg.totalCostNanoUsd,
+        type: "run_end", agent: this.name, turns: turnsDone, costNanoUsd: agg.totalCostNanoUsd,
       });
-      const result: RunResult = { output, receipt: agg, turns: turn, messages };
-      await this.hooks?.sessionEnd?.({ agent: this.name, result });
-      return result;
+      try {
+        await this.hooks?.sessionEnd?.({
+          agent: this.name,
+          result: { output: "", receipt: agg, turns: turnsDone, messages },
+        });
+      } catch { /* swallowed: the original error wins */ }
+      throw err;
     }
   }
 
@@ -171,7 +200,7 @@ export class Agent {
    * model, never a crash of the run.
    */
   private async dispatch(
-    tc: ToolCallWire, options: RunOptions, agg: AggregateReceipt,
+    tc: ToolCallWire, options: RunOptions, agg: AggregateReceipt, budget?: NanoUsd,
   ): Promise<{ id: string; content: string }> {
     const name = tc.function?.name ?? "";
 
@@ -218,6 +247,11 @@ export class Agent {
         // this run's aggregate; onEvent lets nested runs surface events.
         fold: (child) => foldAggregate(agg, child),
         onEvent: options.onEvent,
+        // Tree-budget plumbing: what this run can still afford, so a subagent
+        // tool caps its child run and one delegation cannot blow the tree.
+        ...(budget !== undefined
+          ? { remainingBudgetNanoUsd: budget - agg.totalCostNanoUsd }
+          : {}),
       });
       options.onEvent?.({ type: "tool_result", agent: this.name, tool: name, result, isError: false });
       await this.hooks?.postToolCall?.({ agent: this.name, tool: name, args, result, isError: false });
@@ -226,6 +260,10 @@ export class Agent {
       const content = `Error: ${err instanceof Error ? err.message : String(err)}`;
       options.onEvent?.({ type: "tool_result", agent: this.name, tool: name, result: content, isError: true });
       await this.hooks?.postToolCall?.({ agent: this.name, tool: name, args, result: content, isError: true });
+      // A budget overrun is a terminal condition for the whole tree: it must
+      // propagate (with its receipt) rather than be papered over as a tool
+      // result string the model could shrug at.
+      if (err instanceof BudgetExceededError) throw err;
       return { id: tc.id, content };
     }
   }
@@ -235,11 +273,11 @@ export class Agent {
    * run happens inside one parent tool call; its aggregate is folded into
    * the parent's via `ctx.fold`.
    *
-   * Budgets: the child keeps its own `maxCostNanoUsd` if configured. The
-   * parent's budget still constrains every child call, because folding
-   * happens between parent turns and the parent's preflight budget check
-   * runs at the top of each turn — a child that overspends trips the
-   * parent's BudgetExceededError before the parent's next model call.
+   * Budgets: the child runs under an effective budget = min(its own
+   * `maxCostNanoUsd` if set, the parent tree's remaining headroom via
+   * `ctx.remainingBudgetNanoUsd`), so a single delegation can never exceed
+   * the tree budget inside one tool call. A child BudgetExceededError folds
+   * the child's settled spend into the parent and then propagates.
    */
   asTool(opts: { name?: string; description?: string } = {}): AgentTool {
     const name = opts.name ?? this.name;
@@ -256,16 +294,26 @@ export class Agent {
       source: "subagent",
       execute: async (args, ctx) => {
         ctx.onEvent?.({ type: "subagent_start", agent: ctx.agentName, subagent: this.name });
-        const childRun = await this.run(String(args.task ?? ""), {
-          signal: ctx.signal,
-          onEvent: ctx.onEvent,
-        });
-        ctx.fold?.(childRun.receipt);
-        ctx.onEvent?.({
-          type: "subagent_end", agent: ctx.agentName, subagent: this.name,
-          costNanoUsd: childRun.receipt.totalCostNanoUsd,
-        });
-        return childRun.output;
+        try {
+          const childRun = await this.run(String(args.task ?? ""), {
+            signal: ctx.signal,
+            onEvent: ctx.onEvent,
+            ...(ctx.remainingBudgetNanoUsd !== undefined
+              ? { budgetCapNanoUsd: ctx.remainingBudgetNanoUsd }
+              : {}),
+          });
+          ctx.fold?.(childRun.receipt);
+          ctx.onEvent?.({
+            type: "subagent_end", agent: ctx.agentName, subagent: this.name,
+            costNanoUsd: childRun.receipt.totalCostNanoUsd,
+          });
+          return childRun.output;
+        } catch (err) {
+          // The child's settled spend must reach the parent's aggregate even
+          // when the child run fails; its receipt rides on the error.
+          if (err instanceof AgentError) ctx.fold?.(err.receipt);
+          throw err;
+        }
       },
     };
   }

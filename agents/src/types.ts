@@ -20,6 +20,9 @@ export interface ToolContext {
   fold?: (child: AggregateReceipt) => void;
   /** The current run's event sink, so nested runs surface their events. */
   onEvent?: (e: RunEvent) => void;
+  /** Headroom left in the calling run's budget (tree budget), so a subagent
+   * tool can tighten the child run's ceiling to what the tree can afford. */
+  remainingBudgetNanoUsd?: NanoUsd;
 }
 
 export type RunEvent =
@@ -36,6 +39,10 @@ export type RunEvent =
 export interface RunOptions {
   signal?: AbortSignal;
   onEvent?: (event: RunEvent) => void;
+  /** @internal Tightens (never loosens) the agent's own maxCostNanoUsd for
+   * this one run. Used by asTool() to propagate the tree budget into child
+   * runs; not part of the public API surface. */
+  budgetCapNanoUsd?: NanoUsd;
 }
 
 export interface RunResult {

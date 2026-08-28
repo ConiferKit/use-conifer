@@ -74,3 +74,33 @@ test("abort signal stops before the next turn", async () => {
   const a = new Agent({ name: "a", model: "m", client, tools: [slow] });
   await assert.rejects(a.run("go", { signal: ctrl.signal }), /abort/i);
 });
+
+test("run_end and sessionEnd fire on MaxTurnsError with turns and cost so far", async () => {
+  const client = fakeClient([{ toolCalls: [{ name: "echo", args: { s: "x" } }], costNanoUsd: 1_000_000 }]);
+  const events: RunEvent[] = [];
+  let ended: { turns: number; cost: number; output: string } | undefined;
+  const a = new Agent({ name: "a", model: "m", client, tools: [echo], maxTurns: 3, hooks: {
+    sessionEnd: ({ result }) => {
+      ended = { turns: result.turns, cost: result.receipt.totalCostNanoUsd, output: result.output };
+      throw new Error("hook boom");   // must NOT mask MaxTurnsError
+    },
+  }});
+  await assert.rejects(a.run("go", { onEvent: (e) => events.push(e) }),
+    (e: unknown) => e instanceof MaxTurnsError);
+  const end = events.find((e) => e.type === "run_end") as any;
+  assert.ok(end, "run_end must fire on MaxTurnsError");
+  assert.equal(end.turns, 3);
+  assert.equal(end.costNanoUsd, 3_000_000);
+  assert.deepEqual(ended, { turns: 3, cost: 3_000_000, output: "" });
+});
+
+test("run_end fires on BudgetExceededError too", async () => {
+  const client = fakeClient([{ toolCalls: [{ name: "echo", args: { s: "x" } }], costNanoUsd: 4_000_000 }]);
+  const events: RunEvent[] = [];
+  const a = new Agent({ name: "a", model: "m", client, tools: [echo], maxCostNanoUsd: 5_000_000 });
+  await assert.rejects(a.run("go", { onEvent: (e) => events.push(e) }),
+    (e: unknown) => e instanceof BudgetExceededError);
+  const end = events.find((e) => e.type === "run_end") as any;
+  assert.ok(end, "run_end must fire on BudgetExceededError");
+  assert.equal(end.costNanoUsd, 4_000_000);
+});

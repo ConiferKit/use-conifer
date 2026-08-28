@@ -5,7 +5,7 @@
 // async MCP tool mounting is deferred (memoized) to Team.run().
 
 import { Agent, type ChatClient } from "./agent.ts";
-import { AgentError } from "./errors.ts";
+import { AgentError, PluginValidationError } from "./errors.ts";
 import { mergeHooks, type HookSet } from "./hooks.ts";
 import { resolveEnv, type Plugin } from "./plugins/manifest.ts";
 import { McpPluginRuntime } from "./plugins/mcp.ts";
@@ -115,6 +115,23 @@ export function orchestrate(config: OrchestrateConfig): Team {
   // mounted somewhere. Construction is cheap; connections are lazy.
   const runtimes = new Map<string, McpPluginRuntime>();
   const allMounts = [...orchestratorMounts, ...[...subagentMounts.values()].flat()];
+
+  // Fail loudly on mounted manifest-declared hook references that nothing
+  // will run: hooks like {"preToolCall": "./hooks.js#audit"} are descriptive
+  // only and are NOT dynamically loaded here. Without this check they would
+  // validate and then be silently ignored at mount time.
+  for (const { plugin } of allMounts) {
+    const declared = Object.keys(plugin.manifest.hooks ?? {});
+    if (declared.length > 0 && !plugin.hooks) {
+      throw new PluginValidationError({
+        plugin: plugin.manifest.name,
+        problems: declared.map((h) =>
+          `/hooks/${h}: manifest hook references are not dynamically loaded at mount time — ` +
+          `pass code hooks via definePlugin(manifest, { ${h}, ... }), or use the export path ` +
+          `where the target harness resolves them`),
+      });
+    }
+  }
   for (const { plugin } of allMounts) {
     const { name } = plugin.manifest;
     const mcp = plugin.manifest.mcp;

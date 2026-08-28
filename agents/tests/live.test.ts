@@ -1,7 +1,8 @@
 // live.test.ts — measured, never asserted beyond "a real answer came back"
 // (fusion-acceptance ethos). The gateway test is gated on CONIFER_API_KEY;
-// the MCP test is local-only (npx spawns the reference server) and skips
-// itself with a console note if npx/network is unavailable.
+// the MCP test is gated on CONIFER_MCP_LIVE=1 (npx spawns the reference
+// server) and skips itself with a console note if npx/network is unavailable
+// or the server stalls past the timeout.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -9,6 +10,7 @@ import { orchestrate } from "../src/orchestrate.ts";
 import { McpPluginRuntime } from "../src/plugins/mcp.ts";
 
 const KEY = process.env.CONIFER_API_KEY;
+const MCP_LIVE = process.env.CONIFER_MCP_LIVE === "1";
 
 test("live: two-agent tree answers and settles a cost", { skip: !KEY }, async () => {
   const team = orchestrate({
@@ -28,7 +30,12 @@ test("live: two-agent tree answers and settles a cost", { skip: !KEY }, async ()
   console.log(`live tree: ${run.receipt.calls.length} calls, ${run.receipt.totalCostNanoUsd} nanoUSD, ${run.turns} turns`);
 });
 
-test("live: real MCP stdio server lists tools and echoes", async (t) => {
+test("live: real MCP stdio server lists tools and echoes", { skip: !MCP_LIVE }, async (t) => {
+  // A stalled npx/server must skip-with-note, never hang the suite.
+  const deadline = <T>(p: Promise<T>, ms: number, what: string): Promise<T> =>
+    Promise.race([p, new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms).unref())]);
+
   const rt = new McpPluginRuntime("everything", [{
     name: "everything",
     transport: "stdio",
@@ -37,19 +44,22 @@ test("live: real MCP stdio server lists tools and echoes", async (t) => {
   }]);
   let tools;
   try {
-    tools = await rt.tools();
+    tools = await deadline(rt.tools(), 60_000, "MCP spawn/list");
   } catch (e) {
-    // npx/network unavailable in this environment; do not fail the suite.
+    // npx/network unavailable or stalled in this environment; do not fail the suite.
     console.log(`live mcp: skipped, could not spawn reference server: ${String(e)}`);
-    await rt.shutdown();
-    t.skip("npx/network unavailable");
+    await rt.shutdown().catch(() => {});
+    t.skip("npx/network unavailable or timed out");
     return;
   }
   try {
     assert.ok(tools.length > 0, "server listed no tools");
     const echo = tools.find((tool) => tool.name === "everything__echo");
     assert.ok(echo, "reference server did not expose echo");
-    const out = await echo.execute({ message: "conifer-agents live" }, { agentName: "live" });
+    const out = await deadline(
+      echo.execute({ message: "conifer-agents live" }, { agentName: "live" }),
+      60_000, "MCP echo call",
+    );
     assert.match(out, /conifer-agents live/);
     console.log(`live mcp: ${tools.length} tools, echo -> ${JSON.stringify(out)}`);
   } finally {

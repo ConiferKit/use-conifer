@@ -75,7 +75,11 @@ prefixed `<server>__<tool>` locally; the unprefixed name goes over the wire.
 
 Code hooks (`definePlugin(manifest, { preToolCall, ... })`) run in-process and
 are the one NON-PORTABLE part of a plugin: they reference local code, so they
-survive neither the manifest file alone nor an MCP export.
+survive neither the manifest file alone nor an MCP export. A manifest that
+declares `hooks` references (e.g. `"preToolCall": "./hooks.js#audit"`) without
+accompanying code hooks is rejected loudly at `orchestrate()` mount time —
+those references are never dynamically loaded, only the export path or
+`definePlugin(manifest, hooks)` runs them.
 
 ## Export
 
@@ -115,3 +119,16 @@ The fix is scoping, not raising the cap: mount plugins per-agent
 (`plugins: { github: ["get_file_contents", "search_code"] }`) so each agent
 carries only the tools it needs, and use `toolAllowlist` in the manifest to
 shrink a server's surface for everyone.
+
+## Design notes
+
+All errors thrown by this package extend `AgentError`, which extends `Error`
+directly — deliberately NOT conifer-sdk's `ConiferError`, so
+`instanceof ConiferError` will not match agent-layer errors. Catch
+`AgentError` (or a subclass like `BudgetExceededError`) for agent failures
+and `ConiferError` separately for raw gateway failures.
+
+There is no per-provider tool-cap table yet: the mechanism is the single
+`DEFAULT_TOOL_CAP` of 128 with the per-agent `toolLimit` override. If a
+provider you use rejects tool lists below 128, set `toolLimit` on the agents
+that call it.
