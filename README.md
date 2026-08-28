@@ -558,12 +558,12 @@ what ran:
 
 ```ts
 import { VERSION } from "conifer-sdk";
-console.log(VERSION);            // "0.1.0"
+console.log(VERSION);            // "0.1.1"
 ```
 
 ```python
 import conifer_sdk
-print(conifer_sdk.__version__)   # "0.1.0"
+print(conifer_sdk.__version__)   # "0.1.1"
 ```
 
 A receipt's `id` identifies the turn on the gateway; quoting it alongside the

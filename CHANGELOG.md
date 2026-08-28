@@ -12,6 +12,23 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-28
+
+### Added
+
+- `VERSION`, exported from the package root, so a bug report can name exactly
+  what ran: `import { VERSION } from "conifer-sdk"`. Python already had
+  `conifer_sdk.__version__`; both are now pinned to the manifests by tests in
+  both suites, so a release cannot ship a client that misreports itself.
+- `CHANGELOG.md` now ships inside the package, so `npm i` and the registry page
+  carry the history rather than only the repository.
+
+### Fixed
+
+- The 0.1.0 README documented `import { VERSION }` from a package that did not
+  export it, so the example threw `TypeError` for anyone who copied it. The
+  docs and the artifact are back in agreement.
+
 ## [0.1.0] - 2026-08-27
 
 First public release, on [npm](https://www.npmjs.com/package/conifer-sdk) and
@@ -47,5 +64,6 @@ First public release, on [npm](https://www.npmjs.com/package/conifer-sdk) and
   produces a **blank PyPI project page**. Caught by inspecting the built wheel's
   metadata rather than trusting a green build.
 
-[Unreleased]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.0...HEAD
+[Unreleased]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.1...HEAD
+[0.1.1]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.0...sdk-v0.1.1
 [0.1.0]: https://github.com/ConiferKit/use-conifer/releases/tag/sdk-v0.1.0

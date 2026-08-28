@@ -528,3 +528,20 @@ test("the GitHub YAML files parse", () => {
     assert.fail(`a .github YAML file does not parse:\n${text}`);
   }
 });
+
+test("the README's version example shows the CURRENT version", () => {
+  // The README demonstrates VERSION with a comment showing what it prints. A
+  // bump leaves that comment showing the OLD version, which is a small lie in
+  // the one section whose entire job is helping someone report the right
+  // version. Cheap to miss by hand, so it is checked.
+  const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
+  const shown = [...readme.matchAll(/(?:\/\/|#)\s*"(\d+\.\d+\.\d+)"/g)].map((m) => m[1]);
+  assert.ok(shown.length > 0, "the README no longer demonstrates the version constant");
+  for (const v of shown) {
+    assert.equal(
+      v,
+      pkg.version,
+      `README shows version "${v}" but the package is ${pkg.version}`,
+    );
+  }
+});

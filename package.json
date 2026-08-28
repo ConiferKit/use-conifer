@@ -1,6 +1,6 @@
 {
   "name": "conifer-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The Conifer gateway SDK: one client, exact per-turn cost receipts, and honest migration shims from OpenRouter, Vercel AI Gateway, and Helicone.",
   "type": "module",
   "exports": {
