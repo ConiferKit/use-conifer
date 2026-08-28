@@ -1,5 +1,5 @@
 {
-  "_comment": "The Conifer gateway's public wire contract, vendored here and pinned by the test suites in both languages. Generated from the gateway's live constants and published for downstream clients to vendor; do not edit by hand. If the gateway adds a receipt header, this file changes and the card tests fail until the SDK parses it — which is the point.",
+  "_comment": "Conifer's public wire contract, vendored here and pinned by the SDK test suites. Do not edit by hand.",
   "version": 1,
   "receipt_headers": [
     "x-conifer-requested-model",
@@ -14,7 +14,7 @@
   ],
   "request_id_header": "x-conifer-request-id",
   "error_envelope": {
-    "_comment": "The gateway's LIVE error vocabulary, measured against api.conifer.build on 2026-08-27 and pinned by tests/errors.test.ts + python/tests/test_sdk.py. The gateway speaks the INDUSTRY names (OpenAI/Groq/Together/Fireworks/DeepSeek/xAI) rather than a private schema, which means `type` is COLLAPSED: one `invalid_request_error` covers a 401, a 400, an unknown URL and a wrong method. Mapping on `type` alone therefore cannot recover the class, and doing so is what made three error classes unreachable in v0.1.0. The SDK discriminates on (type, code, status).",
+    "_comment": "The API's error vocabulary, pinned by tests/errors.test.ts and python/tests/test_sdk.py. `type` alone is not a reliable discriminator: clients should discriminate on (type, code, status).",
     "types": [
       "invalid_request_error",
       "rate_limit_error",
@@ -48,7 +48,7 @@
       "rate_limited"
     ],
     "retryable_409_marker": "retry shortly",
-    "_409_comment": "The gateway authors three 409s under `request_in_progress` and only two are retryable. Both transient ones end in the literal phrase 'retry shortly'; the terminal one ('idempotency key was already used with a different request body') does not. The SDK keys on that phrase because the status cannot distinguish them."
+    "_409_comment": "Some `request_in_progress` 409s are retryable and some are not. Retryable ones end in the literal phrase 'retry shortly'; clients should key on that phrase."
   },
   "timeouts_secs": {
     "edge_silent_cut": 300,
