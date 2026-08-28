@@ -5,3 +5,5 @@ __pycache__/
 python/build/
 .pytest_cache/
 .test-build/
+dist-release/
+.release-venv/
