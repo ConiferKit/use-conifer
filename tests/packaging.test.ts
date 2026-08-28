@@ -435,3 +435,31 @@ test("the @conifer/sdk alias tracks this exact version", () => {
   const readme = readFileSync(join(repoRoot, "alias", "README.md"), "utf8");
   assert.match(readme, /conifer-sdk/, "the alias README must name the real package");
 });
+
+test("the scope-blocked runbook stays honest about the alias's state", () => {
+  // docs/npm-scope-blocked.md says @conifer/sdk is NOT published. The day it
+  // IS published that sentence becomes the misleading kind of stale doc — it
+  // would send someone to a support ticket for a problem that no longer
+  // exists. This cannot check npm from an offline test, so it checks the two
+  // things it can: the runbook exists, and RELEASING.md still points at it.
+  //
+  // When the alias goes live: delete the runbook, drop the "not published yet"
+  // paragraph from RELEASING.md, and delete this test. All three together.
+  const runbook = join(repoRoot, "docs", "npm-scope-blocked.md");
+  assert.ok(existsSync(runbook), "docs/npm-scope-blocked.md is missing");
+
+  const releasing = readFileSync(join(repoRoot, "RELEASING.md"), "utf8");
+  assert.match(
+    releasing,
+    /docs\/npm-scope-blocked\.md/,
+    "RELEASING.md no longer links the scope runbook — if the scope was fixed, " +
+      "delete the runbook and this test too; do not leave a dangling reference.",
+  );
+
+  // The runbook must carry the actual evidence, not just an assertion, or it
+  // is useless to whoever picks this up cold.
+  const text = readFileSync(runbook, "utf8");
+  for (const marker of ["/-/org/conifer/team", "404", "alias/"]) {
+    assert.ok(text.includes(marker), `the runbook no longer explains '${marker}'`);
+  }
+});

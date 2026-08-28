@@ -19,6 +19,12 @@ When bumping the SDK, bump `alias/package.json` version AND its
 `dependencies.conifer-sdk` to the same number, then publish it after the real
 package (its dependency must exist first).
 
+**It is not published yet.** The `@conifer` scope cannot currently be published
+to at all — the org has zero teams, so not even its owner can create the first
+package in it, and npm reports that as a 404 rather than a permission error.
+[docs/npm-scope-blocked.md](docs/npm-scope-blocked.md) has the evidence, what
+was already ruled out, the two-minute retry, and a ready-to-send support ticket.
+
 NOTE ON THE NAME. The SDK itself ships UNSCOPED. `@conifer/sdk` was the intent and the
 `conifer` org exists with `conifer_v11` as owner, but every publish into the
 scope 404s on the PUT — the org has ZERO teams (`GET /-/org/conifer/team`
