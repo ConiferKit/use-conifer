@@ -19,3 +19,5 @@ export {
 } from "./errors.ts";
 export type { ToolSourceCount } from "./errors.ts";
 export { preflightTools, DEFAULT_TOOL_CAP } from "./limits.ts";
+export { Agent } from "./agent.ts";
+export type { AgentConfig, ChatClient } from "./agent.ts";
