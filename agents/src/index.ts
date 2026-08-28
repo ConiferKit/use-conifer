@@ -29,3 +29,5 @@ export { definePlugin, loadManifest, resolveEnv } from "./plugins/manifest.ts";
 export type { McpServerSpec, PluginManifest, Plugin } from "./plugins/manifest.ts";
 export { McpPluginRuntime } from "./plugins/mcp.ts";
 export type { McpClientLike } from "./plugins/mcp.ts";
+export { exportToMcp } from "./export/mcp.ts";
+export type { McpExport } from "./export/mcp.ts";
