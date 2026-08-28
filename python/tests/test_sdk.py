@@ -1767,3 +1767,61 @@ class ReadmeImportsResolve(unittest.TestCase):
             "Export them or fix the README -- a copied example that raises is "
             "worse than no example.",
         )
+
+
+class TypeHintsAreVisible(unittest.TestCase):
+    """PEP 561: a typed package MUST ship py.typed or its hints do not exist.
+
+    This shipped broken in 0.1.0. Every annotation in the package was invisible
+    to mypy and pyright -- they are required to treat an installed package as
+    untyped without the marker -- so `conifer_sdk` resolved to Any and a user
+    running mypy got an error just for importing it. The hints were all there
+    and none of them reached anyone.
+
+    The marker is a real file AND a package-data entry: either one alone is
+    silently useless, since the file not listed in package-data simply does not
+    make it into the wheel.
+    """
+
+    def test_marker_file_exists(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        self.assertTrue(
+            (root / "conifer_sdk" / "py.typed").is_file(),
+            "conifer_sdk/py.typed is missing -- every type hint is invisible downstream",
+        )
+
+    def test_marker_is_packaged(self) -> None:
+        """In pyproject package-data, or it never reaches the wheel.
+
+        Matched as an actual package-data ENTRY, not merely the string
+        "py.typed" appearing somewhere -- the first version of this test
+        grepped the whole file and passed against a pyproject whose
+        package-data was empty, because the word survived in a comment. A
+        test that a comment can satisfy is not a test.
+        """
+        import re
+
+        root = Path(__file__).resolve().parents[1]
+        pyproject = (root / "pyproject.toml").read_text()
+        entry = re.search(
+            r"^\s*conifer_sdk\s*=\s*\[([^\]]*)\]",
+            pyproject,
+            re.M,
+        )
+        self.assertIsNotNone(entry, "no [tool.setuptools.package-data] conifer_sdk entry")
+        self.assertIn(
+            "py.typed",
+            entry.group(1),  # type: ignore[union-attr]
+            "py.typed exists but is not listed in package-data, so the built "
+            "wheel omits it and the marker has no effect",
+        )
+
+    def test_marker_is_importable_at_runtime(self) -> None:
+        """Beside the package, not merely somewhere in the tree."""
+        import conifer_sdk
+
+        pkg_dir = Path(conifer_sdk.__file__).parent
+        self.assertTrue(
+            (pkg_dir / "py.typed").is_file(),
+            f"py.typed is not next to the imported package at {pkg_dir}",
+        )

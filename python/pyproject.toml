@@ -66,3 +66,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["conifer_sdk"]
+
+# PEP 561. WITHOUT this marker every type hint in the package is INVISIBLE:
+# mypy and pyright must treat an installed package as untyped unless it ships
+# py.typed, so `conifer_sdk` resolved to Any and users got an
+# "missing library stubs or py.typed marker" error just for importing. The
+# hints were all there and none of them reached anyone. Verified with mypy
+# against the published wheel before and after.
+[tool.setuptools.package-data]
+conifer_sdk = ["py.typed"]

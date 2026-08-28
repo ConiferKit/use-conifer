@@ -618,3 +618,26 @@ test("shipped source maps resolve to files that ship with them", () => {
       "that makes debugging worse than no map at all.",
   );
 });
+
+test("the Python package ships its PEP 561 typing marker", () => {
+  // Cross-language guard for the defect that shipped in 0.1.0: conifer_sdk is
+  // fully annotated, but without py.typed mypy and pyright MUST treat it as
+  // untyped. Every hint resolved to Any and importing it raised a
+  // "missing library stubs or py.typed marker" error.
+  //
+  // The Python suite checks this too. It is repeated here because the npm
+  // release gate is what a maintainer runs before publishing BOTH packages,
+  // and a Python-only defect that only a Python-only command catches is a
+  // defect that ships.
+  const marker = join(repoRoot, "python", "conifer_sdk", "py.typed");
+  assert.ok(existsSync(marker), "python/conifer_sdk/py.typed is missing");
+
+  const pyproject = readFileSync(join(repoRoot, "python", "pyproject.toml"), "utf8");
+  const entry = /^\s*conifer_sdk\s*=\s*\[([^\]]*)\]/m.exec(pyproject);
+  assert.ok(entry, "pyproject.toml has no package-data entry for conifer_sdk");
+  assert.match(
+    entry[1] ?? "",
+    /py\.typed/,
+    "py.typed is not in package-data, so the wheel omits it and the marker does nothing",
+  );
+});

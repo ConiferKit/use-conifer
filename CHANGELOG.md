@@ -32,6 +32,11 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
   docs and the artifact are back in agreement, and a test now parses every
   import out of the README and fails if the package does not provide it — in
   both languages, so that class of defect cannot ship again.
+- The Python package shipped without its PEP 561 `py.typed` marker, so mypy and
+  pyright were required to treat it as untyped: every annotation resolved to
+  `Any`, and `import conifer_sdk` under a type checker raised "missing library
+  stubs or py.typed marker". The package was fully typed and none of it reached
+  anyone. Verified with mypy against the built wheel before and after.
 - 0.1.0 shipped 16 source maps pointing at `src/*.ts`, which was not in the
   published files — every one dangled, so debugging showed "source not found"
   and the maps were dead weight. The sources now ship, and a test fails if a
