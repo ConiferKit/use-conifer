@@ -463,3 +463,68 @@ test("the scope-blocked runbook stays honest about the alias's state", () => {
     assert.ok(text.includes(marker), `the runbook no longer explains '${marker}'`);
   }
 });
+
+test("the contributor path documents the rules CI enforces", () => {
+  // A rule that fails a first-time contributor's PR while being written down
+  // NOWHERE is a hostile first experience. The changelog gate is exactly that
+  // kind of rule: invisible until it rejects you. CONTRIBUTING.md must explain
+  // it, and the PR template must remind you at the moment you would forget.
+  const contributing = readFileSync(join(repoRoot, "CONTRIBUTING.md"), "utf8");
+  assert.match(
+    contributing,
+    /CHANGELOG\.md/,
+    "CONTRIBUTING.md never mentions CHANGELOG.md, but npm test fails without an entry",
+  );
+  assert.match(
+    contributing,
+    /Unreleased/,
+    "CONTRIBUTING.md does not say WHERE to add an entry",
+  );
+
+  const prTemplate = join(repoRoot, ".github", "pull_request_template.md");
+  assert.ok(existsSync(prTemplate), ".github/pull_request_template.md is missing");
+  assert.match(
+    readFileSync(prTemplate, "utf8"),
+    /CHANGELOG\.md/,
+    "the PR template does not mention the changelog entry CI requires",
+  );
+});
+
+test("the bug template asks for the version the SDK exposes", () => {
+  // VERSION and __version__ exist so a bug report can name what ran. That only
+  // pays off if the report ASKS for it — otherwise the constant is a feature
+  // nobody uses and every triage starts with a round trip.
+  const bug = readFileSync(
+    join(repoRoot, ".github", "ISSUE_TEMPLATE", "bug.yml"),
+    "utf8",
+  );
+  assert.match(bug, /VERSION|__version__/, "the bug template does not ask for the SDK version");
+});
+
+test("the GitHub YAML files parse", () => {
+  // A malformed issue template does not fail a build: GitHub silently falls
+  // back to a blank issue form, and nobody notices until reports stop carrying
+  // the fields. Parsed here with a real YAML parser, since the repo has no
+  // other YAML coverage.
+  //
+  // Deliberately a SUBSET parse: enough to catch indentation and structure
+  // errors, which is the whole failure mode. Node has no bundled YAML, so this
+  // shells out to python3 — present in CI, and this repo already requires it.
+  const files = [
+    join(repoRoot, ".github", "workflows", "ci.yml"),
+    join(repoRoot, ".github", "ISSUE_TEMPLATE", "bug.yml"),
+    join(repoRoot, ".github", "ISSUE_TEMPLATE", "config.yml"),
+    join(repoRoot, ".github", "ISSUE_TEMPLATE", "integration.yml"),
+  ];
+  for (const f of files) assert.ok(existsSync(f), `${f} is missing`);
+
+  const probe = "import yaml,sys\n[yaml.safe_load(open(p)) for p in sys.argv[1:]]\n";
+  try {
+    execFileSync("python3", ["-c", probe, ...files], { stdio: "pipe" });
+  } catch (err) {
+    const text = String((err as { stderr?: Buffer }).stderr ?? err);
+    // No PyYAML is not a repo defect; a PARSE failure is.
+    if (/ModuleNotFoundError|No module named/.test(text)) return;
+    assert.fail(`a .github YAML file does not parse:\n${text}`);
+  }
+});

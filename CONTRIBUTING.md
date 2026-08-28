@@ -53,6 +53,33 @@ and the vendored gateway contract, so they need no API key, spend no money, and
 run unchanged in a fork's CI. Every pull request must keep both green, and a
 behavioral change should arrive with the test that would have caught it.
 
+## Changing behavior? Add a changelog entry
+
+If your change is visible to someone using the package — new capability,
+different behavior, a fix they would notice, anything about security — add a
+line under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md), in the right
+Keep a Changelog category (`Added`, `Changed`, `Deprecated`, `Removed`,
+`Fixed`, `Security`).
+
+Internal-only work does not need one: a refactor, a test, a typo, a comment.
+
+`npm test` runs `scripts/check-changelog.mjs`, so a malformed changelog fails
+locally before CI. It rejects entries that are **shaped like commit messages
+rather than written for a reader**:
+
+| Rejected | Why |
+|---|---|
+| `feat: add spend budget` | a commit subject, not a description of the change |
+| `Fixed in a1b2c3d the retry path` | a reader cannot resolve a SHA |
+| `Various improvements` | says nothing |
+| `Fixed bug` | too short to be informative |
+
+Write what changed for a caller. "`SpendBudget` now refuses the turn that would
+cross the ceiling rather than the one after it" beats any of the above.
+
+The script checks structure; whether an entry is worth reading is a review
+question, and reviewers will ask.
+
 ## House rules
 
 These are the invariants that make the package worth depending on. A change

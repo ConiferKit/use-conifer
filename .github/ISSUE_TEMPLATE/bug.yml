@@ -9,6 +9,25 @@ body:
       options: ["TypeScript", "Python", "Both"]
     validations:
       required: true
+  - type: input
+    id: version
+    attributes:
+      label: SDK version
+      description: |
+        The package reports it, so there is no guessing:
+        TypeScript `import { VERSION } from "conifer-sdk"`, or
+        Python `import conifer_sdk; conifer_sdk.__version__`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime version
+      description: "`node --version` or `python --version`."
+      placeholder: "node v20.11.0"
+    validations:
+      required: true
   - type: textarea
     id: repro
     attributes:
@@ -23,3 +42,13 @@ body:
       label: Expected versus actual
     validations:
       required: true
+  - type: input
+    id: receipt
+    attributes:
+      label: Receipt or request id (optional)
+      description: |
+        If a real call misbehaved, `answer.receipt.id` identifies that exact
+        turn on the gateway and usually turns this into a one-look diagnosis.
+        Never paste an API key.
+    validations:
+      required: false
