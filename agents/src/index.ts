@@ -23,6 +23,8 @@ export { Agent } from "./agent.ts";
 export type { AgentConfig, ChatClient } from "./agent.ts";
 export { mergeHooks } from "./hooks.ts";
 export type { HookSet, PreToolCallResult } from "./hooks.ts";
+export { orchestrate } from "./orchestrate.ts";
+export type { SubagentSpec, OrchestrateConfig, Team } from "./orchestrate.ts";
 export { definePlugin, loadManifest, resolveEnv } from "./plugins/manifest.ts";
 export type { McpServerSpec, PluginManifest, Plugin } from "./plugins/manifest.ts";
 export { McpPluginRuntime } from "./plugins/mcp.ts";
