@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -576,5 +576,45 @@ test("every symbol the README tells you to import actually exists", () => {
     [],
     `the README documents import(s) the package does not export: ${missing.join(", ")}. ` +
       "Either export them or fix the README — a copied example that throws is worse than no example.",
+  );
+});
+
+test("shipped source maps resolve to files that ship with them", () => {
+  // 0.1.0 and 0.1.1 shipped 16 source maps pointing at `../../src/*.ts` while
+  // `src/` was NOT in package.json "files". Every one dangled: a consumer
+  // stepping into the SDK got "source not found", and the maps were dead
+  // weight in the tarball. Invisible from inside the repo, where src/ is
+  // right there — only an install shows it.
+  //
+  // Checked against the manifest rather than a packed tarball so it runs
+  // offline and fast: if a map names ../../src/x.ts, then "src" must be a
+  // published path.
+  const files = pkg.files as string[];
+  const maps = existsSync(join(repoRoot, "dist", "src"))
+    ? readdirSync(join(repoRoot, "dist", "src")).filter((f) => f.endsWith(".js.map"))
+    : [];
+  if (maps.length === 0) return; // not built; the build test covers that
+
+  const roots = new Set<string>();
+  for (const name of maps) {
+    const map = JSON.parse(readFileSync(join(repoRoot, "dist", "src", name), "utf8")) as {
+      sources?: string[];
+      sourcesContent?: unknown;
+    };
+    // Inlined sources are self-contained and need no shipped file.
+    if (map.sourcesContent) continue;
+    for (const source of map.sources ?? []) {
+      const top = source.replace(/^(?:\.\.\/)+/, "").split("/")[0];
+      if (top) roots.add(top);
+    }
+  }
+
+  const unshipped = [...roots].filter((r) => !files.includes(r));
+  assert.deepEqual(
+    unshipped,
+    [],
+    `source maps reference ${unshipped.join(", ")}/ but package.json "files" does not ship it. ` +
+      "Either add it to files, or stop emitting maps — a dangling map is dead weight " +
+      "that makes debugging worse than no map at all.",
   );
 });

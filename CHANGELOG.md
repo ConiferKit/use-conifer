@@ -22,6 +22,8 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
   both suites, so a release cannot ship a client that misreports itself.
 - `CHANGELOG.md` now ships inside the package, so `npm i` and the registry page
   carry the history rather than only the repository.
+- The TypeScript sources ship alongside the build, so stack traces and
+  step-debugging resolve into real code instead of stopping at compiled output.
 
 ### Fixed
 
@@ -30,6 +32,10 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
   docs and the artifact are back in agreement, and a test now parses every
   import out of the README and fails if the package does not provide it — in
   both languages, so that class of defect cannot ship again.
+- 0.1.0 shipped 16 source maps pointing at `src/*.ts`, which was not in the
+  published files — every one dangled, so debugging showed "source not found"
+  and the maps were dead weight. The sources now ship, and a test fails if a
+  map ever references a path the package does not include.
 
 ## [0.1.0] - 2026-08-27
 

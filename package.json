@@ -19,6 +19,8 @@
   },
   "files": [
     "dist",
+    "mcp",
+    "src",
     "bin",
     "cards",
     "contracts",
