@@ -12,6 +12,8 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-29
+
 ### Added
 
 - `ConiferCapabilityError` (TS and Python), a `ConiferBadRequestError` subclass
@@ -96,6 +98,7 @@ First public release, on [npm](https://www.npmjs.com/package/conifer-sdk) and
   produces a **blank PyPI project page**. Caught by inspecting the built wheel's
   metadata rather than trusting a green build.
 
-[Unreleased]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.1...HEAD
+[Unreleased]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.2...HEAD
+[0.1.2]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.1...sdk-v0.1.2
 [0.1.1]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.0...sdk-v0.1.1
 [0.1.0]: https://github.com/ConiferKit/use-conifer/releases/tag/sdk-v0.1.0
