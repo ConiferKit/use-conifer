@@ -12,6 +12,8 @@ Standard library only, so ``pip install`` pulls no tree and the SDK works in a
 lambda, a Slack bot, or a locked-down build image unchanged.
 """
 
+__version__ = "0.1.2"
+
 from .client import (
     Conifer,
     DEFAULT_BASE_URL,
@@ -135,4 +137,3 @@ __all__ = [
     "parse_fallbacks",
 ]
 
-__version__ = "0.1.2"

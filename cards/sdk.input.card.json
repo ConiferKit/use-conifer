@@ -33,7 +33,12 @@
     "defaultHeaders": {
       "type": "record<string,string>",
       "default": {},
-      "note": "Merged under the SDK's own headers. Cannot overwrite the credential."
+      "note": "Merged under the SDK's own headers. Cannot overwrite the credential. CAN overwrite the User-Agent, under any casing (header names are case-insensitive; the merge must not duplicate)."
+    },
+    "userAgent": {
+      "type": "constant",
+      "value": "conifer-sdk-python/<version> (Python) / package UA via fetch (TS)",
+      "note": "Every Python request names the SDK: Python's default 'Python-urllib/3.x' is on Cloudflare's stock browser-signature ban list, and on 2026-08-29 the api.conifer.build zone 1010-403'd every such request at the EDGE (18/18 live-QA failures) before the gateway saw it. Applied only when no defaultHeaders entry, under any casing, already names a User-Agent."
     }
   },
   "request_options": {
@@ -156,7 +161,7 @@
     "GET /v1/deferred/{id}": "status only — no content, no cost. TENANCY: a foreign job id and a nonexistent one are the SAME 404, so a 404 means 'not yours or not real', never 'not yet'.",
     "GET /v1/deferred/{id}/result": "the completion with its settled receipt. 409 while running, AND for every terminal state with no result (cancelled/failed/expired — all refunded for unfinished work). Fetching moves the job to `fetched` and starts the retention grace, after which the body is deleted.",
     "POST /v1/deferred/{id}/cancel": "refunded per the gateway's cancel rules.",
-    "states": "queued → submitted → ended → fetched, plus expired/cancelled/failed. TERMINAL = fetched/expired/cancelled/failed. `ended` is deliberately NOT terminal: it is where the result becomes fetchable, and treating it as an end would skip collecting it.",
+    "states": "queued \u2192 submitted \u2192 ended \u2192 fetched, plus expired/cancelled/failed. TERMINAL = fetched/expired/cancelled/failed. `ended` is deliberately NOT terminal: it is where the result becomes fetchable, and treating it as an end would skip collecting it.",
     "wait()": "polls with exponential backoff, STOPS on a terminal state (a loop keyed only on 'is it ended' spins forever on a cancelled job), and on timeout raises WITHOUT cancelling — killing work the caller paid for on a client-side clock is not the SDK's decision."
   }
 }

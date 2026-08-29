@@ -511,8 +511,14 @@ console.log("\nserver fallback chain");
 await check("a declared chain never moves a HEALTHY turn off the pin", async () => {
   // A real second catalog id, so the chain is one the gateway would actually
   // admit; the point of this case is that it is never REACHED.
-  const spare = (await conifer.models()).map((m) => m.id).find((id) => id !== chatModel);
-  if (!spare) throw new Error("the catalog has only one model; cannot form a chain");
+  //
+  // The spare must be CHAT-capable. Picking merely "any other id" drew an
+  // embeddings-only model, which the gateway refuses at admission on a chat
+  // wire — so the case failed on the chain being rejected outright, never
+  // reaching the property it exists to test (that a healthy turn stays pinned).
+  const spare = (await conifer.models())
+    .find((m) => m.id !== chatModel && m.caps?.includes("tools"))?.id;
+  if (!spare) throw new Error("the catalog has no second chat model; cannot form a chain");
   const answer = await conifer.chat({
     model: chatModel,
     messages: [{ role: "user", content: "reply with the single word: ok" }],
