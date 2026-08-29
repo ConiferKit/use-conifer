@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import {
   Conifer,
+  ConiferCapabilityError,
   ConiferConflictError,
   ConiferCostCeilingError,
   ConiferModelNotFoundError,
@@ -173,6 +174,59 @@ test("a 4xx the gateway authored is never retried", async () => {
   ]);
   await assert.rejects(() => client(fetchImpl, { maxRetries: 3 }).chat({ model: "m", messages: [] }));
   assert.equal(calls.length, 1, "a 400 must not be retried");
+});
+
+/**
+ * THE IMAGE-FALLBACK PATH (the 2026-08-29 OpenTag incident, closed end to
+ * end): the gateway refuses an image turn on a no-vision model pre-flight
+ * with `code: unsupported_parameter` / `param: messages`, the SDK maps it to
+ * `ConiferCapabilityError`, and a chain with a vision member absorbs it —
+ * the end user never sees an error, and nothing was billed for the refusal.
+ */
+test("a capability refusal advances the chain to a member that can serve it", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse(
+      {
+        error: {
+          type: "invalid_request_error",
+          code: "unsupported_parameter",
+          param: "messages",
+          message: "this model does not support image input",
+        },
+      },
+      { status: 400 },
+    ),
+    jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS }),
+  ]);
+  const completion = await client(fetchImpl).chat({
+    model: "deepseek-v4-flash",
+    messages: [],
+    fallbackModels: ["glm-5.3-flash"],
+    allowClientFallback: true,
+  });
+  assert.equal(completion.fallbackIndex, 1, "served by the vision member");
+  assert.equal(JSON.parse(calls[1]!.init.body).model, "glm-5.3-flash");
+});
+
+test("a capability refusal with no chain still throws the typed class", async () => {
+  const { fetchImpl } = stubFetch([
+    jsonResponse(
+      {
+        error: {
+          type: "invalid_request_error",
+          code: "unsupported_parameter",
+          param: "messages",
+          message: "this model does not support image input",
+        },
+      },
+      { status: 400 },
+    ),
+  ]);
+  const error = await client(fetchImpl)
+    .chat({ model: "deepseek-v4-flash", messages: [] })
+    .catch((e) => e);
+  assert.ok(error instanceof ConiferCapabilityError, `got ${error.constructor.name}`);
+  assert.equal(error.param, "messages");
 });
 
 test("model_not_found does not advance a fallback chain", async () => {

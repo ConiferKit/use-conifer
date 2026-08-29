@@ -26,6 +26,7 @@ import {
   ConiferAuthError,
   ConiferBadRequestError,
   ConiferByokKeyError,
+  ConiferCapabilityError,
   ConiferConflictError,
   ConiferCostCeilingError,
   ConiferError,
@@ -71,6 +72,75 @@ test("a 400 under the same collapsed type is a bad-request error", () => {
   const error = errorFrom(400, envelope("invalid_request_error", undefined, "bad body"), headers());
   assert.ok(error instanceof ConiferBadRequestError, `got ${error.constructor.name}`);
   assert.equal(error.retryable, false);
+});
+
+/**
+ * The live capability refusal: the exact envelope the gateway serves an
+ * image-carrying request on a no-vision model (`VisionUnsupported`,
+ * gateway 1d167bc0, born from the 2026-08-29 OpenTag incident). The class is
+ * what makes an image fallback POSSIBLE: `ConiferCapabilityError` says a
+ * different model can serve these same bytes, so the `chat()` chain advances
+ * on it while a plain 400 still throws.
+ */
+test("a capability refusal is model-switchable, not a dead-end 400", () => {
+  const vision = errorFrom(
+    400,
+    {
+      error: {
+        type: "invalid_request_error",
+        code: "unsupported_parameter",
+        param: "messages",
+        message:
+          "this model does not support image input; the request carries image content " +
+          "parts \u2014 choose a model whose `caps` in GET /v1/models include `vision`",
+      },
+    },
+    headers(),
+  );
+  assert.ok(vision instanceof ConiferCapabilityError, `got ${vision.constructor.name}`);
+  assert.ok(vision instanceof ConiferBadRequestError, "still catchable as a 400");
+  assert.equal(vision.param, "messages");
+  assert.equal(vision.modelSwitchable, true);
+  assert.equal(vision.retryable, false, "the SAME model refuses these bytes forever");
+
+  // The no-tool-model twin shares the class via the same code.
+  const tools = errorFrom(
+    400,
+    {
+      error: {
+        type: "invalid_request_error",
+        code: "unsupported_parameter",
+        param: "tools",
+        message: "this model does not support tools",
+      },
+    },
+    headers(),
+  );
+  assert.ok(tools instanceof ConiferCapabilityError);
+  assert.equal(tools.param, "tools");
+
+  // The over-max_tools refusal (`invalid_value` on `tools`) too.
+  const count = errorFrom(
+    400,
+    {
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_value",
+        param: "tools",
+        message: "this model accepts fewer tools than the request declares",
+      },
+    },
+    headers(),
+  );
+  assert.ok(count instanceof ConiferCapabilityError);
+
+  // `invalid_value` on any OTHER param stays a plain bad request.
+  const other = errorFrom(
+    400,
+    { error: { type: "invalid_request_error", code: "invalid_value", param: "n", message: "no" } },
+    headers(),
+  );
+  assert.ok(!(other instanceof ConiferCapabilityError));
 });
 
 /**

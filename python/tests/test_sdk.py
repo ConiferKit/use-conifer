@@ -19,6 +19,7 @@ from conifer_sdk import (  # noqa: E402
     Conifer,
     ConiferAuthError,
     ConiferBadRequestError,
+    ConiferCapabilityError,
     ConiferCostCeilingError,
     ConiferConflictError,
     ConiferError,
@@ -652,6 +653,57 @@ class ErrorVocabulary(unittest.TestCase):
         error = error_from(400, {"error": {"type": "invalid_request_error", "message": "bad"}}, {})
         self.assertIsInstance(error, ConiferBadRequestError)
         self.assertFalse(error.retryable)
+
+    def test_a_capability_refusal_is_model_switchable(self):
+        # The live envelope the gateway serves an image turn on a no-vision
+        # model (VisionUnsupported, born from the 2026-08-29 OpenTag
+        # incident). The class says a DIFFERENT model can serve these bytes,
+        # so a caller's fallback branch keys on it instead of provider prose.
+        error = error_from(
+            400,
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "unsupported_parameter",
+                    "param": "messages",
+                    "message": "this model does not support image input",
+                }
+            },
+            {},
+        )
+        self.assertIsInstance(error, ConiferCapabilityError)
+        self.assertIsInstance(error, ConiferBadRequestError)
+        self.assertEqual(error.param, "messages")
+        self.assertTrue(error.model_switchable)
+        self.assertFalse(error.retryable)
+        # invalid_value on tools (over-max_tools) shares the class; on any
+        # other param it stays a plain bad request.
+        over = error_from(
+            400,
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_value",
+                    "param": "tools",
+                    "message": "too many tools",
+                }
+            },
+            {},
+        )
+        self.assertIsInstance(over, ConiferCapabilityError)
+        other = error_from(
+            400,
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_value",
+                    "param": "n",
+                    "message": "no",
+                }
+            },
+            {},
+        )
+        self.assertNotIsInstance(other, ConiferCapabilityError)
 
     def test_a_429_keeps_its_class_and_the_servers_retry_after(self):
         # Under the old mapping this fell to the status-based default, which is

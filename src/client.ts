@@ -2,6 +2,7 @@
 // cards/sdk.output.card.json, and touches the network only through Transport.
 
 import {
+  ConiferCapabilityError,
   ConiferConflictError,
   ConiferError,
   ConiferPortabilityError,
@@ -165,10 +166,17 @@ export class Conifer {
       } catch (error) {
         if (!(error instanceof ConiferError)) throw error;
         lastError = error;
-        // Only a retryable refusal advances the chain. A 402, a 400, or a
-        // model-not-found is the caller's problem on every member alike, and
-        // spending on a second model would not fix it.
-        if (!error.retryable || index === chain.length - 1) throw error;
+        // Two refusals advance the chain; everything else throws on the spot.
+        //   - RETRYABLE (transport, 429, 5xx): a different attempt may succeed.
+        //   - CAPABILITY (`ConiferCapabilityError`): the gateway said THIS
+        //     model cannot take this request's shape (e.g. images on a
+        //     no-vision model — the 2026-08-29 OpenTag class). The same bytes
+        //     can succeed on a member whose caps cover them, and the refusal
+        //     was free, so advancing is exactly what the chain is for.
+        // A 402, an auth failure, or a malformed body is the caller's problem
+        // on every member alike, and spending on a second model would not fix it.
+        const advances = error.retryable || error instanceof ConiferCapabilityError;
+        if (!advances || index === chain.length - 1) throw error;
       }
     }
     /* c8 ignore next */

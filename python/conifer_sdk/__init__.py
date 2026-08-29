@@ -27,6 +27,7 @@ from .client import (
 from .errors import (
     ConiferAuthError,
     ConiferBadRequestError,
+    ConiferCapabilityError,
     ConiferByokKeyError,
     ConiferConflictError,
     ConiferConnectionError,
@@ -102,6 +103,7 @@ __all__ = [
     "ConiferCostCeilingError",
     "ConiferKeySpendCapError",
     "ConiferBadRequestError",
+    "ConiferCapabilityError",
     "ConiferModelNotFoundError",
     "ConiferConflictError",
     "ConiferByokKeyError",

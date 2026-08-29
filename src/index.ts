@@ -63,6 +63,7 @@ export {
   ConiferAuthError,
   ConiferBadRequestError,
   ConiferByokKeyError,
+  ConiferCapabilityError,
   ConiferConflictError,
   ConiferConnectionError,
   ConiferCostCeilingError,
