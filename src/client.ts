@@ -2,6 +2,7 @@
 // cards/sdk.output.card.json, and touches the network only through Transport.
 
 import {
+  ConiferCapabilityError,
   ConiferConflictError,
   ConiferError,
   ConiferPortabilityError,
@@ -165,10 +166,17 @@ export class Conifer {
       } catch (error) {
         if (!(error instanceof ConiferError)) throw error;
         lastError = error;
-        // Only a retryable refusal advances the chain. A 402, a 400, or a
-        // model-not-found is the caller's problem on every member alike, and
-        // spending on a second model would not fix it.
-        if (!error.retryable || index === chain.length - 1) throw error;
+        // Two refusals advance the chain; everything else throws on the spot.
+        //   - RETRYABLE (transport, 429, 5xx): a different attempt may succeed.
+        //   - CAPABILITY (`ConiferCapabilityError`): the gateway said THIS
+        //     model cannot take this request's shape (e.g. images on a
+        //     no-vision model — the 2026-08-29 OpenTag class). The same bytes
+        //     can succeed on a member whose caps cover them, and the refusal
+        //     was free, so advancing is exactly what the chain is for.
+        // A 402, an auth failure, or a malformed body is the caller's problem
+        // on every member alike, and spending on a second model would not fix it.
+        const advances = error.retryable || error instanceof ConiferCapabilityError;
+        if (!advances || index === chain.length - 1) throw error;
       }
     }
     /* c8 ignore next */
@@ -191,6 +199,14 @@ export class Conifer {
    * yourself.
    */
   async defer(request: ChatRequest): Promise<DeferredJob> {
+    if (request.serverFallbackModels?.length) {
+      // The gateway refuses this pair too; saying so here keeps the caller
+      // from believing a submitted job is protected by a chain.
+      throw new ConiferPortabilityError(
+        "serverFallbackModels+defer",
+        "a fallback chain cannot ride a deferred job: the outcome is not known until the job ends, by which time falling back would mean submitting a second job you never asked for. Submit one job and handle a `failed` status.",
+      );
+    }
     if (request.fallbackModels?.length) {
       // A chain is a sequence of SEPARATE requests decided by watching the
       // first one fail. A deferred job's failure is discovered hours later,
@@ -669,6 +685,64 @@ export class KeysApi {
   }
 }
 
+/**
+ * The gateway's cap on a caller-directed fallback chain. Mirrored here so the
+ * refusal happens at the call site; the gateway enforces it regardless.
+ */
+export const MAX_SERVER_FALLBACK_MODELS = 3;
+
+/**
+ * `serverFallbackModels` -> the `x-conifer-fallback-models` header value.
+ *
+ * Mirrors the GATEWAY's own admission rules, so the SDK never refuses a chain
+ * the gateway would have served, and never sends one it would reject:
+ *
+ * - a malformed member (blank, comma-bearing, non-ASCII) THROWS: it cannot
+ *   survive the header intact, so sending it would arm nothing;
+ * - a duplicate, or the requested model itself, is DROPPED — the gateway
+ *   treats these as harmless rather than wrong, and refusing here would make
+ *   the SDK stricter than the wire;
+ * - the 3-member cap is checked AFTER that de-duplication, exactly as the
+ *   gateway counts it;
+ * - `undefined` when nothing survives, so the caller omits the header rather
+ *   than sending an empty one.
+ *
+ * What is never done quietly is dropping a member that WOULD have changed the
+ * outcome: an unknown model still refuses, at the gateway, by name.
+ */
+export function serverFallbackHeader(models: string[], primary: string): string | undefined {
+  const trimmed = models.map((m) => m.trim());
+  if (trimmed.some((m) => m === "")) {
+    throw new ConiferPortabilityError(
+      "serverFallbackModels",
+      "a fallback member is empty. The gateway refuses an empty entry rather than guessing what was meant; drop it, or drop the field entirely if you do not want fallbacks.",
+    );
+  }
+  // A comma is the header's separator, so a member containing one could not
+  // survive the wire intact.
+  const bad = trimmed.find((m) => m.includes(",") || /[^\x20-\x7e]/.test(m));
+  if (bad !== undefined) {
+    throw new ConiferPortabilityError(
+      "serverFallbackModels",
+      `\`${bad}\` is not a usable model id here: the header is a comma-separated ASCII list, so a member carrying a comma or a non-ASCII byte cannot be sent unambiguously.`,
+    );
+  }
+  // De-duplicate and drop the primary, as the gateway does, THEN apply the
+  // cap — a list of three distinct survivors is legal however it was spelled.
+  const chain: string[] = [];
+  for (const model of trimmed) {
+    if (model === primary.trim() || chain.includes(model)) continue;
+    chain.push(model);
+  }
+  if (chain.length > MAX_SERVER_FALLBACK_MODELS) {
+    throw new ConiferPortabilityError(
+      "serverFallbackModels",
+      `at most ${MAX_SERVER_FALLBACK_MODELS} fallback models are accepted per request; the gateway refuses a longer chain rather than silently trimming it.`,
+    );
+  }
+  return chain.length === 0 ? undefined : chain.join(",");
+}
+
 /** The ordered model chain for one logical turn. */
 export function resolveChain(request: ChatRequest): string[] {
   const fallbacks = request.fallbackModels ?? [];
@@ -730,6 +804,15 @@ export function chatHeaders(request: ChatRequest, idempotencyKey: string): Recor
   if (request.defer === true) headers["x-conifer-defer"] = "allow";
   if (request.venue !== undefined) headers["x-conifer-venue"] = request.venue;
   if (request.promptCache === "off") headers["x-conifer-cache"] = "off";
+  // The SERVER-side fallback chain. Validated here rather than shipped and
+  // refused remotely, so the mistake surfaces at the call site with the
+  // reason attached — and never as a chain the caller believes is armed.
+  if (request.serverFallbackModels !== undefined) {
+    const chain = serverFallbackHeader(request.serverFallbackModels, request.model);
+    // Nothing survived de-duplication (e.g. the only member was the requested
+    // model). Send no header rather than an empty one the gateway would 400.
+    if (chain !== undefined) headers["x-conifer-fallback-models"] = chain;
+  }
   // `x-request-id` is sent too, so a proxy or log shipper between you and the
   // gateway still sees the id. The GATEWAY itself reads `idempotency-key`
   // first (see turnIdentity), which is why `requestId` now feeds that key

@@ -71,10 +71,36 @@ test("an ordinary OpenRouter request converts field for field", () => {
 test("OpenRouter's server-side routing controls refuse rather than vanish", () => {
   const base = { model: "m", messages: [] };
   refuses("provider", () => fromOpenRouter({ ...base, provider: { order: ["anthropic"] } }));
+  // `route: "fallback"` now CONVERTS (the gateway has server-side failover),
+  // but only with a list to walk and only for that one value.
   refuses("route", () => fromOpenRouter({ ...base, route: "fallback" }));
+  refuses("route", () => fromOpenRouter({ ...base, route: "lowest-latency", models: ["b"] }));
   refuses("plugins", () => fromOpenRouter({ ...base, plugins: [{ id: "web" }] }));
   refuses("transforms", () => fromOpenRouter({ ...base, transforms: ["middle-out"] }));
   refuses("prompt", () => fromOpenRouter({ ...base, prompt: "legacy" }));
+});
+
+test("OpenRouter's `route: fallback` becomes the GATEWAY chain", () => {
+  // It asked the PROXY to fail over, and the gateway now does exactly that —
+  // so it converts rather than refusing, onto the SERVER chain. Mapping it to
+  // the client chain would silently turn one request into several billed ones.
+  const converted = fromOpenRouter({
+    model: "a",
+    messages: [],
+    models: ["b", "c"],
+    route: "fallback",
+  });
+  assert.deepEqual(converted.serverFallbackModels, ["b", "c"]);
+  assert.equal(converted.fallbackModels, undefined);
+  assert.equal(converted.allowClientFallback, undefined);
+
+  // WITHOUT `route`, `models` keeps its historical client-chain meaning.
+  const plain = fromOpenRouter(
+    { model: "a", messages: [], models: ["b"] },
+    { allowClientFallback: true },
+  );
+  assert.deepEqual(plain.fallbackModels, ["b"]);
+  assert.equal(plain.serverFallbackModels, undefined);
 });
 
 test("`models` becomes an explicit, opt-in client-side chain", () => {
@@ -165,10 +191,19 @@ test("fallbacks parse from either shape and refuse a URL-pinned entry", () => {
   refuses("helicone-fallbacks", () => parseFallbacks("not json"));
 });
 
-test("a Helicone fallback list still needs the client-side opt-in", () => {
+test("a Helicone fallback list maps to the GATEWAY-side chain", () => {
+  // Helicone walked the chain in the PROXY, on one logical request. Now that
+  // the gateway serves the same shape (x-conifer-fallback-models), that is the
+  // honest target: mapping it to the client chain instead would silently turn
+  // one request into several separately billed ones.
   const { request } = fromHeliconeHeaders({ "Helicone-Fallbacks": '["a","b"]' });
-  assert.deepEqual(request.fallbackModels, ["a", "b"]);
-  assert.equal(request.allowClientFallback, undefined, "never auto-accept extra billed calls");
+  assert.deepEqual(request.serverFallbackModels, ["a", "b"]);
+  assert.equal(
+    request.fallbackModels,
+    undefined,
+    "the client chain is a different product and is not implied",
+  );
+  assert.equal(request.allowClientFallback, undefined, "no client opt-in is needed or invented");
 });
 
 // -------------------------------------------------------------------- Vercel
@@ -293,9 +328,9 @@ test("every unserved door the card names actually refuses, and the served ones d
 const OPENROUTER_REQUEST_FIELDS = [
   // Converted to a real Conifer input.
   "messages", "model", "response_format", "stop", "stream", "max_tokens",
-  "temperature", "tools", "tool_choice", "top_p", "models", "user",
+  "temperature", "tools", "tool_choice", "top_p", "models", "user", "route",
   // Refused: a server feature Conifer does not have.
-  "prompt", "plugins", "route", "provider",
+  "prompt", "plugins", "provider",
   // Unmodelled: forwarded only under an explicit opt-in.
   "seed", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty",
   "logit_bias", "top_logprobs", "min_p", "top_a", "prediction", "debug",

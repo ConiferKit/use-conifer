@@ -24,8 +24,13 @@ export interface OpenRouterRequest {
   tool_choice?: unknown;
   response_format?: unknown;
   reasoning?: Record<string, unknown>;
-  /** OpenRouter's fallback list. Becomes a CLIENT-SIDE chain here. */
+  /**
+   * OpenRouter's fallback list. With `route: "fallback"` it becomes the
+   * GATEWAY-side chain (one request, one bill); on its own it stays an opt-in
+   * CLIENT-SIDE chain, which is what it has always meant here.
+   */
   models?: string[];
+  /** Only `"fallback"` maps — onto the gateway-side chain, with `models`. */
   route?: string;
   provider?: unknown;
   plugins?: unknown[];
@@ -54,8 +59,6 @@ export interface ShimOptions {
 const REFUSALS: Record<string, string> = {
   provider:
     "OpenRouter's `provider` preferences pin a serving host. Conifer picks the host for the admitted model itself, by price and health, and no client can override it. Remove the block, or use `maxCostNanoUsd` if the goal was cost control.",
-  route:
-    "`route: \"fallback\"` is server-side failover. Conifer admits exactly the model you name; use `models` with `allowClientFallback: true` for an explicit client-side chain.",
   plugins:
     "OpenRouter plugins (web, file-parser, response-healing, context-compression) run inside their gateway. Conifer has no equivalent, so this request would silently lose that behavior.",
   transforms:
@@ -126,6 +129,23 @@ export function fromOpenRouter(
   if (request.messages === undefined) {
     throw new ConiferPortabilityError("messages", "`messages` is required.");
   }
+  // `route: "fallback"` asks the GATEWAY to fail over, which Conifer now does
+  // (`x-conifer-fallback-models`). It only means something with a list to walk,
+  // and any other value is a routing mode we do not have.
+  if (request.route !== undefined) {
+    if (request.route !== "fallback") {
+      throw new ConiferPortabilityError(
+        "route",
+        `\`route: ${JSON.stringify(request.route)}\` is not a routing mode Conifer has. Only \`"fallback"\` maps, onto the gateway-side fallback chain.`,
+      );
+    }
+    if (request.models === undefined || request.models.length === 0) {
+      throw new ConiferPortabilityError(
+        "route",
+        '`route: "fallback"` asks for server-side failover but names nothing to fail over TO. On OpenRouter that used an account-level list; Conifer has no account default, so send `models` with the substitutes you accept.',
+      );
+    }
+  }
 
   const extraBody: Record<string, unknown> = {};
   for (const knob of UNMODELLED) {
@@ -153,8 +173,16 @@ export function fromOpenRouter(
     // `user` is OpenRouter's abuse-detection identifier; the nearest honest
     // Conifer equivalent is caller attribution, which is what it becomes.
     client: request.user,
-    fallbackModels: request.models,
-    allowClientFallback: options.allowClientFallback,
+    // `models` is OpenRouter's chain. With `route: "fallback"` it is a
+    // GATEWAY-side chain (one request, one bill) — the honest equivalent, and
+    // needing no client opt-in because no extra request is implied. Without
+    // it, `models` keeps its historical meaning here: an opt-in CLIENT chain.
+    ...(request.route === "fallback"
+      ? { serverFallbackModels: request.models }
+      : {
+          fallbackModels: request.models,
+          allowClientFallback: options.allowClientFallback,
+        }),
     extraBody: Object.keys(extraBody).length === 0 ? undefined : extraBody,
   };
   return stripUndefined(converted);

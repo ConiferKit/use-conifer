@@ -12,12 +12,16 @@ Standard library only, so ``pip install`` pulls no tree and the SDK works in a
 lambda, a Slack bot, or a locked-down build image unchanged.
 """
 
+__version__ = "0.1.2"
+
 from .client import (
     Conifer,
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT_SECONDS,
     MIN_DEFER_WINDOW_SECONDS,
+    MAX_SERVER_FALLBACK_MODELS,
     decode_vector,
+    server_fallback_header,
     to_deferred_job,
     with_cost,
     turn_identity,
@@ -27,6 +31,7 @@ from .client import (
 from .errors import (
     ConiferAuthError,
     ConiferBadRequestError,
+    ConiferCapabilityError,
     ConiferByokKeyError,
     ConiferConflictError,
     ConiferConnectionError,
@@ -86,6 +91,8 @@ __all__ = [
     "SpendBudget",
     "SpendBudgetExceeded",
     "MIN_DEFER_WINDOW_SECONDS",
+    "MAX_SERVER_FALLBACK_MODELS",
+    "server_fallback_header",
     "DeferredJob",
     "TERMINAL_JOB_STATUSES",
     "is_terminal_job",
@@ -102,6 +109,7 @@ __all__ = [
     "ConiferCostCeilingError",
     "ConiferKeySpendCapError",
     "ConiferBadRequestError",
+    "ConiferCapabilityError",
     "ConiferModelNotFoundError",
     "ConiferConflictError",
     "ConiferByokKeyError",
@@ -129,4 +137,3 @@ __all__ = [
     "parse_fallbacks",
 ]
 
-__version__ = "0.1.1"

@@ -12,6 +12,72 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 
 ## [Unreleased]
 
+### Added
+
+- `serverFallbackModels` (TS) / `server_fallback_models` (Python): models the
+  GATEWAY falls back to, in order, when the requested model's upstream call
+  fails. Sent as `x-conifer-fallback-models`.
+
+  This is the one to reach for in production, and it is a different thing from
+  the existing `fallbackModels`. That one is a CLIENT chain — a second HTTP
+  request, decided here, only after a retryable refusal reaches you; it cannot
+  help a stream, and each member is separately billed. The new field is ONE
+  request: the gateway holds money once for the whole chain, dispatches the
+  members in your order, settles once against whichever served, and refunds in
+  full if none did. Because the gateway sees the provider's own failure it can
+  advance on classes a client never gets to judge — including the 4xx a
+  mis-configured model surface returns, which is the failure this exists for.
+
+  Every member is admitted by the gateway like a primary before anything is
+  spent, and an unknown model is refused BY NAME rather than silently skipped:
+  a fallback you believe is armed and is not is worse than an error. The SDK
+  mirrors the gateway's own rules rather than inventing stricter ones —
+  duplicates and the model you already requested are dropped, at most three
+  members survive, and a member that cannot ride the header at all (blank, or
+  carrying a comma or a non-ASCII byte) throws at the call site. When nothing
+  survives, no header is sent.
+
+  A served fallback is disclosed, never silent: the receipt's `effectiveModel`
+  names the member that answered and `reason` reads `provider_failover` (the
+  gateway reuses that reason code rather than minting a new one). On a STREAMED
+  turn the handshake headers are written before the failover resolves, so
+  `reason` reads `as_requested` there while `effectiveModel` is still correct —
+  read the model, not the reason, to detect a substitution.
+
+  Requires a gateway carrying `x-conifer-fallback-models` (ConiferKit/typhoon#356).
+
+### Changed
+
+- The migration shims now map fallback intent onto the gateway chain, which is
+  what those features always meant on the platform you are leaving:
+  - OpenRouter's `route: "fallback"` **converts** instead of throwing (it asked
+    the proxy to fail over, and the gateway now does), taking `models` as the
+    server chain. Without `route`, `models` keeps its old client-chain meaning.
+  - Helicone's `Helicone-Fallbacks` maps to the server chain rather than the
+    client one — Helicone walked it in the proxy, on one request, and mapping it
+    client-side silently turned that into several billed requests.
+
+## [0.1.2] - 2026-08-29
+
+### Added
+
+- `ConiferCapabilityError` (TS and Python), a `ConiferBadRequestError` subclass
+  raised when the gateway refuses a request the MODEL cannot serve: image
+  content on a model without the `vision` cap, tools on a no-tool model, or an
+  over-`max_tools` array. It carries the new `param` field (`messages`,
+  `tools`, `tool_choice`) and `modelSwitchable = true` — the one 400 a
+  different model can fix. Nothing is billed for the refusal.
+- `error.param` is now read from the gateway envelope and exposed on every
+  error class (`param` in TS, `.param` in Python).
+
+### Changed
+
+- The `chat()` client-side fallback chain (TS) now advances on a
+  `ConiferCapabilityError` in addition to retryable failures: a chain like
+  `{model: "deepseek-v4-flash", fallbackModels: ["glm-5.3-flash"],
+  allowClientFallback: true}` absorbs an image turn the primary cannot take,
+  so the end user never sees the error. All other 4xx still throw immediately.
+
 ## [0.1.1] - 2026-08-28
 
 ### Added
@@ -77,6 +143,7 @@ First public release, on [npm](https://www.npmjs.com/package/conifer-sdk) and
   produces a **blank PyPI project page**. Caught by inspecting the built wheel's
   metadata rather than trusting a green build.
 
-[Unreleased]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.1...HEAD
+[Unreleased]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.2...HEAD
+[0.1.2]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.1...sdk-v0.1.2
 [0.1.1]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.0...sdk-v0.1.1
 [0.1.0]: https://github.com/ConiferKit/use-conifer/releases/tag/sdk-v0.1.0

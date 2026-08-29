@@ -499,6 +499,71 @@ if (includeDeferred) {
   console.log("  skip deferred submit/cancel (pass --include-deferred)");
 }
 
+// -------------------------------------------------- server fallback chain
+//
+// The offline suites prove the SDK builds `x-conifer-fallback-models` the way
+// it intends. Only the live gateway proves it AGREES — that the separator, the
+// de-duplication rule and the disclosure line up across two repos. Every check
+// here costs one real (cheap) turn.
+
+console.log("\nserver fallback chain");
+
+await check("a declared chain never moves a HEALTHY turn off the pin", async () => {
+  // A real second catalog id, so the chain is one the gateway would actually
+  // admit; the point of this case is that it is never REACHED.
+  //
+  // The spare must be CHAT-capable. Picking merely "any other id" drew an
+  // embeddings-only model, which the gateway refuses at admission on a chat
+  // wire — so the case failed on the chain being rejected outright, never
+  // reaching the property it exists to test (that a healthy turn stays pinned).
+  const spare = (await conifer.models())
+    .find((m) => m.id !== chatModel && m.caps?.includes("tools"))?.id;
+  if (!spare) throw new Error("the catalog has no second chat model; cannot form a chain");
+  const answer = await conifer.chat({
+    model: chatModel,
+    messages: [{ role: "user", content: "reply with the single word: ok" }],
+    maxTokens: 16,
+    serverFallbackModels: [spare],
+  });
+  eq(answer.receipt.effectiveModel, chatModel, "effective model");
+  eq(answer.receipt.reason, "as_requested", "receipt reason");
+  return `${answer.receipt.effectiveModel} (${answer.receipt.reason})`;
+});
+
+await check("an unknown chain member is refused BY NAME, before any spend", async () => {
+  // The one property the whole feature rests on: a fallback that could never
+  // serve must fail LOUDLY at admission, not quietly at the outage it was
+  // bought for. A silent skip here would be undetectable in production.
+  try {
+    await conifer.chat({
+      model: chatModel,
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 16,
+      serverFallbackModels: ["zzz-not-a-model"],
+    });
+  } catch (error) {
+    if (!/zzz-not-a-model/.test(error?.message ?? "")) {
+      throw new Error(`refused, but without naming the id: ${error?.message}`);
+    }
+    return "named the unserved id";
+  }
+  throw new Error("an unserved fallback id was accepted");
+});
+
+await check("a chain that de-duplicates away sends no header at all", async () => {
+  // The SDK drops the primary from its own fallback list, as the gateway does.
+  // If it instead sent an empty header value, this would be a 400 — which is
+  // exactly the drift this check exists to catch.
+  const answer = await conifer.chat({
+    model: chatModel,
+    messages: [{ role: "user", content: "reply with the single word: ok" }],
+    maxTokens: 16,
+    serverFallbackModels: [chatModel],
+  });
+  eq(answer.receipt.effectiveModel, chatModel, "effective model");
+  return "served, not 400'd";
+});
+
 // ----------------------------------------------------------------- verdict
 
 console.log(`\n${failed === 0 ? "PASS" : "FAIL"} — ${passed} passed, ${failed} failed\n`);

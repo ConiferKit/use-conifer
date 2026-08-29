@@ -25,6 +25,7 @@ class ConiferError(Exception):
         type: str,
         message: str,
         code: Optional[str] = None,
+        param: Optional[str] = None,
         request_id: Optional[str] = None,
         body: Any = None,
     ) -> None:
@@ -41,6 +42,10 @@ class ConiferError(Exception):
         #: ``unsupported_parameter``, ``unknown_url``, …), and it is the field
         #: LangChain, LiteLLM and openai-python already branch on.
         self.code = code
+        #: The OpenAI-compatible ``error.param`` — the request field the
+        #: refusal is about (``tools``, ``tool_choice``, ``messages``,
+        #: ``max_tokens``, ``model``). Present on field-scoped refusals only.
+        self.param = param
         self.request_id = request_id
         self.body = body
 
@@ -84,6 +89,28 @@ class ConiferKeySpendCapError(ConiferError):
 
 class ConiferBadRequestError(ConiferError):
     """400."""
+
+
+class ConiferCapabilityError(ConiferBadRequestError):
+    """400: the MODEL cannot serve this request's shape.
+
+    Its published catalog ``caps`` omit a capability the request uses, or a
+    declared ceiling is exceeded. The gateway refuses BEFORE any charge, with
+    ``code: unsupported_parameter`` (or ``invalid_value``) and ``param`` naming
+    the field: ``messages`` when the request carries images a no-vision model
+    cannot take, ``tools``/``tool_choice`` on a no-tool model, ``tools`` again
+    for an over-``max_tools`` array.
+
+    This is the ONE 400 a different model can fix — a statement about the
+    PAIRING of this request with this model, not about the bytes. Catch it to
+    re-route to a capable model (e.g. an image turn from ``deepseek-v4-flash``
+    to ``glm-5.3-flash``). Born from the 2026-08-29 OpenTag incident: an image
+    turn on a text-only model came back as provider-prose upstream errors and
+    was retried to death; now it is this class on the first try.
+    """
+
+    #: A different model may serve these bytes; the same model never will.
+    model_switchable = True
 
 
 class ConiferModelNotFoundError(ConiferError):
@@ -240,6 +267,7 @@ def error_from(status: int, body: Any, headers: Mapping[str, str]) -> ConiferErr
     envelope = envelope if isinstance(envelope, dict) else {}
     type_ = envelope.get("type") if isinstance(envelope.get("type"), str) else f"http_{status}"
     code = envelope.get("code") if isinstance(envelope.get("code"), str) else None
+    param = envelope.get("param") if isinstance(envelope.get("param"), str) else None
     message = (
         envelope.get("message")
         if isinstance(envelope.get("message"), str)
@@ -251,6 +279,7 @@ def error_from(status: int, body: Any, headers: Mapping[str, str]) -> ConiferErr
         "status": status,
         "type": type_,
         "code": code,
+        "param": param,
         "message": message,
         "request_id": request_id,
         "body": body,
@@ -270,6 +299,13 @@ def error_from(status: int, body: Any, headers: Mapping[str, str]) -> ConiferErr
             return ConiferAuthError(**kwargs)
         if code == "model_not_found" or status == 404:
             return ConiferModelNotFoundError(**kwargs)
+        # A capability refusal is a statement about THIS model, not these
+        # bytes: ``unsupported_parameter`` = the published caps do not cover
+        # the request (images on a no-vision model, tools on a no-tool model);
+        # ``invalid_value`` on ``tools`` = the array exceeds ``max_tools``.
+        # Both are exactly what a fallback to a more capable model fixes.
+        if code == "unsupported_parameter" or (code == "invalid_value" and param == "tools"):
+            return ConiferCapabilityError(**kwargs)
         return ConiferBadRequestError(**kwargs)
     if type_ in ("rate_limit_error", "rate_limited"):
         return _rate_limited()

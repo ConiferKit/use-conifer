@@ -1,0 +1,23 @@
+{
+  "name": "conifer-agents",
+  "version": "0.1.0",
+  "description": "Client-side agent orchestration for the Conifer gateway: agents, subagents, portable plugins. Early stage.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": { "types": "./dist/src/index.d.ts", "default": "./dist/src/index.js" }
+  },
+  "bin": { "conifer-agents": "./dist/bin/conifer-agents.js" },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "node scripts/run-tests.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": { "node": ">=22.6" },
+  "dependencies": {
+    "conifer-sdk": "file:..",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": { "@types/node": "^22.20.1", "typescript": "^5.6.0" }
+}

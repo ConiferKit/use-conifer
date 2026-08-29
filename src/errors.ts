@@ -20,6 +20,12 @@ export interface ConiferErrorInit {
    * it is the field LangChain, LiteLLM and openai-python already branch on.
    */
   code?: string;
+  /**
+   * The OpenAI-compatible `error.param` — the request field the refusal is
+   * about (`tools`, `tool_choice`, `messages`, `max_tokens`, `model`).
+   * Present on field-scoped refusals only.
+   */
+  param?: string;
   requestId?: string;
   /** Raw envelope, so nothing the gateway said is lost behind our class names. */
   body?: unknown;
@@ -30,6 +36,8 @@ export class ConiferError extends Error {
   readonly type: string;
   /** The OpenAI-compatible `error.code`. See {@link ConiferErrorInit.code}. */
   readonly code?: string;
+  /** The OpenAI-compatible `error.param`. See {@link ConiferErrorInit.param}. */
+  readonly param?: string;
   readonly requestId?: string;
   readonly body?: unknown;
   /**
@@ -46,6 +54,7 @@ export class ConiferError extends Error {
     this.status = init.status;
     this.type = init.type;
     this.code = init.code;
+    this.param = init.param;
     this.requestId = init.requestId;
     this.body = init.body;
   }
@@ -99,6 +108,29 @@ export class ConiferCostCeilingError extends ConiferError {
 export class ConiferKeySpendCapError extends ConiferError {}
 
 export class ConiferBadRequestError extends ConiferError {}
+
+/**
+ * 400: the MODEL cannot serve this request's shape — its published catalog
+ * `caps` omit a capability the request uses, or a declared ceiling is
+ * exceeded. The gateway refuses BEFORE any charge, with
+ * `code: unsupported_parameter` (or `invalid_value`) and `param` naming the
+ * field: `messages` when the request carries images a no-vision model cannot
+ * take, `tools`/`tool_choice` on a no-tool model, `tools` again for an
+ * over-`max_tools` array.
+ *
+ * This is the ONE 400 a different model can fix. Every other 400 refuses the
+ * same bytes on every model alike — but this one is a statement about the
+ * PAIRING of this request with this model, which is why the `chat()` fallback
+ * chain advances on it (see `resolveChain`) while all other 4xx still throw.
+ * Born from the 2026-08-29 OpenTag incident: an image turn on a text-only
+ * model came back as provider-prose upstream errors and was retried to death;
+ * now it is this class on the first try, and a chain with a vision member
+ * absorbs it without the end user ever seeing an error.
+ */
+export class ConiferCapabilityError extends ConiferBadRequestError {
+  /** A different model may serve these bytes; the same model never will. */
+  readonly modelSwitchable = true;
+}
 /**
  * 404. NOTE: the gateway deliberately cannot distinguish "no such model" from
  * "a model you may not see" — both are absent from your catalog listing and
@@ -255,13 +287,14 @@ export function errorFrom(
       : undefined;
   const type = typeof envelope?.type === "string" ? envelope.type : `http_${status}`;
   const code = typeof envelope?.code === "string" ? envelope.code : undefined;
+  const param = typeof envelope?.param === "string" ? envelope.param : undefined;
   const message =
     typeof envelope?.message === "string"
       ? envelope.message
       : `the gateway refused with HTTP ${status}`;
   const requestId =
     headers.get("x-conifer-request-id") ?? headers.get("x-request-id") ?? undefined;
-  const init: ConiferErrorInit = { status, type, code, message, requestId, body };
+  const init: ConiferErrorInit = { status, type, code, param, message, requestId, body };
 
   // The industry-vocabulary types, resolved by code then status.
   if (type === "invalid_request_error") {
@@ -270,6 +303,14 @@ export function errorFrom(
     }
     if (code === "model_not_found" || status === 404) {
       return new ConiferModelNotFoundError(init);
+    }
+    // A capability refusal is a statement about THIS model, not these bytes:
+    // `unsupported_parameter` = the caps the model published do not cover the
+    // request (no-vision model sent images, no-tool model sent tools);
+    // `invalid_value` on `tools` = the array exceeds the seat's `max_tools`.
+    // Both are exactly what a fallback to a more capable model fixes.
+    if (code === "unsupported_parameter" || (code === "invalid_value" && param === "tools")) {
+      return new ConiferCapabilityError(init);
     }
     return new ConiferBadRequestError(init);
   }

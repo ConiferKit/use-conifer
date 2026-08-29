@@ -1,6 +1,6 @@
 {
   "name": "@conifer/sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Deprecated alias for conifer-sdk. Install conifer-sdk instead; this package only re-exports it.",
   "keywords": [
     "conifer",
@@ -28,7 +28,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "conifer-sdk": "0.1.1"
+    "conifer-sdk": "0.1.2"
   },
   "engines": {
     "node": ">=18"

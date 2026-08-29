@@ -23,11 +23,6 @@ _OPENROUTER_REFUSALS: Dict[str, str] = {
         "for the admitted model itself, by price and health, and no client can override "
         "it. Remove the block, or use max_cost_nano_usd if the goal was cost control."
     ),
-    "route": (
-        '`route: "fallback"` is server-side failover. Conifer admits exactly the model '
-        "you name; use `models` with allow_client_fallback=True for an explicit "
-        "client-side chain."
-    ),
     "plugins": (
         "OpenRouter plugins (web, file-parser, response-healing, context-compression) run "
         "inside their gateway. Conifer has no equivalent, so this request would silently "
@@ -113,6 +108,25 @@ def from_openrouter(
             )
         extra_body[knob] = request[knob]
 
+    # `route: "fallback"` asks the GATEWAY to fail over, which Conifer now does
+    # (x-conifer-fallback-models). It only means something with a list to walk,
+    # and any other value is a routing mode we do not have.
+    route = request.get("route")
+    if route is not None:
+        if route != "fallback":
+            raise ConiferPortabilityError(
+                "route",
+                f"`route: {route!r}` is not a routing mode Conifer has. Only "
+                '`"fallback"` maps, onto the gateway-side fallback chain.',
+            )
+        if not request.get("models"):
+            raise ConiferPortabilityError(
+                "route",
+                '`route: "fallback"` asks for server-side failover but names nothing to '
+                "fail over TO. On OpenRouter that used an account-level list; Conifer has "
+                "no account default, so send `models` with the substitutes you accept.",
+            )
+
     return ChatRequest(
         model=request["model"],
         messages=list(request["messages"]),
@@ -127,8 +141,18 @@ def from_openrouter(
         # `user` is OpenRouter's abuse-detection identifier; the nearest honest
         # Conifer equivalent is caller attribution.
         client=request.get("user"),
-        fallback_models=request.get("models"),
-        allow_client_fallback=allow_client_fallback,
+        # `models` is OpenRouter's chain. With `route: "fallback"` it is a
+        # GATEWAY-side chain (one request, one bill) — the honest equivalent,
+        # needing no client opt-in because no extra request is implied.
+        # Without it, `models` keeps its historical meaning: an opt-in CLIENT
+        # chain of separately billed turns.
+        server_fallback_models=(
+            request.get("models") if request.get("route") == "fallback" else None
+        ),
+        fallback_models=(None if request.get("route") == "fallback" else request.get("models")),
+        allow_client_fallback=(
+            False if request.get("route") == "fallback" else allow_client_fallback
+        ),
         extra_body=extra_body,
     )
 
@@ -272,9 +296,10 @@ def from_helicone_headers(
         )
 
     if "helicone-fallbacks" in lowered:
-        fields["fallback_models"] = parse_fallbacks(lowered["helicone-fallbacks"])
-        # Deliberately NOT auto-enabling allow_client_fallback: the caller has to
-        # accept that each member is a separate billed request.
+        # Maps to the GATEWAY-side chain (x-conifer-fallback-models), which is
+        # the honest equivalent of what Helicone did: the proxy — not your app
+        # — walked the chain, on one logical request.
+        fields["server_fallback_models"] = parse_fallbacks(lowered["helicone-fallbacks"])
 
     if "helicone-ratelimit-policy" in lowered:
         fields["max_cost_nano_usd"] = ceiling_from_policy(lowered["helicone-ratelimit-policy"])

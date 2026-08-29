@@ -12,4 +12,4 @@
 // pyproject.toml. Releasing therefore cannot silently ship a lying version.
 //
 // Bump this in the same commit as package.json and python/pyproject.toml.
-export const VERSION = "0.1.1";
+export const VERSION = "0.1.2";

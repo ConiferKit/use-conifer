@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import {
   Conifer,
+  ConiferCapabilityError,
   ConiferConflictError,
   ConiferCostCeilingError,
   ConiferModelNotFoundError,
@@ -25,6 +26,7 @@ import {
   readReceipt,
   resolveBaseUrl,
   resolveChain,
+  serverFallbackHeader,
   textOf,
   withCost,
 } from "../src/index.ts";
@@ -175,6 +177,59 @@ test("a 4xx the gateway authored is never retried", async () => {
   assert.equal(calls.length, 1, "a 400 must not be retried");
 });
 
+/**
+ * THE IMAGE-FALLBACK PATH (the 2026-08-29 OpenTag incident, closed end to
+ * end): the gateway refuses an image turn on a no-vision model pre-flight
+ * with `code: unsupported_parameter` / `param: messages`, the SDK maps it to
+ * `ConiferCapabilityError`, and a chain with a vision member absorbs it —
+ * the end user never sees an error, and nothing was billed for the refusal.
+ */
+test("a capability refusal advances the chain to a member that can serve it", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse(
+      {
+        error: {
+          type: "invalid_request_error",
+          code: "unsupported_parameter",
+          param: "messages",
+          message: "this model does not support image input",
+        },
+      },
+      { status: 400 },
+    ),
+    jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS }),
+  ]);
+  const completion = await client(fetchImpl).chat({
+    model: "deepseek-v4-flash",
+    messages: [],
+    fallbackModels: ["glm-5.3-flash"],
+    allowClientFallback: true,
+  });
+  assert.equal(completion.fallbackIndex, 1, "served by the vision member");
+  assert.equal(JSON.parse(calls[1]!.init.body).model, "glm-5.3-flash");
+});
+
+test("a capability refusal with no chain still throws the typed class", async () => {
+  const { fetchImpl } = stubFetch([
+    jsonResponse(
+      {
+        error: {
+          type: "invalid_request_error",
+          code: "unsupported_parameter",
+          param: "messages",
+          message: "this model does not support image input",
+        },
+      },
+      { status: 400 },
+    ),
+  ]);
+  const error = await client(fetchImpl)
+    .chat({ model: "deepseek-v4-flash", messages: [] })
+    .catch((e) => e);
+  assert.ok(error instanceof ConiferCapabilityError, `got ${error.constructor.name}`);
+  assert.equal(error.param, "messages");
+});
+
 test("model_not_found does not advance a fallback chain", async () => {
   const { calls, fetchImpl } = stubFetch([
     jsonResponse({ error: { type: "model_not_found", message: "no" } }, { status: 404 }),
@@ -227,6 +282,134 @@ test("a stream always asks for the terminal usage chunk", () => {
   const body = chatBody({ model: "m", messages: [] }, true);
   assert.equal(body.stream, true);
   assert.deepEqual(body.stream_options, { include_usage: true });
+});
+
+// ── serverFallbackModels: the GATEWAY-side chain ───────────────────────────
+
+test("serverFallbackModels rides one header, in the caller's order", () => {
+  const headers = chatHeaders(
+    { model: "deepseek-v4", messages: [], serverFallbackModels: ["gpt-5.5", "claude-fable-5"] },
+    "k",
+  );
+  assert.equal(headers["x-conifer-fallback-models"], "gpt-5.5,claude-fable-5");
+});
+
+test("a server chain is ONE request, unlike the client chain", async () => {
+  // The whole point of the server chain: the gateway walks it, so the SDK
+  // makes exactly one call even when a fallback ends up serving.
+  const { calls, fetchImpl } = stubFetch([jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS })]);
+  await client(fetchImpl).chat({
+    model: "deepseek-v4",
+    messages: [],
+    serverFallbackModels: ["gpt-5.5"],
+  });
+  assert.equal(calls.length, 1, "no client-side second request");
+  assert.equal(calls[0]!.init.headers["x-conifer-fallback-models"], "gpt-5.5");
+  assert.equal(
+    JSON.parse(calls[0]!.init.body).model,
+    "deepseek-v4",
+    "the body still names the model actually requested",
+  );
+});
+
+test("no serverFallbackModels means no header at all", () => {
+  const headers = chatHeaders({ model: "m", messages: [] }, "k");
+  assert.equal(
+    "x-conifer-fallback-models" in headers,
+    false,
+    "absent must stay absent — an empty chain is not a declared one",
+  );
+});
+
+test("an unsendable server chain throws, rather than arming nothing", () => {
+  // A member that cannot survive the header intact. The gateway refuses these
+  // too, so throwing at the call site just moves the error somewhere useful.
+  for (const [models, why] of [
+    [["  "], "a blank member names no model"],
+    [["a,b"], "a comma cannot survive the header's own separator"],
+    [["café"], "a non-ASCII byte cannot ride a header value"],
+    [["a", "b", "c", "d"], "over the gateway's 3-member cap"],
+  ] as [string[], string][]) {
+    assert.throws(
+      () => serverFallbackHeader(models, "deepseek-v4"),
+      ConiferPortabilityError,
+      `${JSON.stringify(models)} — ${why}`,
+    );
+  }
+});
+
+test("the server chain is de-duplicated exactly as the gateway does it", () => {
+  // The gateway DROPS duplicates and the primary's own id (harmless, not
+  // wrong) rather than refusing. Throwing here would make the SDK stricter
+  // than the wire and refuse chains the gateway would have served.
+  assert.equal(serverFallbackHeader([" gpt-5.5 "], "deepseek-v4"), "gpt-5.5", "trimmed");
+  assert.equal(
+    serverFallbackHeader(["gpt-5.5", "gpt-5.5"], "deepseek-v4"),
+    "gpt-5.5",
+    "a duplicate is dropped, not refused",
+  );
+  assert.equal(
+    serverFallbackHeader(["deepseek-v4", "gpt-5.5"], "deepseek-v4"),
+    "gpt-5.5",
+    "the requested model is dropped from its own fallback list",
+  );
+  assert.equal(
+    serverFallbackHeader(["deepseek-v4"], "deepseek-v4"),
+    undefined,
+    "nothing survives ⇒ no header at all, never an empty one",
+  );
+  // The cap counts SURVIVORS, as the gateway does: four spellings of three
+  // distinct models is a legal chain.
+  assert.equal(
+    serverFallbackHeader(["a", "b", "c", "a"], "deepseek-v4"),
+    "a,b,c",
+    "the cap is applied after de-duplication",
+  );
+});
+
+test("a chain that de-duplicates away sends no header", async () => {
+  const { calls, fetchImpl } = stubFetch([jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS })]);
+  await client(fetchImpl).chat({
+    model: "deepseek-v4",
+    messages: [],
+    serverFallbackModels: ["deepseek-v4"],
+  });
+  assert.equal(
+    "x-conifer-fallback-models" in calls[0]!.init.headers,
+    false,
+    "an empty header value is a 400 at the gateway; send none instead",
+  );
+});
+
+test("a server chain cannot ride a deferred job", async () => {
+  const { fetchImpl } = stubFetch([]);
+  await assert.rejects(
+    () =>
+      client(fetchImpl).defer({
+        model: "m",
+        messages: [],
+        serverFallbackModels: ["b"],
+      }),
+    ConiferPortabilityError,
+  );
+});
+
+test("a server chain DOES ride a stream, unlike the client chain", async () => {
+  // The client chain cannot: the first token commits the turn. The gateway
+  // chain can, because it fails over BEFORE the first frame — so this must
+  // not inherit the client chain's refusal.
+  const { calls, fetchImpl } = stubFetch([
+    new Response("data: [DONE]\n\n", {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }),
+  ]);
+  await client(fetchImpl).stream({
+    model: "deepseek-v4",
+    messages: [],
+    serverFallbackModels: ["gpt-5.5"],
+  });
+  assert.equal(calls[0]!.init.headers["x-conifer-fallback-models"], "gpt-5.5");
 });
 
 test("a fallback chain cannot be attached to a stream", async () => {

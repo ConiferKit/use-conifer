@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://conifer.dev/contracts/plugin-manifest.schema.json",
+  "title": "Conifer Plugin Manifest",
+  "description": "Portable manifest describing a Conifer agent plugin: MCP servers, optional code hooks, and agent instructions.",
+  "type": "object",
+  "required": ["name", "version"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Plugin identifier: lowercase, digits, and hyphens; must start with a letter."
+    },
+    "version": {
+      "type": "string",
+      "description": "Plugin version string, e.g. semver."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable summary of what the plugin provides."
+    },
+    "mcp": {
+      "type": "array",
+      "description": "MCP servers this plugin connects to.",
+      "items": { "$ref": "#/$defs/mcpServerSpec" }
+    },
+    "hooks": {
+      "type": "object",
+      "$comment": "Non-portable: hooks reference local code and do not transfer to other harnesses or gateway hosting.",
+      "description": "Map of hook name to a local module reference, e.g. \"preToolCall\": \"./hooks.js#audit\".",
+      "additionalProperties": { "type": "string" }
+    },
+    "instructions": {
+      "type": "string",
+      "description": "Instructions appended to the system prompt of agents that load this plugin."
+    }
+  },
+  "$defs": {
+    "mcpServerSpec": {
+      "type": "object",
+      "required": ["name", "transport"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "Server name; namespaces the tools it provides." },
+        "transport": { "enum": ["stdio", "http"], "description": "How to reach the MCP server." },
+        "command": { "type": "string", "description": "Executable to spawn (stdio transport)." },
+        "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments for the command (stdio transport)." },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Environment variables for the spawned process. Values may interpolate ${VAR} from the host environment."
+        },
+        "url": { "type": "string", "description": "Server URL (http transport). May interpolate ${VAR}." },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "HTTP headers (http transport). Values may interpolate ${VAR}."
+        },
+        "toolAllowlist": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "If present, only these tools from the server are exposed to the agent."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "transport": { "const": "stdio" } } },
+          "then": { "required": ["command"] }
+        },
+        {
+          "if": { "properties": { "transport": { "const": "http" } } },
+          "then": { "required": ["url"] }
+        }
+      ]
+    }
+  }
+}
