@@ -12,6 +12,25 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 
 ## [Unreleased]
 
+### Added
+
+- `ConiferCapabilityError` (TS and Python), a `ConiferBadRequestError` subclass
+  raised when the gateway refuses a request the MODEL cannot serve: image
+  content on a model without the `vision` cap, tools on a no-tool model, or an
+  over-`max_tools` array. It carries the new `param` field (`messages`,
+  `tools`, `tool_choice`) and `modelSwitchable = true` — the one 400 a
+  different model can fix. Nothing is billed for the refusal.
+- `error.param` is now read from the gateway envelope and exposed on every
+  error class (`param` in TS, `.param` in Python).
+
+### Changed
+
+- The `chat()` client-side fallback chain (TS) now advances on a
+  `ConiferCapabilityError` in addition to retryable failures: a chain like
+  `{model: "deepseek-v4-flash", fallbackModels: ["glm-5.3-flash"],
+  allowClientFallback: true}` absorbs an image turn the primary cannot take,
+  so the end user never sees the error. All other 4xx still throw immediately.
+
 ## [0.1.1] - 2026-08-28
 
 ### Added
