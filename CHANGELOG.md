@@ -28,14 +28,23 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
   advance on classes a client never gets to judge — including the 4xx a
   mis-configured model surface returns, which is the failure this exists for.
 
-  Every member is validated at the call site and admitted by the gateway like a
-  primary before anything is spent: an unknown model, a duplicate, a
-  self-reference, or more than three members is refused by name rather than
-  silently dropped. A fallback you believe is armed and is not is worse than an
-  error. A served fallback is disclosed, never silent: the receipt's
-  `effectiveModel` names the member that answered and `reason` reads
-  `provider_failover` (the gateway reuses that reason code rather than minting
-  a new one).
+  Every member is admitted by the gateway like a primary before anything is
+  spent, and an unknown model is refused BY NAME rather than silently skipped:
+  a fallback you believe is armed and is not is worse than an error. The SDK
+  mirrors the gateway's own rules rather than inventing stricter ones —
+  duplicates and the model you already requested are dropped, at most three
+  members survive, and a member that cannot ride the header at all (blank, or
+  carrying a comma or a non-ASCII byte) throws at the call site. When nothing
+  survives, no header is sent.
+
+  A served fallback is disclosed, never silent: the receipt's `effectiveModel`
+  names the member that answered and `reason` reads `provider_failover` (the
+  gateway reuses that reason code rather than minting a new one). On a STREAMED
+  turn the handshake headers are written before the failover resolves, so
+  `reason` reads `as_requested` there while `effectiveModel` is still correct —
+  read the model, not the reason, to detect a substitution.
+
+  Requires a gateway carrying `x-conifer-fallback-models` (ConiferKit/typhoon#356).
 
 ### Changed
 
