@@ -136,6 +136,26 @@ class ChatTests(unittest.TestCase):
         client(transport).chat(ChatRequest(model="m", messages=[]))
         self.assertTrue(calls[0]["headers"]["idempotency-key"].startswith("idem-"))
 
+    def test_every_request_names_itself_in_the_user_agent(self):
+        # Python's default "Python-urllib/3.x" is on Cloudflare's stock
+        # browser-signature ban list; on 2026-08-29 the api.conifer.build zone
+        # served every such request a 1010 403 at the EDGE (all 18 live-QA
+        # checks failed before reaching the gateway). Naming the SDK is the
+        # fix, so it is pinned. A caller's own default_headers still win.
+        from conifer_sdk.client import USER_AGENT
+        import conifer_sdk
+
+        self.assertEqual(USER_AGENT, f"conifer-sdk-python/{conifer_sdk.__version__}")
+        calls, transport = scripted((200, {}, COMPLETION))
+        client(transport).chat(ChatRequest(model="m", messages=[]))
+        self.assertEqual(calls[0]["headers"]["user-agent"], USER_AGENT)
+
+        calls, transport = scripted((200, {}, COMPLETION))
+        Conifer(
+            api_key="k", transport=transport, default_headers={"user-agent": "mine/1"}
+        ).chat(ChatRequest(model="m", messages=[]))
+        self.assertEqual(calls[0]["headers"]["user-agent"], "mine/1")
+
     def test_a_retry_reuses_the_same_idempotency_key(self):
         calls, transport = scripted(
             (503, {}, {"error": {"type": "service_unavailable", "message": "down"}}),

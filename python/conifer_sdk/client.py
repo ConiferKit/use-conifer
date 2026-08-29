@@ -18,6 +18,7 @@ import urllib.request
 import uuid
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from . import __version__  # noqa: E402  (single source: __init__)
 from .errors import (
     ConiferConflictError,
     ConiferConnectionError,
@@ -139,6 +140,16 @@ def _urllib_transport(
         )
 
 
+#: The User-Agent every request carries unless the caller overrides it via
+#: ``default_headers``. Python's own default ("Python-urllib/3.x") is on
+#: Cloudflare's stock browser-signature ban list, and on 2026-08-29 the
+#: api.conifer.build zone served every such request a 1010 "browser signature
+#: banned" 403 before it reached the gateway — an SDK that is indistinguishable
+#: from generic urllib traffic inherits every edge rule aimed at scrapers.
+#: Naming ourselves is both the fix and honest telemetry.
+USER_AGENT = f"conifer-sdk-python/{__version__}"
+
+
 class Conifer:
     """The Conifer gateway client."""
 
@@ -185,7 +196,8 @@ class Conifer:
     ) -> Tuple[Any, Dict[str, str]]:
         """One request, with the narrow retry rule."""
         url = f"{self.base_url}{path}"
-        merged = dict(self.default_headers)
+        merged = {"user-agent": USER_AGENT}
+        merged.update(self.default_headers)
         merged.update(headers or {})
         merged["authorization"] = f"Bearer {self.api_key}"
         merged["accept"] = "application/json"
@@ -290,7 +302,8 @@ class Conifer:
         """The raw SSE response. Separate from :meth:`request` on purpose: a
         stream is not retryable (bytes already delivered cannot be un-delivered)
         and must not be buffered."""
-        merged = dict(self.default_headers)
+        merged = {"user-agent": USER_AGENT}
+        merged.update(self.default_headers)
         merged.update(headers)
         merged["authorization"] = f"Bearer {self.api_key}"
         merged["content-type"] = "application/json"

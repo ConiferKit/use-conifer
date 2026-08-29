@@ -25,6 +25,15 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 - `error.param` is now read from the gateway envelope and exposed on every
   error class (`param` in TS, `.param` in Python).
 
+### Fixed
+
+- The Python SDK now sends `User-Agent: conifer-sdk-python/<version>` instead
+  of inheriting Python's default `Python-urllib/3.x`. Cloudflare's stock
+  browser-signature rules ban that default at the edge (error 1010), which on
+  2026-08-29 blocked every Python request to api.conifer.build with a 403
+  before it reached the gateway. A `default_headers={"user-agent": ...}` you
+  pass still wins.
+
 ### Changed
 
 - The `chat()` client-side fallback chain (TS) now advances on a
