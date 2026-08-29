@@ -150,6 +150,23 @@ def _urllib_transport(
 USER_AGENT = f"conifer-sdk-python/{__version__}"
 
 
+def _with_user_agent(*header_maps: Mapping[str, str]) -> Dict[str, str]:
+    """Merge header maps over the SDK's default User-Agent, case-insensitively.
+
+    HTTP header names are case-insensitive but ``dict`` keys are not, and
+    urllib sends every entry: seeding ``{"user-agent": ...}`` and updating with
+    a caller's ``{"User-Agent": ...}`` would keep BOTH spellings and emit a
+    duplicated header (Greptile P1 on the PR that added the UA). So the
+    default is applied only when NO map, under ANY casing, already names one.
+    """
+    merged: Dict[str, str] = {}
+    for headers in header_maps:
+        merged.update(headers)
+    if not any(key.lower() == "user-agent" for key in merged):
+        merged["user-agent"] = USER_AGENT
+    return merged
+
+
 class Conifer:
     """The Conifer gateway client."""
 
@@ -196,9 +213,7 @@ class Conifer:
     ) -> Tuple[Any, Dict[str, str]]:
         """One request, with the narrow retry rule."""
         url = f"{self.base_url}{path}"
-        merged = {"user-agent": USER_AGENT}
-        merged.update(self.default_headers)
-        merged.update(headers or {})
+        merged = _with_user_agent(self.default_headers, headers or {})
         merged["authorization"] = f"Bearer {self.api_key}"
         merged["accept"] = "application/json"
         payload: Optional[bytes] = None
@@ -302,9 +317,7 @@ class Conifer:
         """The raw SSE response. Separate from :meth:`request` on purpose: a
         stream is not retryable (bytes already delivered cannot be un-delivered)
         and must not be buffered."""
-        merged = {"user-agent": USER_AGENT}
-        merged.update(self.default_headers)
-        merged.update(headers)
+        merged = _with_user_agent(self.default_headers, headers)
         merged["authorization"] = f"Bearer {self.api_key}"
         merged["content-type"] = "application/json"
         url = f"{self.base_url}/v1/chat/completions"

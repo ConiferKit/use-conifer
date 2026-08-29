@@ -156,6 +156,19 @@ class ChatTests(unittest.TestCase):
         ).chat(ChatRequest(model="m", messages=[]))
         self.assertEqual(calls[0]["headers"]["user-agent"], "mine/1")
 
+        # The override is honored under ANY casing, and never duplicated:
+        # header names are case-insensitive but dict keys are not, so a
+        # caller's conventional "User-Agent" must suppress the SDK default
+        # rather than ride alongside it (Greptile P1 on this PR).
+        calls, transport = scripted((200, {}, COMPLETION))
+        Conifer(
+            api_key="k", transport=transport, default_headers={"User-Agent": "Mine/2"}
+        ).chat(ChatRequest(model="m", messages=[]))
+        ua_entries = {
+            k: v for k, v in calls[0]["headers"].items() if k.lower() == "user-agent"
+        }
+        self.assertEqual(ua_entries, {"User-Agent": "Mine/2"})
+
     def test_a_retry_reuses_the_same_idempotency_key(self):
         calls, transport = scripted(
             (503, {}, {"error": {"type": "service_unavailable", "message": "down"}}),
