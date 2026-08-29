@@ -694,35 +694,28 @@ export const MAX_SERVER_FALLBACK_MODELS = 3;
 /**
  * `serverFallbackModels` -> the `x-conifer-fallback-models` header value.
  *
- * Every rule the gateway enforces is checked HERE too, and throws rather than
- * being cleaned up: silently dropping a bad member would leave the caller
- * believing a fallback is armed when it is not, which is the precise failure
- * this feature exists to prevent.
+ * Mirrors the GATEWAY's own admission rules, so the SDK never refuses a chain
+ * the gateway would have served, and never sends one it would reject:
+ *
+ * - a malformed member (blank, comma-bearing, non-ASCII) THROWS: it cannot
+ *   survive the header intact, so sending it would arm nothing;
+ * - a duplicate, or the requested model itself, is DROPPED — the gateway
+ *   treats these as harmless rather than wrong, and refusing here would make
+ *   the SDK stricter than the wire;
+ * - the 3-member cap is checked AFTER that de-duplication, exactly as the
+ *   gateway counts it;
+ * - `undefined` when nothing survives, so the caller omits the header rather
+ *   than sending an empty one.
+ *
+ * What is never done quietly is dropping a member that WOULD have changed the
+ * outcome: an unknown model still refuses, at the gateway, by name.
  */
-export function serverFallbackHeader(models: string[], primary: string): string {
+export function serverFallbackHeader(models: string[], primary: string): string | undefined {
   const trimmed = models.map((m) => m.trim());
-  if (trimmed.length === 0 || trimmed.some((m) => m === "")) {
+  if (trimmed.some((m) => m === "")) {
     throw new ConiferPortabilityError(
       "serverFallbackModels",
-      "a fallback chain must name at least one model, and no member may be empty. Drop the field entirely if you do not want fallbacks.",
-    );
-  }
-  if (trimmed.length > MAX_SERVER_FALLBACK_MODELS) {
-    throw new ConiferPortabilityError(
-      "serverFallbackModels",
-      `at most ${MAX_SERVER_FALLBACK_MODELS} fallback models are accepted per request; the gateway refuses a longer chain rather than silently trimming it.`,
-    );
-  }
-  if (new Set(trimmed).size !== trimmed.length) {
-    throw new ConiferPortabilityError(
-      "serverFallbackModels",
-      "a duplicate fallback model is a mistake, not a chain: the second copy could only ever repeat the first one's failure.",
-    );
-  }
-  if (trimmed.includes(primary.trim())) {
-    throw new ConiferPortabilityError(
-      "serverFallbackModels",
-      "a fallback member names the model you already requested. Retrying the same model cannot fix what it just refused; name a different one.",
+      "a fallback member is empty. The gateway refuses an empty entry rather than guessing what was meant; drop it, or drop the field entirely if you do not want fallbacks.",
     );
   }
   // A comma is the header's separator, so a member containing one could not
@@ -734,7 +727,20 @@ export function serverFallbackHeader(models: string[], primary: string): string 
       `\`${bad}\` is not a usable model id here: the header is a comma-separated ASCII list, so a member carrying a comma or a non-ASCII byte cannot be sent unambiguously.`,
     );
   }
-  return trimmed.join(",");
+  // De-duplicate and drop the primary, as the gateway does, THEN apply the
+  // cap — a list of three distinct survivors is legal however it was spelled.
+  const chain: string[] = [];
+  for (const model of trimmed) {
+    if (model === primary.trim() || chain.includes(model)) continue;
+    chain.push(model);
+  }
+  if (chain.length > MAX_SERVER_FALLBACK_MODELS) {
+    throw new ConiferPortabilityError(
+      "serverFallbackModels",
+      `at most ${MAX_SERVER_FALLBACK_MODELS} fallback models are accepted per request; the gateway refuses a longer chain rather than silently trimming it.`,
+    );
+  }
+  return chain.length === 0 ? undefined : chain.join(",");
 }
 
 /** The ordered model chain for one logical turn. */
@@ -802,10 +808,10 @@ export function chatHeaders(request: ChatRequest, idempotencyKey: string): Recor
   // refused remotely, so the mistake surfaces at the call site with the
   // reason attached — and never as a chain the caller believes is armed.
   if (request.serverFallbackModels !== undefined) {
-    headers["x-conifer-fallback-models"] = serverFallbackHeader(
-      request.serverFallbackModels,
-      request.model,
-    );
+    const chain = serverFallbackHeader(request.serverFallbackModels, request.model);
+    // Nothing survived de-duplication (e.g. the only member was the requested
+    // model). Send no header rather than an empty one the gateway would 400.
+    if (chain !== undefined) headers["x-conifer-fallback-models"] = chain;
   }
   // `x-request-id` is sent too, so a proxy or log shipper between you and the
   // gateway still sees the id. The GATEWAY itself reads `idempotency-key`

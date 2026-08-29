@@ -51,7 +51,11 @@ export interface FallbackOptions {
    *
    * A served fallback is never silent: `completion.receipt.effectiveModel`
    * names the model that answered and `receipt.reason` reads
-   * `caller_fallback`.
+   * `provider_failover` (the gateway reuses that code rather than minting a
+   * new one — the substitute is disclosed by `effectiveModel`). On a STREAMED
+   * turn the handshake headers are written before the failover resolves, so
+   * `reason` reads `as_requested` there while `effectiveModel` is still
+   * correct — read the model, not the reason, to detect a substitution.
    *
    * Not available with `defer`, on the BYOK lane, or for composed models
    * (each refuses loudly).

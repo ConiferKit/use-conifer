@@ -34,7 +34,8 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
   silently dropped. A fallback you believe is armed and is not is worse than an
   error. A served fallback is disclosed, never silent: the receipt's
   `effectiveModel` names the member that answered and `reason` reads
-  `caller_fallback`.
+  `provider_failover` (the gateway reuses that reason code rather than minting
+  a new one).
 
 ### Changed
 

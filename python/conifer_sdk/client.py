@@ -618,38 +618,32 @@ class Conifer:
 MAX_SERVER_FALLBACK_MODELS = 3
 
 
-def server_fallback_header(models: List[str], primary: str) -> str:
+def server_fallback_header(models: List[str], primary: str) -> Optional[str]:
     """``server_fallback_models`` -> the ``x-conifer-fallback-models`` value.
 
-    Every rule the gateway enforces is checked HERE too, and raises rather
-    than being cleaned up: silently dropping a bad member would leave the
-    caller believing a fallback is armed when it is not, which is the precise
-    failure this feature exists to prevent.
+    Mirrors the GATEWAY's own admission rules, so the SDK never refuses a
+    chain the gateway would have served, and never sends one it would reject:
+
+    - a malformed member (blank, comma-bearing, non-ASCII) RAISES: it cannot
+      survive the header intact, so sending it would arm nothing;
+    - a duplicate, or the requested model itself, is DROPPED — the gateway
+      treats these as harmless rather than wrong, and refusing here would make
+      the SDK stricter than the wire;
+    - the 3-member cap is checked AFTER that de-duplication, as the gateway
+      counts it;
+    - ``None`` when nothing survives, so the caller omits the header rather
+      than sending an empty one.
+
+    What is never done quietly is dropping a member that WOULD have changed
+    the outcome: an unknown model still refuses, at the gateway, by name.
     """
     trimmed = [m.strip() for m in models]
-    if not trimmed or any(m == "" for m in trimmed):
+    if any(m == "" for m in trimmed):
         raise ConiferPortabilityError(
             "server_fallback_models",
-            "a fallback chain must name at least one model, and no member may be empty. "
-            "Drop the field entirely if you do not want fallbacks.",
-        )
-    if len(trimmed) > MAX_SERVER_FALLBACK_MODELS:
-        raise ConiferPortabilityError(
-            "server_fallback_models",
-            f"at most {MAX_SERVER_FALLBACK_MODELS} fallback models are accepted per "
-            "request; the gateway refuses a longer chain rather than silently trimming it.",
-        )
-    if len(set(trimmed)) != len(trimmed):
-        raise ConiferPortabilityError(
-            "server_fallback_models",
-            "a duplicate fallback model is a mistake, not a chain: the second copy could "
-            "only ever repeat the first one's failure.",
-        )
-    if primary.strip() in trimmed:
-        raise ConiferPortabilityError(
-            "server_fallback_models",
-            "a fallback member names the model you already requested. Retrying the same "
-            "model cannot fix what it just refused; name a different one.",
+            "a fallback member is empty. The gateway refuses an empty entry rather than "
+            "guessing what was meant; drop it, or drop the field entirely if you do not "
+            "want fallbacks.",
         )
     for m in trimmed:
         # A comma is the header's separator, so a member containing one could
@@ -661,7 +655,20 @@ def server_fallback_header(models: List[str], primary: str) -> str:
                 "ASCII list, so a member carrying a comma or a non-ASCII byte cannot be "
                 "sent unambiguously.",
             )
-    return ",".join(trimmed)
+    # De-duplicate and drop the primary, as the gateway does, THEN apply the
+    # cap — a list of three distinct survivors is legal however it was spelled.
+    chain: List[str] = []
+    for model in trimmed:
+        if model == primary.strip() or model in chain:
+            continue
+        chain.append(model)
+    if len(chain) > MAX_SERVER_FALLBACK_MODELS:
+        raise ConiferPortabilityError(
+            "server_fallback_models",
+            f"at most {MAX_SERVER_FALLBACK_MODELS} fallback models are accepted per "
+            "request; the gateway refuses a longer chain rather than silently trimming it.",
+        )
+    return ",".join(chain) if chain else None
 
 
 def resolve_chain(request: ChatRequest) -> List[str]:
@@ -741,9 +748,12 @@ def chat_headers(request: ChatRequest, idempotency_key: str) -> Dict[str, str]:
         # Validated here rather than shipped and refused remotely, so the
         # mistake surfaces at the call site with its reason attached — and
         # never as a chain the caller believes is armed.
-        headers["x-conifer-fallback-models"] = server_fallback_header(
-            request.server_fallback_models, request.model
-        )
+        chain = server_fallback_header(request.server_fallback_models, request.model)
+        # Nothing survived de-duplication (e.g. the only member was the
+        # requested model). Send no header rather than an empty one the
+        # gateway would 400.
+        if chain is not None:
+            headers["x-conifer-fallback-models"] = chain
     return headers
 
 

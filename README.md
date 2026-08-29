@@ -379,7 +379,7 @@ const answer = await conifer.chat({
   serverFallbackModels: ["gpt-5.5", "claude-fable-5"],
 });
 answer.receipt.effectiveModel;  // which model actually answered
-answer.receipt.reason;          // "caller_fallback" if a substitute served
+answer.receipt.reason;          // "provider_failover" when a substitute served
 ```
 
 This is the one to use in production. It is **one request**: the gateway holds
@@ -389,11 +389,17 @@ sees the provider's own failure, it can fall back on things your client never
 gets to judge — including the 4xx a mis-configured model surface returns, which
 is exactly the failure that otherwise reaches your end user.
 
-Every member is checked before anything is spent. An unknown model, a
-duplicate, a self-reference, or more than three members is refused by name
-rather than quietly dropped: a fallback you *believe* is armed and is not is
-worse than an error. `Helicone-Fallbacks` and OpenRouter's `route: "fallback"`
-map straight onto this, because a proxy walking the chain is what they meant.
+Every member is admitted before anything is spent, and an unknown model is a
+400 **naming it** rather than a silent skip: a fallback you *believe* is armed
+and is not is worse than an error. Duplicates and the model you already asked
+for are simply dropped, and at most three survive. `Helicone-Fallbacks` and
+OpenRouter's `route: "fallback"` map straight onto this, because a proxy
+walking the chain is what they always meant.
+
+It fires on *upstream* failures — 5xx, 429, timeouts, and a proven upstream 4xx
+when a different model is still ahead. It never fires on the gateway's own
+refusals (401/402/400/404 happen before any upstream call), and never after a
+byte of a stream has reached your client.
 
 There is also a **client-side** chain, which predates the gateway feature and
 is still there if you want the retry in your own process. Each member is a
@@ -580,7 +586,10 @@ Stated here so you find out now rather than mid-migration:
 - **No mid-stream fallback.** The first token commits the turn, so a *client*
   chain cannot be attached to a stream. `serverFallbackModels` does work with
   streaming: the gateway fails over before the first frame, so no seam is ever
-  stitched into a stream you are already reading.
+  stitched into a stream you are already reading. Note that on a streamed turn
+  the handshake headers are written before the failover resolves, so
+  `receipt.reason` reads `as_requested` there; `receipt.effectiveModel` still
+  names the model that actually served.
 
 ## Reporting a problem
 

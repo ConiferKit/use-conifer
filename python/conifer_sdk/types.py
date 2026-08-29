@@ -65,7 +65,11 @@ class ChatRequest:
     #: than 3 members is refused by name rather than silently dropped.
     #:
     #: A served fallback is never silent: the receipt's ``effective_model``
-    #: names the model that answered and ``reason`` reads ``caller_fallback``.
+    #: names the model that answered and ``reason`` reads ``provider_failover``
+    #: (the gateway reuses that code rather than minting a new one). On a
+    #: STREAMED turn the handshake headers are written before the failover
+    #: resolves, so ``reason`` reads ``as_requested`` there while
+    #: ``effective_model`` is still correct — read the model, not the reason.
     #:
     #: Not available with ``defer``, on the BYOK lane, or for composed models.
     server_fallback_models: Optional[List[str]] = None

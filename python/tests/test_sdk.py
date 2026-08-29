@@ -428,24 +428,46 @@ class ServerFallbackTests(unittest.TestCase):
             "an empty chain is not a declared one",
         )
 
-    def test_a_bad_chain_raises_here_rather_than_arming_nothing(self):
-        # Each is refused by the gateway too. Raising at the call site is what
-        # keeps a caller from believing a fallback is armed when it is not.
-        for models in (
-            [],
-            ["  "],
-            ["a", "a"],
-            ["a", "b", "c", "d"],
-            ["deepseek-v4"],
-            ["a,b"],
-        ):
+    def test_an_unsendable_chain_raises_rather_than_arming_nothing(self):
+        # A member that cannot survive the header intact. The gateway refuses
+        # these too, so raising here just moves the error somewhere useful.
+        for models in (["  "], ["a,b"], ["café"], ["a", "b", "c", "d"]):
             with self.assertRaises(ConiferPortabilityError, msg=repr(models)):
                 server_fallback_header(models, "deepseek-v4")
+
+    def test_the_chain_is_de_duplicated_exactly_as_the_gateway_does_it(self):
+        # The gateway DROPS duplicates and the primary's own id (harmless, not
+        # wrong) rather than refusing. Raising here would make the SDK
+        # stricter than the wire.
+        self.assertEqual(server_fallback_header([" gpt-5.5 "], "deepseek-v4"), "gpt-5.5")
         self.assertEqual(
-            server_fallback_header([" gpt-5.5 "], "deepseek-v4"),
+            server_fallback_header(["gpt-5.5", "gpt-5.5"], "deepseek-v4"),
             "gpt-5.5",
-            "trimmed, not refused",
+            "a duplicate is dropped, not refused",
         )
+        self.assertEqual(
+            server_fallback_header(["deepseek-v4", "gpt-5.5"], "deepseek-v4"),
+            "gpt-5.5",
+            "the requested model is dropped from its own fallback list",
+        )
+        self.assertIsNone(
+            server_fallback_header(["deepseek-v4"], "deepseek-v4"),
+            "nothing survives -> no header at all, never an empty one",
+        )
+        self.assertEqual(
+            server_fallback_header(["a", "b", "c", "a"], "deepseek-v4"),
+            "a,b,c",
+            "the cap counts survivors, as the gateway does",
+        )
+
+    def test_a_chain_that_de_duplicates_away_sends_no_header(self):
+        headers = chat_headers(
+            ChatRequest(
+                model="deepseek-v4", messages=[], server_fallback_models=["deepseek-v4"]
+            ),
+            "k",
+        )
+        self.assertNotIn("x-conifer-fallback-models", headers)
 
     def test_it_cannot_ride_a_deferred_job(self):
         c = client(lambda *a: None)

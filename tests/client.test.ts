@@ -321,16 +321,14 @@ test("no serverFallbackModels means no header at all", () => {
   );
 });
 
-test("a bad server chain throws HERE, rather than arming nothing", () => {
-  // Each of these is refused by the gateway too. Throwing at the call site is
-  // what keeps a caller from believing a fallback is armed when it is not.
+test("an unsendable server chain throws, rather than arming nothing", () => {
+  // A member that cannot survive the header intact. The gateway refuses these
+  // too, so throwing at the call site just moves the error somewhere useful.
   for (const [models, why] of [
-    [[], "an empty list declares nothing"],
     [["  "], "a blank member names no model"],
-    [["a", "a"], "a duplicate can only repeat the first failure"],
-    [["a", "b", "c", "d"], "over the gateway's 3-member cap"],
-    [["deepseek-v4"], "naming the requested model is not a fallback"],
     [["a,b"], "a comma cannot survive the header's own separator"],
+    [["café"], "a non-ASCII byte cannot ride a header value"],
+    [["a", "b", "c", "d"], "over the gateway's 3-member cap"],
   ] as [string[], string][]) {
     assert.throws(
       () => serverFallbackHeader(models, "deepseek-v4"),
@@ -338,7 +336,49 @@ test("a bad server chain throws HERE, rather than arming nothing", () => {
       `${JSON.stringify(models)} — ${why}`,
     );
   }
-  assert.equal(serverFallbackHeader([" gpt-5.5 "], "deepseek-v4"), "gpt-5.5", "trimmed, not refused");
+});
+
+test("the server chain is de-duplicated exactly as the gateway does it", () => {
+  // The gateway DROPS duplicates and the primary's own id (harmless, not
+  // wrong) rather than refusing. Throwing here would make the SDK stricter
+  // than the wire and refuse chains the gateway would have served.
+  assert.equal(serverFallbackHeader([" gpt-5.5 "], "deepseek-v4"), "gpt-5.5", "trimmed");
+  assert.equal(
+    serverFallbackHeader(["gpt-5.5", "gpt-5.5"], "deepseek-v4"),
+    "gpt-5.5",
+    "a duplicate is dropped, not refused",
+  );
+  assert.equal(
+    serverFallbackHeader(["deepseek-v4", "gpt-5.5"], "deepseek-v4"),
+    "gpt-5.5",
+    "the requested model is dropped from its own fallback list",
+  );
+  assert.equal(
+    serverFallbackHeader(["deepseek-v4"], "deepseek-v4"),
+    undefined,
+    "nothing survives ⇒ no header at all, never an empty one",
+  );
+  // The cap counts SURVIVORS, as the gateway does: four spellings of three
+  // distinct models is a legal chain.
+  assert.equal(
+    serverFallbackHeader(["a", "b", "c", "a"], "deepseek-v4"),
+    "a,b,c",
+    "the cap is applied after de-duplication",
+  );
+});
+
+test("a chain that de-duplicates away sends no header", async () => {
+  const { calls, fetchImpl } = stubFetch([jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS })]);
+  await client(fetchImpl).chat({
+    model: "deepseek-v4",
+    messages: [],
+    serverFallbackModels: ["deepseek-v4"],
+  });
+  assert.equal(
+    "x-conifer-fallback-models" in calls[0]!.init.headers,
+    false,
+    "an empty header value is a 400 at the gateway; send none instead",
+  );
 });
 
 test("a server chain cannot ride a deferred job", async () => {

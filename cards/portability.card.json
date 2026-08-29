@@ -94,7 +94,7 @@
     "translated": {
       "Helicone-Auth": "-> `Authorization: Bearer $CONIFER_API_KEY`. There is no second credential: Conifer is not proxying your provider key. If you WANT your own provider key used, that is BYOK custody (PUT /v1/keys/{provider}), which the SDK exposes as `keys.put()`.",
       "Helicone-Target-URL / Helicone-OpenAI-Api-Base": "dropped by definition — Conifer is the destination, not a pass-through proxy. Sending one throws so a migrated app cannot believe it is still proxying elsewhere.",
-      "Helicone-Fallbacks": "-> the GATEWAY-side chain `serverFallbackModels` (x-conifer-fallback-models). That is the honest equivalent of what Helicone did: the PROXY walked the chain, on one logical request. Mapping it to the client chain (as this did before the gateway had the header) silently changed the semantics into several separately billed requests.",
+      "Helicone-Fallbacks": "-> the GATEWAY-side chain `serverFallbackModels` (x-conifer-fallback-models, gateway PR typhoon#356). That is the honest equivalent of what Helicone did: the PROXY walked the chain, on one logical request. Mapping it to the client chain (as this did before the gateway had the header) silently changed the semantics into several separately billed requests.",
       "Helicone-RateLimit-Policy": "no per-request client-set policy. Conifer's spend control is the HARD `x-conifer-max-cost-nanousd` ceiling, which is strictly stronger (money, not request count). The shim maps a `u=cents` policy onto that ceiling and throws on `u=requests`.",
       "Helicone-Retry-Enabled + helicone-retry-*": "-> the SDK's own `maxRetries`, which retries ONLY transport faults and 429/502/503/504, always under one idempotency key."
     },
