@@ -199,6 +199,14 @@ export class Conifer {
    * yourself.
    */
   async defer(request: ChatRequest): Promise<DeferredJob> {
+    if (request.serverFallbackModels?.length) {
+      // The gateway refuses this pair too; saying so here keeps the caller
+      // from believing a submitted job is protected by a chain.
+      throw new ConiferPortabilityError(
+        "serverFallbackModels+defer",
+        "a fallback chain cannot ride a deferred job: the outcome is not known until the job ends, by which time falling back would mean submitting a second job you never asked for. Submit one job and handle a `failed` status.",
+      );
+    }
     if (request.fallbackModels?.length) {
       // A chain is a sequence of SEPARATE requests decided by watching the
       // first one fail. A deferred job's failure is discovered hours later,
@@ -677,6 +685,58 @@ export class KeysApi {
   }
 }
 
+/**
+ * The gateway's cap on a caller-directed fallback chain. Mirrored here so the
+ * refusal happens at the call site; the gateway enforces it regardless.
+ */
+export const MAX_SERVER_FALLBACK_MODELS = 3;
+
+/**
+ * `serverFallbackModels` -> the `x-conifer-fallback-models` header value.
+ *
+ * Every rule the gateway enforces is checked HERE too, and throws rather than
+ * being cleaned up: silently dropping a bad member would leave the caller
+ * believing a fallback is armed when it is not, which is the precise failure
+ * this feature exists to prevent.
+ */
+export function serverFallbackHeader(models: string[], primary: string): string {
+  const trimmed = models.map((m) => m.trim());
+  if (trimmed.length === 0 || trimmed.some((m) => m === "")) {
+    throw new ConiferPortabilityError(
+      "serverFallbackModels",
+      "a fallback chain must name at least one model, and no member may be empty. Drop the field entirely if you do not want fallbacks.",
+    );
+  }
+  if (trimmed.length > MAX_SERVER_FALLBACK_MODELS) {
+    throw new ConiferPortabilityError(
+      "serverFallbackModels",
+      `at most ${MAX_SERVER_FALLBACK_MODELS} fallback models are accepted per request; the gateway refuses a longer chain rather than silently trimming it.`,
+    );
+  }
+  if (new Set(trimmed).size !== trimmed.length) {
+    throw new ConiferPortabilityError(
+      "serverFallbackModels",
+      "a duplicate fallback model is a mistake, not a chain: the second copy could only ever repeat the first one's failure.",
+    );
+  }
+  if (trimmed.includes(primary.trim())) {
+    throw new ConiferPortabilityError(
+      "serverFallbackModels",
+      "a fallback member names the model you already requested. Retrying the same model cannot fix what it just refused; name a different one.",
+    );
+  }
+  // A comma is the header's separator, so a member containing one could not
+  // survive the wire intact.
+  const bad = trimmed.find((m) => m.includes(",") || /[^\x20-\x7e]/.test(m));
+  if (bad !== undefined) {
+    throw new ConiferPortabilityError(
+      "serverFallbackModels",
+      `\`${bad}\` is not a usable model id here: the header is a comma-separated ASCII list, so a member carrying a comma or a non-ASCII byte cannot be sent unambiguously.`,
+    );
+  }
+  return trimmed.join(",");
+}
+
 /** The ordered model chain for one logical turn. */
 export function resolveChain(request: ChatRequest): string[] {
   const fallbacks = request.fallbackModels ?? [];
@@ -738,6 +798,15 @@ export function chatHeaders(request: ChatRequest, idempotencyKey: string): Recor
   if (request.defer === true) headers["x-conifer-defer"] = "allow";
   if (request.venue !== undefined) headers["x-conifer-venue"] = request.venue;
   if (request.promptCache === "off") headers["x-conifer-cache"] = "off";
+  // The SERVER-side fallback chain. Validated here rather than shipped and
+  // refused remotely, so the mistake surfaces at the call site with the
+  // reason attached — and never as a chain the caller believes is armed.
+  if (request.serverFallbackModels !== undefined) {
+    headers["x-conifer-fallback-models"] = serverFallbackHeader(
+      request.serverFallbackModels,
+      request.model,
+    );
+  }
   // `x-request-id` is sent too, so a proxy or log shipper between you and the
   // gateway still sees the id. The GATEWAY itself reads `idempotency-key`
   // first (see turnIdentity), which is why `requestId` now feeds that key

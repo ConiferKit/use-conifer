@@ -369,9 +369,35 @@ runs and what it costs. The full honored/translated/refused matrix, field by
 field, is [`cards/portability.card.json`](cards/portability.card.json).
 
 The one thing worth knowing up front: **Conifer admits exactly the model you
-name.** There is no server-side fallback list. OpenRouter's `models`, Vercel's
-`gateway.models`, and `Helicone-Fallbacks` all become a *client-side* chain of
-separate billed requests, which you must opt into:
+name — unless you name substitutes yourself.** If you do, the gateway walks
+them for you, on one request:
+
+```ts
+const answer = await conifer.chat({
+  model: "deepseek-v4",
+  messages,
+  serverFallbackModels: ["gpt-5.5", "claude-fable-5"],
+});
+answer.receipt.effectiveModel;  // which model actually answered
+answer.receipt.reason;          // "caller_fallback" if a substitute served
+```
+
+This is the one to use in production. It is **one request**: the gateway holds
+money once for the whole chain, tries the members in your order, settles once
+against whichever served, and refunds in full if none did. Because the gateway
+sees the provider's own failure, it can fall back on things your client never
+gets to judge — including the 4xx a mis-configured model surface returns, which
+is exactly the failure that otherwise reaches your end user.
+
+Every member is checked before anything is spent. An unknown model, a
+duplicate, a self-reference, or more than three members is refused by name
+rather than quietly dropped: a fallback you *believe* is armed and is not is
+worse than an error. `Helicone-Fallbacks` and OpenRouter's `route: "fallback"`
+map straight onto this, because a proxy walking the chain is what they meant.
+
+There is also a **client-side** chain, which predates the gateway feature and
+is still there if you want the retry in your own process. Each member is a
+separate billed request, so it needs an explicit opt-in:
 
 ```ts
 const answer = await conifer.chat({
@@ -383,8 +409,10 @@ const answer = await conifer.chat({
 answer.fallbackIndex;          // 0 = the model you asked for, 1 = the first fallback
 ```
 
-Only a *retryable* failure advances the chain. A 402 or a bad request is the
-same answer on every member, and spending on a second model would not fix it.
+Only a *retryable* failure advances that client chain. A 402 or a bad request is
+the same answer on every member, and spending on a second model would not fix
+it — which is precisely why the server chain, which can see more, is the better
+default.
 
 ## The MCP server
 
@@ -549,7 +577,10 @@ Stated here so you find out now rather than mid-migration:
   nobody exercised.
 - **No provider pinning.** The gateway chooses the host for the model you named, by price and health. The model is never substituted.
 - **No server-side prompt compression, moderation, injection scanning, or prompt registry.**
-- **No mid-stream fallback.** The first token commits the turn, so a chain cannot be attached to a stream.
+- **No mid-stream fallback.** The first token commits the turn, so a *client*
+  chain cannot be attached to a stream. `serverFallbackModels` does work with
+  streaming: the gateway fails over before the first frame, so no seam is ever
+  stitched into a stream you are already reading.
 
 ## Reporting a problem
 

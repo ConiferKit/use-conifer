@@ -8,6 +8,7 @@ export {
   DEFAULT_BASE_URL,
   DEFAULT_TIMEOUT_MS,
   MIN_DEFER_WINDOW_SECONDS,
+  MAX_SERVER_FALLBACK_MODELS,
 } from "./client.ts";
 export type { ConiferOptions } from "./client.ts";
 export {
@@ -20,6 +21,7 @@ export {
   priceOf,
   resolveBaseUrl,
   resolveChain,
+  serverFallbackHeader,
   toCatalogModel,
   toDeferredJob,
   withCost,

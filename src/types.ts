@@ -26,6 +26,37 @@ export interface FallbackOptions {
    */
   fallbackModels?: string[];
   allowClientFallback?: boolean;
+  /**
+   * Models the GATEWAY will fall back to, in order, if the requested model's
+   * upstream call fails. Sent as `x-conifer-fallback-models`.
+   *
+   * Prefer this over `fallbackModels` for production traffic. The difference
+   * is where the retry lives, and it matters:
+   *
+   * - `fallbackModels` is a CLIENT chain — a second HTTP request, decided
+   *   here, only after a retryable refusal reaches you. It cannot help a
+   *   streamed turn or a deferred job, and each member is separately billed.
+   * - `serverFallbackModels` is ONE request. The gateway holds money once for
+   *   the whole chain, dispatches the members in your order, settles ONCE
+   *   against whichever served, and refunds in full if none did. Because the
+   *   gateway sees the provider's own failure, it advances on classes the
+   *   client never gets to judge — including the 4xx a mis-configured model
+   *   surface returns, which is the failure this exists for.
+   *
+   * Every member is admitted like a primary BEFORE anything is spent: an
+   * unknown model, a composed model, a duplicate, a self-reference, or more
+   * than 3 members is refused by name rather than silently dropped — a
+   * fallback you think is protecting you and is not is the one outcome worse
+   * than an error.
+   *
+   * A served fallback is never silent: `completion.receipt.effectiveModel`
+   * names the model that answered and `receipt.reason` reads
+   * `caller_fallback`.
+   *
+   * Not available with `defer`, on the BYOK lane, or for composed models
+   * (each refuses loudly).
+   */
+  serverFallbackModels?: string[];
 }
 
 export interface ChatRequest extends FallbackOptions {

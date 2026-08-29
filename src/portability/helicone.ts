@@ -108,9 +108,13 @@ export function fromHeliconeHeaders(headers: HeliconeHeaders): {
 
   const fallbacks = lower["helicone-fallbacks"];
   if (fallbacks !== undefined) {
-    request.fallbackModels = parseFallbacks(fallbacks);
-    // Deliberately NOT auto-enabling `allowClientFallback`: the caller has to
-    // accept that each member is a separate billed request.
+    // Maps to the GATEWAY-side chain (`x-conifer-fallback-models`), which is
+    // the honest equivalent of what Helicone did: the proxy — not your app —
+    // walked the chain, on one logical request. Before that header existed
+    // this could only become a CLIENT chain, which silently changed the
+    // semantics (a second billed request, no help on a stream, and no way to
+    // act on the 4xx classes the proxy could see).
+    request.serverFallbackModels = parseFallbacks(fallbacks);
   }
 
   const policy = lower["helicone-ratelimit-policy"];
