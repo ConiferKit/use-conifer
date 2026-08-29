@@ -44,8 +44,17 @@ step "Live gate (spends a few tenths of a cent)"
 if [ -n "${CONIFER_API_KEY:-}" ]; then
   npm run qa:live
   (cd python && python3 scripts/live_qa.py)
+elif [ "$PUBLISH" = "--publish" ]; then
+  # RELEASING.md makes the live gate part of the publish checklist, and the
+  # live checks have caught defects the offline suite could not see (the
+  # empty-CA-store bug, the 409 backoff bug, the 2026-08-29 Cloudflare UA
+  # ban). A dry run may skip it; a PUBLISH may not (Greptile P1 on the PR
+  # that staged this script: the skip fell through to publishing).
+  echo "    CONIFER_API_KEY not set — refusing to publish without the live gate."
+  echo "    Export it (or read ~/.conifer/dev-token) and re-run."
+  exit 1
 else
-  echo "    CONIFER_API_KEY not set — SKIPPING the live gate."
+  echo "    CONIFER_API_KEY not set — SKIPPING the live gate (dry run only)."
   echo "    Set it and re-run if you want the full RELEASING.md gate."
 fi
 

@@ -33,7 +33,12 @@
     "defaultHeaders": {
       "type": "record<string,string>",
       "default": {},
-      "note": "Merged under the SDK's own headers. Cannot overwrite the credential."
+      "note": "Merged under the SDK's own headers. Cannot overwrite the credential. CAN overwrite the User-Agent, under any casing (header names are case-insensitive; the merge must not duplicate)."
+    },
+    "userAgent": {
+      "type": "constant",
+      "value": "conifer-sdk-python/<version> (Python) / package UA via fetch (TS)",
+      "note": "Every Python request names the SDK: Python's default 'Python-urllib/3.x' is on Cloudflare's stock browser-signature ban list, and on 2026-08-29 the api.conifer.build zone 1010-403'd every such request at the EDGE (18/18 live-QA failures) before the gateway saw it. Applied only when no defaultHeaders entry, under any casing, already names a User-Agent."
     }
   },
   "request_options": {
@@ -77,7 +82,7 @@
     },
     "defer": {
       "wire": "body.defer = \"allow\" + header x-conifer-defer",
-      "note": "Submits the turn as a DEFERRED JOB. Answered with 202 and a JOB ENVELOPE (job_id/status/deadline_utc/poll_url) — NOT a completion, which is why `chat()` REFUSES this flag and `defer()` exists to return the job. The gateway requires a completion window of at least 86400s and refuses a narrower one rather than serving it synchronously, so `defer()` defaults to that floor. The job is accepted AND DEBITED at submission."
+      "note": "Submits the turn as a DEFERRED JOB. Answered with 202 and a JOB ENVELOPE (job_id/status/deadline_utc/poll_url) \u2014 NOT a completion, which is why `chat()` REFUSES this flag and `defer()` exists to return the job. The gateway requires a completion window of at least 86400s and refuses a narrower one rather than serving it synchronously, so `defer()` defaults to that floor. The job is accepted AND DEBITED at submission."
     },
     "venue": {
       "wire": "header x-conifer-venue",
@@ -93,19 +98,19 @@
     },
     "requestId": {
       "wire": "header idempotency-key + header x-request-id",
-      "note": "YOUR id for this turn, and the one that comes back in the receipt. The gateway derives its request id from the FIRST of `idempotency-key` then `x-request-id` (its own `request_id()`, confirmed live 2026-08-27) — and the SDK always sends an idempotency key, so `x-request-id` alone was NEVER reached and this field was inert. On this gateway the two are ONE identity, so an explicit requestId now feeds the idempotency key as well. Consequence, stated because it is real: the key is bound to the request BODY, so reusing one requestId across two different bodies is a 409 `request_in_progress`, not two turns. Pass idempotencyKey explicitly to control the two separately."
+      "note": "YOUR id for this turn, and the one that comes back in the receipt. The gateway derives its request id from the FIRST of `idempotency-key` then `x-request-id` (its own `request_id()`, confirmed live 2026-08-27) \u2014 and the SDK always sends an idempotency key, so `x-request-id` alone was NEVER reached and this field was inert. On this gateway the two are ONE identity, so an explicit requestId now feeds the idempotency key as well. Consequence, stated because it is real: the key is bound to the request BODY, so reusing one requestId across two different bodies is a 409 `request_in_progress`, not two turns. Pass idempotencyKey explicitly to control the two separately."
     },
     "client": {
       "wire": "header x-conifer-client",
       "note": "Your app's name, for your own usage attribution."
     },
     "fallbackModels": {
-      "wire": "NONE — client-side",
+      "wire": "NONE \u2014 client-side",
       "note": "OpenRouter's `models: []` has no gateway equivalent: the gateway admits exactly the model named. The SDK therefore walks the chain ITSELF, one full request per member, and reports which member served in the result's `fallbackIndex`. Honest, not free: each attempt is its own billed turn only if it reached upstream, and only retryable failures advance the chain."
     }
   },
   "embeddings_request": {
-    "note": "`POST /v1/embeddings`, reached as `conifer.embeddings.create(...)` (TS) / `client.embed(...)` (Python). Embeddings bill on INPUT ONLY — there is no completion, so the catalog carries a zero output rate for every embedding seat. That is why this door has no maxTokens, no sampling knobs and no stream: none of them mean anything here, and offering them would imply a control the wire does not have.",
+    "note": "`POST /v1/embeddings`, reached as `conifer.embeddings.create(...)` (TS) / `client.embed(...)` (Python). Embeddings bill on INPUT ONLY \u2014 there is no completion, so the catalog carries a zero output rate for every embedding seat. That is why this door has no maxTokens, no sampling knobs and no stream: none of them mean anything here, and offering them would imply a control the wire does not have.",
     "model": {
       "wire": "body.model",
       "note": "Must DECLARE `caps: [\"embeddings\"]`. A chat model is a 400 naming the chat door, not an opaque upstream 404 on your money."
@@ -136,7 +141,7 @@
     },
     "requestId": {
       "wire": "header idempotency-key + header x-request-id",
-      "note": "YOUR id for this turn, and the one that comes back in the receipt. The gateway derives its request id from the FIRST of `idempotency-key` then `x-request-id` (its own `request_id()`, confirmed live 2026-08-27) — and the SDK always sends an idempotency key, so `x-request-id` alone was NEVER reached and this field was inert. On this gateway the two are ONE identity, so an explicit requestId now feeds the idempotency key as well. Consequence, stated because it is real: the key is bound to the request BODY, so reusing one requestId across two different bodies is a 409 `request_in_progress`, not two turns. Pass idempotencyKey explicitly to control the two separately."
+      "note": "YOUR id for this turn, and the one that comes back in the receipt. The gateway derives its request id from the FIRST of `idempotency-key` then `x-request-id` (its own `request_id()`, confirmed live 2026-08-27) \u2014 and the SDK always sends an idempotency key, so `x-request-id` alone was NEVER reached and this field was inert. On this gateway the two are ONE identity, so an explicit requestId now feeds the idempotency key as well. Consequence, stated because it is real: the key is bound to the request BODY, so reusing one requestId across two different bodies is a 409 `request_in_progress`, not two turns. Pass idempotencyKey explicitly to control the two separately."
     },
     "client": {
       "wire": "header x-conifer-client"
@@ -149,10 +154,10 @@
   },
   "deferred_jobs": {
     "note": "The read/cancel plane for deferred work: `conifer.jobs.*` (TS) / `job_status`/`job_result`/`job_cancel`/`jobs_wait` (Python). The accept arm rides POST /v1/chat/completions.",
-    "GET /v1/deferred/{id}": "status only — no content, no cost. TENANCY: a foreign job id and a nonexistent one are the SAME 404, so a 404 means 'not yours or not real', never 'not yet'.",
-    "GET /v1/deferred/{id}/result": "the completion with its settled receipt. 409 while running, AND for every terminal state with no result (cancelled/failed/expired — all refunded for unfinished work). Fetching moves the job to `fetched` and starts the retention grace, after which the body is deleted.",
+    "GET /v1/deferred/{id}": "status only \u2014 no content, no cost. TENANCY: a foreign job id and a nonexistent one are the SAME 404, so a 404 means 'not yours or not real', never 'not yet'.",
+    "GET /v1/deferred/{id}/result": "the completion with its settled receipt. 409 while running, AND for every terminal state with no result (cancelled/failed/expired \u2014 all refunded for unfinished work). Fetching moves the job to `fetched` and starts the retention grace, after which the body is deleted.",
     "POST /v1/deferred/{id}/cancel": "refunded per the gateway's cancel rules.",
-    "states": "queued → submitted → ended → fetched, plus expired/cancelled/failed. TERMINAL = fetched/expired/cancelled/failed. `ended` is deliberately NOT terminal: it is where the result becomes fetchable, and treating it as an end would skip collecting it.",
-    "wait()": "polls with exponential backoff, STOPS on a terminal state (a loop keyed only on 'is it ended' spins forever on a cancelled job), and on timeout raises WITHOUT cancelling — killing work the caller paid for on a client-side clock is not the SDK's decision."
+    "states": "queued \u2192 submitted \u2192 ended \u2192 fetched, plus expired/cancelled/failed. TERMINAL = fetched/expired/cancelled/failed. `ended` is deliberately NOT terminal: it is where the result becomes fetchable, and treating it as an end would skip collecting it.",
+    "wait()": "polls with exponential backoff, STOPS on a terminal state (a loop keyed only on 'is it ended' spins forever on a cancelled job), and on timeout raises WITHOUT cancelling \u2014 killing work the caller paid for on a client-side clock is not the SDK's decision."
   }
 }
