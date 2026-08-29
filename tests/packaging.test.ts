@@ -106,7 +106,6 @@ test("everything package.json points at is inside `files`", () => {
 test("a built dist exists and exposes the public seam", async () => {
   const index = new URL("../dist/src/index.js", import.meta.url);
   if (!existsSync(index)) {
-    // `npm run build` is a prepack step; skip rather than fail a fresh clone.
     return;
   }
   const mod = (await import(index.href)) as Record<string, unknown>;
