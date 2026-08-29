@@ -13,7 +13,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-
+import { relative } from "node:path";
 import * as api from "../src/index.ts";
 import { TOOLS } from "../mcp/server.ts";
 
@@ -23,12 +23,16 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 // The runner sets cwd to the repo in both modes, so a test that must read a
 // SOURCE file (rather than a copied artifact) resolves from here.
 const repoRoot = process.cwd();
-const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const pkg = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+);
 
 /** Resolve an exports entry to a path on disk. */
 function target(entry: unknown): string {
   const value =
-    typeof entry === "string" ? entry : (entry as { default?: string })?.default ?? "";
+    typeof entry === "string"
+      ? entry
+      : ((entry as { default?: string })?.default ?? "");
   return new URL(value, new URL("../", import.meta.url)).pathname;
 }
 
@@ -72,7 +76,9 @@ test("the `bin` path has no `./` prefix, so the registry keeps the binary", () =
   //   `"bin[conifer-mcp]" script name bin/conifer-mcp.mjs was invalid and removed`
   // as a WARNING inside a wall of publish output, and would have shipped a
   // package whose advertised MCP entry point did not exist.
-  for (const [name, path] of Object.entries(pkg.bin as Record<string, string>)) {
+  for (const [name, path] of Object.entries(
+    pkg.bin as Record<string, string>,
+  )) {
     assert.ok(
       !path.startsWith("./"),
       `bin[${name}] is "${path}" — npm strips entries with a "./" prefix on publish; use "${path.slice(2)}"`,
@@ -88,10 +94,11 @@ test("everything package.json points at is inside `files`", () => {
     target(pkg.bin["conifer-mcp"]),
   ];
   for (const path of referenced) {
-    const relative = path.slice(root.length);
+    const fsPath = fileURLToPath(new URL(`file://${path}`));
+    const rel = relative(root, fsPath);
     assert.ok(
-      shipped.some((dir) => relative.startsWith(dir)),
-      `${relative} is referenced but not in files: ${shipped.join(", ")}`,
+      shipped.some((dir) => rel.startsWith(dir)),
+      `${rel} is referenced but not in files: ${shipped.join(", ")}`,
     );
   }
 });
@@ -103,7 +110,12 @@ test("a built dist exists and exposes the public seam", async () => {
     return;
   }
   const mod = (await import(index.href)) as Record<string, unknown>;
-  for (const name of ["Conifer", "fromOpenRouter", "readReceipt", "ConiferPortabilityError"]) {
+  for (const name of [
+    "Conifer",
+    "fromOpenRouter",
+    "readReceipt",
+    "ConiferPortabilityError",
+  ]) {
     assert.equal(typeof mod[name], "function", `dist must export ${name}`);
   }
 });
@@ -122,8 +134,15 @@ test("shipped declarations are real .d.ts a consumer can compile against", async
   // ES2018, so an ES2017 consumer sees TS2583 pointing into our types (the
   // official `openai` package fails the same check the same way). A reader
   // who hits it must find the explanation in the file the error names.
-  const types = readFileSync(new URL("../dist/src/types.d.ts", import.meta.url), "utf8");
-  assert.match(types, /lib\.es2018/i, "state the lib requirement where the error points");
+  const types = readFileSync(
+    new URL("../dist/src/types.d.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    types,
+    /lib\.es2018/i,
+    "state the lib requirement where the error points",
+  );
   assert.match(types, /ES2018\+|"lib": \["ES2018"\]/, "say what to change");
 });
 
@@ -160,13 +179,28 @@ test("`npm test` runs on every Node the engines floor advertises", () => {
     "the test script must not hard-code a flag Node 20 rejects with `bad option`",
   );
 
-  const floor = Number(String(pkg.engines.node).replace(/[^\d.]/g, "").split(".")[0]);
+  const floor = Number(
+    String(pkg.engines.node)
+      .replace(/[^\d.]/g, "")
+      .split(".")[0],
+  );
   assert.ok(Number.isFinite(floor), "engines.node must name a major version");
 
   // The runner exists, and knows both routes.
-  const runner = readFileSync(new URL("../scripts/run-tests.mjs", import.meta.url), "utf8");
-  assert.match(runner, /experimental-strip-types/, "the fast path must still strip types");
-  assert.match(runner, /tsc|typescript/i, "there must be a compile fallback for older Node");
+  const runner = readFileSync(
+    new URL("../scripts/run-tests.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    runner,
+    /experimental-strip-types/,
+    "the fast path must still strip types",
+  );
+  assert.match(
+    runner,
+    /tsc|typescript/i,
+    "there must be a compile fallback for older Node",
+  );
 });
 
 test("the Python suite declares its test-only dependency somewhere a clone can find", () => {
@@ -176,17 +210,34 @@ test("the Python suite declares its test-only dependency somewhere a clone can f
   // docs or the packaging; this pins the packaging half.
   //
   // pytest must stay TEST-ONLY: `[project] dependencies` stays empty.
-  const requirements = new URL("../python/requirements-dev.txt", import.meta.url);
+  const requirements = new URL(
+    "../python/requirements-dev.txt",
+    import.meta.url,
+  );
   assert.ok(existsSync(requirements), "python/requirements-dev.txt must exist");
   assert.match(readFileSync(requirements, "utf8"), /pytest/);
 
-  const pyproject = readFileSync(new URL("../python/pyproject.toml", import.meta.url), "utf8");
-  assert.match(pyproject, /\[project\.optional-dependencies\]/, "declare a dev extra too");
-  assert.match(pyproject, /dev = \[[^\]]*pytest/, "the dev extra is where pytest belongs");
+  const pyproject = readFileSync(
+    new URL("../python/pyproject.toml", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    pyproject,
+    /\[project\.optional-dependencies\]/,
+    "declare a dev extra too",
+  );
+  assert.match(
+    pyproject,
+    /dev = \[[^\]]*pytest/,
+    "the dev extra is where pytest belongs",
+  );
 
   // The house rule, enforced rather than trusted: no runtime dependency.
   const runtime = /^dependencies = (\[\]|\[\s*\])$/m.test(pyproject);
-  assert.ok(runtime, "the published package must still install with an empty dependency list");
+  assert.ok(
+    runtime,
+    "the published package must still install with an empty dependency list",
+  );
 });
 
 /**
@@ -212,8 +263,15 @@ test("the Python package offers a `tls` extra without depending on it", () => {
   assert.match(pyproject, /dependencies = \[\]/);
   // And the escape hatch must exist, spelled the way the README tells people.
   assert.match(pyproject, /tls = \["certifi"\]/);
-  const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
-  assert.match(readme, /\[tls\]/, "the README must document the extra it tells people to install");
+  const readme = readFileSync(
+    fileURLToPath(new URL("../README.md", import.meta.url)),
+    "utf8",
+  );
+  assert.match(
+    readme,
+    /\[tls\]/,
+    "the README must document the extra it tells people to install",
+  );
 });
 
 /**
@@ -233,12 +291,22 @@ test("the Python package offers a `tls` extra without depending on it", () => {
  */
 test("the Python package ships the README it declares", () => {
   const readme = new URL("../python/README.md", import.meta.url);
-  assert.ok(existsSync(readme), "python/README.md is missing — PyPI would render a blank page");
+  assert.ok(
+    existsSync(readme),
+    "python/README.md is missing — PyPI would render a blank page",
+  );
 
   // It must be the SAME document, not a copy that can drift.
   const shipped = readFileSync(fileURLToPath(readme), "utf8");
-  const canonical = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
-  assert.equal(shipped, canonical, "python/README.md has drifted from the repo README");
+  const canonical = readFileSync(
+    fileURLToPath(new URL("../README.md", import.meta.url)),
+    "utf8",
+  );
+  assert.equal(
+    shipped,
+    canonical,
+    "python/README.md has drifted from the repo README",
+  );
   assert.ok(shipped.length > 1000, "the shipped README is suspiciously short");
 
   // And the declaration must point at it by the name setuptools can resolve.
@@ -255,7 +323,10 @@ test("the two packages carry the same version", () => {
   // and `npm i conifer-sdk@0.2.0` are different software under one name,
   // which is the sort of thing nobody debugs quickly.
   const npmVersion = JSON.parse(
-    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+    readFileSync(
+      fileURLToPath(new URL("../package.json", import.meta.url)),
+      "utf8",
+    ),
   ).version as string;
   const pyproject = readFileSync(
     fileURLToPath(new URL("../python/pyproject.toml", import.meta.url)),
@@ -277,7 +348,10 @@ test("the RUNTIME version constants match the manifests", () => {
   //
   // Four values, one truth: package.json, pyproject.toml, VERSION, __version__.
   const npmVersion = JSON.parse(
-    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+    readFileSync(
+      fileURLToPath(new URL("../package.json", import.meta.url)),
+      "utf8",
+    ),
   ).version as string;
 
   // repoRoot, not root: version.ts is a SOURCE file, and under
@@ -290,7 +364,10 @@ test("the RUNTIME version constants match the manifests", () => {
     `src/version.ts exports ${tsVersion} but package.json is ${npmVersion}`,
   );
 
-  const pySource = readFileSync(join(root, "python", "conifer_sdk", "__init__.py"), "utf8");
+  const pySource = readFileSync(
+    join(root, "python", "conifer_sdk", "__init__.py"),
+    "utf8",
+  );
   const pyRuntime = /^__version__ = "([^"]+)"/m.exec(pySource)?.[1];
   assert.equal(
     pyRuntime,
@@ -306,7 +383,11 @@ test("VERSION is exported from the package entry point", () => {
   // Read off the namespace, NOT a named import: a named import of a missing
   // export crashes the whole module at load, which fails the file instead of
   // this test and buries the reason.
-  assert.equal(typeof api.VERSION, "string", "VERSION is not exported from src/index.ts");
+  assert.equal(
+    typeof api.VERSION,
+    "string",
+    "VERSION is not exported from src/index.ts",
+  );
   assert.match(
     api.VERSION,
     /^\d+\.\d+\.\d+(?:[-+].+)?$/,
@@ -321,10 +402,15 @@ test("the README does not claim a registry that has no package", () => {
   //
   // Both ecosystems shipped 2026-08-27 (npm, then PyPI), so both halves now
   // assert the same shape: show the install, do not deny the package exists.
-  const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+  const readme = readFileSync(
+    fileURLToPath(new URL("../README.md", import.meta.url)),
+    "utf8",
+  );
 
   const claimsNotOnNpm = /not on npm/i.test(readme);
-  const showsNpmInstall = /npm i (conifer-sdk|@conifer\/sdk)(?!\.)/.test(readme);
+  const showsNpmInstall = /npm i (conifer-sdk|@conifer\/sdk)(?!\.)/.test(
+    readme,
+  );
   assert.ok(
     claimsNotOnNpm !== showsNpmInstall,
     "README both claims not-on-npm AND shows an npm registry install (or neither).",
@@ -381,7 +467,10 @@ test("CI actually tests the version floors the package advertises", () => {
   // runtime. This asserts the promise and the matrix agree — the floor version
   // itself must appear in the CI matrix, so the oldest supported runtime is
   // exercised on every pull request rather than assumed.
-  const workflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
+  const workflow = readFileSync(
+    join(root, ".github", "workflows", "ci.yml"),
+    "utf8",
+  );
 
   const nodeFloor = /(\d+)/.exec(pkg.engines?.node ?? "")?.[1];
   assert.ok(nodeFloor, "package.json declares no engines.node floor");
@@ -393,7 +482,10 @@ test("CI actually tests the version floors the package advertises", () => {
       "never runs that version — the floor is untested.",
   );
 
-  const pyproject = readFileSync(join(root, "python", "pyproject.toml"), "utf8");
+  const pyproject = readFileSync(
+    join(root, "python", "pyproject.toml"),
+    "utf8",
+  );
   const pyFloor = /requires-python = ">=([\d.]+)"/.exec(pyproject)?.[1];
   assert.ok(pyFloor, "pyproject.toml declares no requires-python floor");
   const pyMatrix = /python:\s*\[([^\]]+)\]/.exec(workflow)?.[1] ?? "";
@@ -411,9 +503,15 @@ test("the @conifer/sdk alias tracks this exact version", () => {
   // dependency version, which means a bump here without a bump there ships a
   // scoped package that quietly installs an older SDK than its own version
   // number claims — the exact confusion the alias exists to prevent.
-  const alias = JSON.parse(readFileSync(join(repoRoot, "alias", "package.json"), "utf8"));
+  const alias = JSON.parse(
+    readFileSync(join(repoRoot, "alias", "package.json"), "utf8"),
+  );
 
-  assert.equal(alias.name, "@conifer/sdk", "the alias must hold the scoped name");
+  assert.equal(
+    alias.name,
+    "@conifer/sdk",
+    "the alias must hold the scoped name",
+  );
   assert.equal(
     alias.version,
     pkg.version,
@@ -436,7 +534,11 @@ test("the @conifer/sdk alias tracks this exact version", () => {
 
   // And it must tell the reader where the real package is.
   const readme = readFileSync(join(repoRoot, "alias", "README.md"), "utf8");
-  assert.match(readme, /conifer-sdk/, "the alias README must name the real package");
+  assert.match(
+    readme,
+    /conifer-sdk/,
+    "the alias README must name the real package",
+  );
 });
 
 test("the scope-blocked runbook stays honest about the alias's state", () => {
@@ -463,7 +565,10 @@ test("the scope-blocked runbook stays honest about the alias's state", () => {
   // is useless to whoever picks this up cold.
   const text = readFileSync(runbook, "utf8");
   for (const marker of ["/-/org/conifer/team", "404", "alias/"]) {
-    assert.ok(text.includes(marker), `the runbook no longer explains '${marker}'`);
+    assert.ok(
+      text.includes(marker),
+      `the runbook no longer explains '${marker}'`,
+    );
   }
 });
 
@@ -485,7 +590,10 @@ test("the contributor path documents the rules CI enforces", () => {
   );
 
   const prTemplate = join(repoRoot, ".github", "pull_request_template.md");
-  assert.ok(existsSync(prTemplate), ".github/pull_request_template.md is missing");
+  assert.ok(
+    existsSync(prTemplate),
+    ".github/pull_request_template.md is missing",
+  );
   assert.match(
     readFileSync(prTemplate, "utf8"),
     /CHANGELOG\.md/,
@@ -501,7 +609,11 @@ test("the bug template asks for the version the SDK exposes", () => {
     join(repoRoot, ".github", "ISSUE_TEMPLATE", "bug.yml"),
     "utf8",
   );
-  assert.match(bug, /VERSION|__version__/, "the bug template does not ask for the SDK version");
+  assert.match(
+    bug,
+    /VERSION|__version__/,
+    "the bug template does not ask for the SDK version",
+  );
 });
 
 test("the GitHub YAML files parse", () => {
@@ -521,7 +633,8 @@ test("the GitHub YAML files parse", () => {
   ];
   for (const f of files) assert.ok(existsSync(f), `${f} is missing`);
 
-  const probe = "import yaml,sys\n[yaml.safe_load(open(p)) for p in sys.argv[1:]]\n";
+  const probe =
+    "import yaml,sys\n[yaml.safe_load(open(p)) for p in sys.argv[1:]]\n";
   try {
     execFileSync("python3", ["-c", probe, ...files], { stdio: "pipe" });
   } catch (err) {
@@ -538,8 +651,13 @@ test("the README's version example shows the CURRENT version", () => {
   // the one section whose entire job is helping someone report the right
   // version. Cheap to miss by hand, so it is checked.
   const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
-  const shown = [...readme.matchAll(/(?:\/\/|#)\s*"(\d+\.\d+\.\d+)"/g)].map((m) => m[1]);
-  assert.ok(shown.length > 0, "the README no longer demonstrates the version constant");
+  const shown = [...readme.matchAll(/(?:\/\/|#)\s*"(\d+\.\d+\.\d+)"/g)].map(
+    (m) => m[1],
+  );
+  assert.ok(
+    shown.length > 0,
+    "the README no longer demonstrates the version constant",
+  );
   for (const v of shown) {
     assert.equal(
       v,
@@ -562,13 +680,18 @@ test("every symbol the README tells you to import actually exists", () => {
   const readme = readFileSync(join(repoRoot, "README.md"), "utf8");
 
   const documented = new Set<string>();
-  for (const m of readme.matchAll(/import\s*\{([^}]{1,300})\}\s*from\s*"conifer-sdk"/g)) {
+  for (const m of readme.matchAll(
+    /import\s*\{([^}]{1,300})\}\s*from\s*"conifer-sdk"/g,
+  )) {
     for (const raw of (m[1] ?? "").split(",")) {
       const name = raw.trim();
       if (/^[A-Za-z_$][\w$]*$/.test(name)) documented.add(name);
     }
   }
-  assert.ok(documented.size > 0, "no conifer-sdk imports found in the README — did the format change?");
+  assert.ok(
+    documented.size > 0,
+    "no conifer-sdk imports found in the README — did the format change?",
+  );
 
   const missing = [...documented].filter((n) => !(n in api));
   assert.deepEqual(
@@ -591,13 +714,17 @@ test("shipped source maps resolve to files that ship with them", () => {
   // published path.
   const files = pkg.files as string[];
   const maps = existsSync(join(repoRoot, "dist", "src"))
-    ? readdirSync(join(repoRoot, "dist", "src")).filter((f) => f.endsWith(".js.map"))
+    ? readdirSync(join(repoRoot, "dist", "src")).filter((f) =>
+        f.endsWith(".js.map"),
+      )
     : [];
   if (maps.length === 0) return; // not built; the build test covers that
 
   const roots = new Set<string>();
   for (const name of maps) {
-    const map = JSON.parse(readFileSync(join(repoRoot, "dist", "src", name), "utf8")) as {
+    const map = JSON.parse(
+      readFileSync(join(repoRoot, "dist", "src", name), "utf8"),
+    ) as {
       sources?: string[];
       sourcesContent?: unknown;
     };
@@ -632,7 +759,10 @@ test("the Python package ships its PEP 561 typing marker", () => {
   const marker = join(repoRoot, "python", "conifer_sdk", "py.typed");
   assert.ok(existsSync(marker), "python/conifer_sdk/py.typed is missing");
 
-  const pyproject = readFileSync(join(repoRoot, "python", "pyproject.toml"), "utf8");
+  const pyproject = readFileSync(
+    join(repoRoot, "python", "pyproject.toml"),
+    "utf8",
+  );
   const entry = /^\s*conifer_sdk\s*=\s*\[([^\]]*)\]/m.exec(pyproject);
   assert.ok(entry, "pyproject.toml has no package-data entry for conifer_sdk");
   assert.match(

@@ -281,3 +281,4 @@ test("unknown provider error maps to ModelNotFoundError", () => {
   assert.ok(error instanceof ConiferModelNotFoundError);
   assert.equal(error.retryable, false);
 });
+
