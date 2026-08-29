@@ -271,3 +271,13 @@ test("a 409 that says 'retry shortly' is retryable; a body conflict is not", () 
   assert.ok(terminal instanceof ConiferConflictError);
   assert.equal(terminal.retryable, false);
 });
+
+test("unknown provider error maps to ModelNotFoundError", () => {
+  const error = errorFrom(
+    400,
+    envelope("unknown_provider", undefined, "the requested provider is not available on this gateway"),
+    headers(),
+  );
+  assert.ok(error instanceof ConiferModelNotFoundError);
+  assert.equal(error.retryable, false);
+});
