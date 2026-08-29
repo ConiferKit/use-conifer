@@ -291,7 +291,10 @@ class Conifer:
 
         A fallback chain cannot ride a stream: the first token commits the turn,
         so a mid-stream switch would be a second billed turn stitched onto the
-        first without the caller seeing the seam.
+        first without the caller seeing the seam. That is the CLIENT chain
+        (``fallback_models``). ``server_fallback_models`` is unaffected and
+        works here: the gateway fails over BEFORE the first frame, so no seam
+        is ever stitched into a stream the caller is already reading.
         """
         if request.fallback_models:
             raise ConiferPortabilityError(
@@ -403,6 +406,16 @@ class Conifer:
         :meth:`jobs_wait`, or poll :meth:`job_status` and call
         :meth:`job_result` yourself.
         """
+        if request.server_fallback_models:
+            # The gateway refuses this pair too; saying so here keeps the
+            # caller from believing a submitted job is protected by a chain.
+            raise ConiferPortabilityError(
+                "server_fallback_models+defer",
+                "a fallback chain cannot ride a deferred job: the outcome is not known "
+                "until the job ends, by which time falling back would mean submitting a "
+                "second job you never asked for. Submit one job and handle a `failed` "
+                "status.",
+            )
         if request.fallback_models:
             # A chain is a sequence of SEPARATE requests decided by watching
             # the first one fail. A deferred job's failure is discovered hours
@@ -626,6 +639,64 @@ class Conifer:
 # --------------------------------------------------------------- pure helpers
 
 
+#: The gateway's cap on a caller-directed fallback chain. Mirrored here so the
+#: refusal happens at the call site; the gateway enforces it regardless.
+MAX_SERVER_FALLBACK_MODELS = 3
+
+
+def server_fallback_header(models: List[str], primary: str) -> Optional[str]:
+    """``server_fallback_models`` -> the ``x-conifer-fallback-models`` value.
+
+    Mirrors the GATEWAY's own admission rules, so the SDK never refuses a
+    chain the gateway would have served, and never sends one it would reject:
+
+    - a malformed member (blank, comma-bearing, non-ASCII) RAISES: it cannot
+      survive the header intact, so sending it would arm nothing;
+    - a duplicate, or the requested model itself, is DROPPED — the gateway
+      treats these as harmless rather than wrong, and refusing here would make
+      the SDK stricter than the wire;
+    - the 3-member cap is checked AFTER that de-duplication, as the gateway
+      counts it;
+    - ``None`` when nothing survives, so the caller omits the header rather
+      than sending an empty one.
+
+    What is never done quietly is dropping a member that WOULD have changed
+    the outcome: an unknown model still refuses, at the gateway, by name.
+    """
+    trimmed = [m.strip() for m in models]
+    if any(m == "" for m in trimmed):
+        raise ConiferPortabilityError(
+            "server_fallback_models",
+            "a fallback member is empty. The gateway refuses an empty entry rather than "
+            "guessing what was meant; drop it, or drop the field entirely if you do not "
+            "want fallbacks.",
+        )
+    for m in trimmed:
+        # A comma is the header's separator, so a member containing one could
+        # not survive the wire intact.
+        if "," in m or not m.isascii() or not m.isprintable():
+            raise ConiferPortabilityError(
+                "server_fallback_models",
+                f"`{m}` is not a usable model id here: the header is a comma-separated "
+                "ASCII list, so a member carrying a comma or a non-ASCII byte cannot be "
+                "sent unambiguously.",
+            )
+    # De-duplicate and drop the primary, as the gateway does, THEN apply the
+    # cap — a list of three distinct survivors is legal however it was spelled.
+    chain: List[str] = []
+    for model in trimmed:
+        if model == primary.strip() or model in chain:
+            continue
+        chain.append(model)
+    if len(chain) > MAX_SERVER_FALLBACK_MODELS:
+        raise ConiferPortabilityError(
+            "server_fallback_models",
+            f"at most {MAX_SERVER_FALLBACK_MODELS} fallback models are accepted per "
+            "request; the gateway refuses a longer chain rather than silently trimming it.",
+        )
+    return ",".join(chain) if chain else None
+
+
 def resolve_chain(request: ChatRequest) -> List[str]:
     """The ordered model chain for one logical turn."""
     fallbacks = request.fallback_models or []
@@ -699,6 +770,16 @@ def chat_headers(request: ChatRequest, idempotency_key: str) -> Dict[str, str]:
         headers["x-request-id"] = request.request_id
     if request.client is not None:
         headers["x-conifer-client"] = request.client
+    if request.server_fallback_models is not None:
+        # Validated here rather than shipped and refused remotely, so the
+        # mistake surfaces at the call site with its reason attached — and
+        # never as a chain the caller believes is armed.
+        chain = server_fallback_header(request.server_fallback_models, request.model)
+        # Nothing survived de-duplication (e.g. the only member was the
+        # requested model). Send no header rather than an empty one the
+        # gateway would 400.
+        if chain is not None:
+            headers["x-conifer-fallback-models"] = chain
     return headers
 
 

@@ -61,6 +61,7 @@ from conifer_sdk.client import (  # noqa: E402
     chat_headers,
     pick_cheapest,
     resolve_chain,
+    server_fallback_header,
 )
 from conifer_sdk.errors import error_from  # noqa: E402
 from conifer_sdk.portability import assert_supported_vercel_surface  # noqa: E402
@@ -437,6 +438,84 @@ class StreamTests(unittest.TestCase):
                 )
             )
 
+
+class ServerFallbackTests(unittest.TestCase):
+    """The GATEWAY-side chain (x-conifer-fallback-models). TS twin: client.test.ts."""
+
+    def test_it_rides_one_header_in_the_callers_order(self):
+        headers = chat_headers(
+            ChatRequest(
+                model="deepseek-v4",
+                messages=[],
+                server_fallback_models=["gpt-5.5", "claude-fable-5"],
+            ),
+            "k",
+        )
+        self.assertEqual(headers["x-conifer-fallback-models"], "gpt-5.5,claude-fable-5")
+
+    def test_absent_means_no_header_at_all(self):
+        headers = chat_headers(ChatRequest(model="m", messages=[]), "k")
+        self.assertNotIn(
+            "x-conifer-fallback-models",
+            headers,
+            "an empty chain is not a declared one",
+        )
+
+    def test_an_unsendable_chain_raises_rather_than_arming_nothing(self):
+        # A member that cannot survive the header intact. The gateway refuses
+        # these too, so raising here just moves the error somewhere useful.
+        for models in (["  "], ["a,b"], ["café"], ["a", "b", "c", "d"]):
+            with self.assertRaises(ConiferPortabilityError, msg=repr(models)):
+                server_fallback_header(models, "deepseek-v4")
+
+    def test_the_chain_is_de_duplicated_exactly_as_the_gateway_does_it(self):
+        # The gateway DROPS duplicates and the primary's own id (harmless, not
+        # wrong) rather than refusing. Raising here would make the SDK
+        # stricter than the wire.
+        self.assertEqual(server_fallback_header([" gpt-5.5 "], "deepseek-v4"), "gpt-5.5")
+        self.assertEqual(
+            server_fallback_header(["gpt-5.5", "gpt-5.5"], "deepseek-v4"),
+            "gpt-5.5",
+            "a duplicate is dropped, not refused",
+        )
+        self.assertEqual(
+            server_fallback_header(["deepseek-v4", "gpt-5.5"], "deepseek-v4"),
+            "gpt-5.5",
+            "the requested model is dropped from its own fallback list",
+        )
+        self.assertIsNone(
+            server_fallback_header(["deepseek-v4"], "deepseek-v4"),
+            "nothing survives -> no header at all, never an empty one",
+        )
+        self.assertEqual(
+            server_fallback_header(["a", "b", "c", "a"], "deepseek-v4"),
+            "a,b,c",
+            "the cap counts survivors, as the gateway does",
+        )
+
+    def test_a_chain_that_de_duplicates_away_sends_no_header(self):
+        headers = chat_headers(
+            ChatRequest(
+                model="deepseek-v4", messages=[], server_fallback_models=["deepseek-v4"]
+            ),
+            "k",
+        )
+        self.assertNotIn("x-conifer-fallback-models", headers)
+
+    def test_it_cannot_ride_a_deferred_job(self):
+        c = client(lambda *a: None)
+        with self.assertRaises(ConiferPortabilityError):
+            c.defer(ChatRequest(model="m", messages=[], server_fallback_models=["b"]))
+
+    def test_it_DOES_ride_a_stream_unlike_the_client_chain(self):
+        # The client chain cannot: the first token commits the turn. The
+        # gateway chain can, because it fails over BEFORE the first frame.
+        headers = chat_headers(
+            ChatRequest(model="deepseek-v4", messages=[], server_fallback_models=["gpt-5.5"]),
+            "k",
+        )
+        self.assertEqual(headers["x-conifer-fallback-models"], "gpt-5.5")
+
     def test_frames_parse_and_terminators_yield_nothing(self):
         self.assertIsNone(parse_frame("data: [DONE]"))
         self.assertIsNone(parse_frame(": keep-alive"))
@@ -472,11 +551,33 @@ class PortabilityTests(unittest.TestCase):
     def test_openrouter_server_side_controls_refuse(self):
         base = {"model": "m", "messages": []}
         self.refuses("provider", lambda: from_openrouter({**base, "provider": {"order": ["x"]}}))
+        # `route: "fallback"` now CONVERTS (the gateway has server-side
+        # failover), but only with a list to walk and only for that one value.
         self.refuses("route", lambda: from_openrouter({**base, "route": "fallback"}))
+        self.refuses("route", lambda: from_openrouter({**base, "route": "lowest-latency"}))
         self.refuses("plugins", lambda: from_openrouter({**base, "plugins": [{"id": "web"}]}))
         self.refuses("transforms", lambda: from_openrouter({**base, "transforms": ["middle-out"]}))
         self.refuses("prompt", lambda: from_openrouter({**base, "prompt": "legacy"}))
         self.refuses("model", lambda: from_openrouter({"messages": []}))
+
+    def test_openrouter_route_fallback_becomes_the_gateway_chain(self):
+        # OpenRouter's `route: "fallback"` asked the PROXY to fail over. The
+        # gateway now does exactly that, so this converts rather than refusing
+        # — and onto the SERVER chain, because mapping it to the client chain
+        # would silently turn one request into several billed ones.
+        request = from_openrouter(
+            {"model": "a", "messages": [], "models": ["b", "c"], "route": "fallback"}
+        )
+        self.assertEqual(request.server_fallback_models, ["b", "c"])
+        self.assertIsNone(request.fallback_models)
+        self.assertFalse(request.allow_client_fallback)
+
+        # WITHOUT `route`, `models` keeps its historical client-chain meaning.
+        plain = from_openrouter(
+            {"model": "a", "messages": [], "models": ["b"]}, allow_client_fallback=True
+        )
+        self.assertEqual(plain.fallback_models, ["b"])
+        self.assertIsNone(plain.server_fallback_models)
 
     def test_unmodelled_knobs_refuse_unless_passed_through(self):
         self.refuses("top_k", lambda: from_openrouter({"model": "m", "messages": [], "top_k": 40}))

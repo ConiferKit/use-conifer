@@ -46,6 +46,34 @@ class ChatRequest:
     fallback_models: Optional[List[str]] = None
     allow_client_fallback: bool = False
 
+    #: Models the GATEWAY falls back to, in order, if the requested model's
+    #: upstream call fails. Sent as ``x-conifer-fallback-models``.
+    #:
+    #: Prefer this over ``fallback_models`` for production traffic. The
+    #: difference is where the retry lives: ``fallback_models`` is a CLIENT
+    #: chain (a second HTTP request, decided here, only after a retryable
+    #: refusal reaches you — useless on a stream, separately billed), while
+    #: this is ONE request. The gateway holds money once for the whole chain,
+    #: dispatches the members in your order, settles ONCE against whichever
+    #: served, and refunds in full if none did. Because the gateway sees the
+    #: provider's own failure it advances on classes the client never gets to
+    #: judge — including the 4xx a mis-configured model surface returns, which
+    #: is the failure this exists for.
+    #:
+    #: Every member is admitted like a primary BEFORE anything is spent: an
+    #: unknown model, a composed model, a duplicate, a self-reference, or more
+    #: than 3 members is refused by name rather than silently dropped.
+    #:
+    #: A served fallback is never silent: the receipt's ``effective_model``
+    #: names the model that answered and ``reason`` reads ``provider_failover``
+    #: (the gateway reuses that code rather than minting a new one). On a
+    #: STREAMED turn the handshake headers are written before the failover
+    #: resolves, so ``reason`` reads ``as_requested`` there while
+    #: ``effective_model`` is still correct — read the model, not the reason.
+    #:
+    #: Not available with ``defer``, on the BYOK lane, or for composed models.
+    server_fallback_models: Optional[List[str]] = None
+
 
 @dataclass
 class Completion:

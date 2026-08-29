@@ -12,6 +12,42 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 
 ## [Unreleased]
 
+### Added
+
+- `serverFallbackModels` (TS) / `server_fallback_models` (Python): models the
+  GATEWAY falls back to, in order, when the requested model's upstream call
+  fails. Sent as `x-conifer-fallback-models`.
+
+  This is the one to reach for in production, and it is a different thing from
+  the existing `fallbackModels`. That one is a CLIENT chain — a second HTTP
+  request, decided here, only after a retryable refusal reaches you; it cannot
+  help a stream, and each member is separately billed. The new field is ONE
+  request: the gateway holds money once for the whole chain, dispatches the
+  members in your order, settles once against whichever served, and refunds in
+  full if none did. Because the gateway sees the provider's own failure it can
+  advance on classes a client never gets to judge — including the 4xx a
+  mis-configured model surface returns, which is the failure this exists for.
+
+  Every member is validated at the call site and admitted by the gateway like a
+  primary before anything is spent: an unknown model, a duplicate, a
+  self-reference, or more than three members is refused by name rather than
+  silently dropped. A fallback you believe is armed and is not is worse than an
+  error. A served fallback is disclosed, never silent: the receipt's
+  `effectiveModel` names the member that answered and `reason` reads
+  `provider_failover` (the gateway reuses that reason code rather than minting
+  a new one).
+
+### Changed
+
+- The migration shims now map fallback intent onto the gateway chain, which is
+  what those features always meant on the platform you are leaving:
+  - OpenRouter's `route: "fallback"` **converts** instead of throwing (it asked
+    the proxy to fail over, and the gateway now does), taking `models` as the
+    server chain. Without `route`, `models` keeps its old client-chain meaning.
+  - Helicone's `Helicone-Fallbacks` maps to the server chain rather than the
+    client one — Helicone walked it in the proxy, on one request, and mapping it
+    client-side silently turned that into several billed requests.
+
 ## [0.1.2] - 2026-08-29
 
 ### Added

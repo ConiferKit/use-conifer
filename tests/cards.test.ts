@@ -97,6 +97,7 @@ test("every header the input card claims is actually sent", () => {
       promptCache: "off",
       requestId: "r",
       client: "c",
+      serverFallbackModels: ["fallback-model"],
     },
     "idem",
   );
