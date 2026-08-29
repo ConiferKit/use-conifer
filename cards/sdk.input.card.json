@@ -99,9 +99,13 @@
       "wire": "header x-conifer-client",
       "note": "Your app's name, for your own usage attribution."
     },
+    "serverFallbackModels": {
+      "wire": "header x-conifer-fallback-models",
+      "note": "The GATEWAY-side fallback chain (gateway PR typhoon#356): models it tries, in order, when the requested model fails UPSTREAM — 5xx, 429, timeout/transport, an unreadable body, or a proven upstream 4xx shape refusal (the DeepSeek 422 class) when a DIFFERENT model is still ahead. ONE request: the gateway holds money once for the whole chain, settles ONCE against whichever member served, and refunds in full if none did. Never triggers on the gateway's OWN refusals (401/402/400/404 — those precede any upstream call), and never after a byte of a stream reached the client. Every member is admitted like a primary before any spend; an unknown/unserved id is a 400 NAMING it, never a silent skip. Duplicates and the requested model itself are DROPPED (harmless, not wrong) — the SDK mirrors that rather than being stricter than the wire, and sends no header at all when nothing survives. At most 3 members after de-duplication. Credits lane only; refused on a BYOK primary and with defer. Disclosed on the receipt: effectiveModel names the member that served and reason reads `provider_failover`."
+    },
     "fallbackModels": {
       "wire": "NONE — client-side",
-      "note": "OpenRouter's `models: []` has no gateway equivalent: the gateway admits exactly the model named. The SDK therefore walks the chain ITSELF, one full request per member, and reports which member served in the result's `fallbackIndex`. Honest, not free: each attempt is its own billed turn only if it reached upstream, and only retryable failures advance the chain."
+      "note": "The CLIENT-side chain, kept for callers who want the retry in their own process. NOTE: `serverFallbackModels` above is now the better answer for almost every case — it is one request, one bill, and it can act on failures the client never sees. The SDK therefore walks the chain ITSELF, one full request per member, and reports which member served in the result's `fallbackIndex`. Honest, not free: each attempt is its own billed turn only if it reached upstream, and only retryable failures advance the chain."
     }
   },
   "embeddings_request": {

@@ -24,14 +24,14 @@
       "usage.prompt_tokens_details.cached_tokens": "identical field name"
     },
     "translated": {
-      "models": "OpenRouter's fallback array. The gateway admits exactly one model per request, so the SDK walks the array as a CLIENT-SIDE chain and reports `fallbackIndex`. Opt in with `allowClientFallback: true`; without it the shim throws rather than quietly serving only the first.",
+      "models": "OpenRouter's fallback array. With `route: \"fallback\"` it becomes the GATEWAY-side chain (serverFallbackModels): one request, one hold, settled once against whichever member served. WITHOUT `route` it keeps its historical meaning here — a CLIENT-SIDE chain the SDK walks, reporting `fallbackIndex`, which needs `allowClientFallback: true` because each member is a separately billed request.",
       "usage.cost": "OpenRouter returns credits on the body. Conifer discloses nanodollars on `x-conifer-cost-nanousd`, which is exact integer money. The shim exposes both `costNanoUsd` and a `usage.cost`-shaped USD number computed from it.",
       "transforms: [\"middle-out\"]": "no server-side prompt compression exists here. The shim throws; it will not ship a silently-different prompt.",
-      "HTTP-Referer / X-Title": "mapped to `x-conifer-client` (usage attribution). Conifer has no public app-ranking board, so this is attribution only."
+      "HTTP-Referer / X-Title": "mapped to `x-conifer-client` (usage attribution). Conifer has no public app-ranking board, so this is attribution only.",
+      "route: \"fallback\"": "OpenRouter's ask for PROXY-side failover. The gateway now does exactly that (x-conifer-fallback-models), so this CONVERTS rather than refusing: `models` becomes the SERVER chain (one request, one bill, no client opt-in needed). It needs a `models` list to walk, and any other `route` value is a routing mode Conifer does not have — both throw."
     },
     "unsupported_refused": {
       "provider": "OpenRouter's ProviderPreferences (order/allow_fallbacks/ignore/data_collection/quantizations). Conifer picks the host for the admitted model by price/health inside the gateway; a client cannot pin it. Sending this throws.",
-      "route": "`route: \"fallback\"` is server-side failover. Conifer admits exactly the model you name, so there is no host-level retry to enable. Use `models` + `allowClientFallback`.",
       "plugins": "`web`, `file-parser`, `response-healing`, `context-compression` have no Conifer equivalent. Throws.",
       "prompt": "the legacy text-completions field. The gateway DOES serve POST /v1/completions (verified live 2026-08-27: 200, billed, full receipt headers, non-streaming only — a streamed request there is refused naming /v1/chat/completions). This shim still throws, because it converts to the CHAT wire and the SDK client does not drive that door; the refusal names the door so a caller who wants it can call it directly. Earlier text claimed no door existed at all, which was false and would have turned away a valid migration.",
       "top_k / min_p / top_a / repetition_penalty / logit_bias": "not modelled on the gateway's request card; forwarded ONLY when `passthroughUnknown: true` is set, and then explicitly at the caller's risk."
@@ -94,7 +94,7 @@
     "translated": {
       "Helicone-Auth": "-> `Authorization: Bearer $CONIFER_API_KEY`. There is no second credential: Conifer is not proxying your provider key. If you WANT your own provider key used, that is BYOK custody (PUT /v1/keys/{provider}), which the SDK exposes as `keys.put()`.",
       "Helicone-Target-URL / Helicone-OpenAI-Api-Base": "dropped by definition — Conifer is the destination, not a pass-through proxy. Sending one throws so a migrated app cannot believe it is still proxying elsewhere.",
-      "Helicone-Fallbacks": "-> client-side `fallbackModels`, same opt-in rule as OpenRouter's `models`.",
+      "Helicone-Fallbacks": "-> the GATEWAY-side chain `serverFallbackModels` (x-conifer-fallback-models, gateway PR typhoon#356). That is the honest equivalent of what Helicone did: the PROXY walked the chain, on one logical request. Mapping it to the client chain (as this did before the gateway had the header) silently changed the semantics into several separately billed requests.",
       "Helicone-RateLimit-Policy": "no per-request client-set policy. Conifer's spend control is the HARD `x-conifer-max-cost-nanousd` ceiling, which is strictly stronger (money, not request count). The shim maps a `u=cents` policy onto that ceiling and throws on `u=requests`.",
       "Helicone-Retry-Enabled + helicone-retry-*": "-> the SDK's own `maxRetries`, which retries ONLY transport faults and 429/502/503/504, always under one idempotency key."
     },
