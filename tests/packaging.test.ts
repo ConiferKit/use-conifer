@@ -93,14 +93,9 @@ test("everything package.json points at is inside `files`", () => {
     target(pkg.types),
     target(pkg.bin["conifer-mcp"]),
   ];
-
   for (const path of referenced) {
     const fsPath = fileURLToPath(new URL(`file://${path}`));
     const rel = relative(root, fsPath);
-<<<<<<< HEAD
-=======
-
->>>>>>> 0ae7ee65a054a8e0f2d9ea70e61ea2d35a1471b4
     assert.ok(
       shipped.some((dir) => rel.startsWith(dir)),
       `${rel} is referenced but not in files: ${shipped.join(", ")}`,
