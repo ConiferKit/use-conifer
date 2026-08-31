@@ -22,20 +22,43 @@
 
 </div>
 
-One client for the [Conifer](https://conifer.build) gateway, in TypeScript and
-Python, plus an MCP server so tools that speak no OpenAI wire can still call it.
+## What this is, in plain terms
 
-Conifer speaks the OpenAI and Anthropic wires, so the base URL and the key are
-most of a migration. Credits are charged at the model's list price, and every
-call returns its exact settled cost — down to the nanodollar, itemized. Bring
-your own provider keys and Conifer proxies them for a small fee on list price.
+Conifer is an API gateway. You get one API key and one base URL, and behind it
+are models from OpenAI, Anthropic, Google, DeepSeek, Moonshot and others. You
+do not sign up with each vendor and you do not juggle five keys.
 
-## See it run
+It works with the tools you already use, because it speaks the OpenAI and
+Anthropic APIs. If an app lets you set a custom base URL and API key (Cursor,
+Cline, SillyTavern, LibreChat, Codex, Claude Code, anything using the `openai`
+package), point it here and it works:
 
-The router reads the question and picks the model. A question about a port
-number went to Kimi K3 and came back in three seconds; a question about KV cache
-limits, with the cost dial moved to *best*, went to Claude Opus 5 and took a
-minute. Same session, nothing restarted, no frame sped up.
+```
+Base URL:  https://api.conifer.build/v1
+API key:   sk-conifer-…      (get one at https://conifer.build/console#/keys)
+Model:     claude-fable-5, gpt-5.5, deepseek-v4, …
+```
+
+That is the whole product. This repo is the optional SDK for people who want
+more than a drop-in: a TypeScript and Python client, plus an MCP server.
+
+Two things you get here that other gateways do not:
+
+1. **The exact cost of every call**, returned with the answer, itemized, as an
+   integer number of nanodollars. Not an estimate from token counts.
+2. **A hard spending cap per request.** Set `maxCostNanoUsd` and the gateway
+   refuses the call before it happens if it could cost more.
+
+Pricing: you are charged the model's own list price, no markup. If you'd rather
+use your own OpenAI/Anthropic keys, Conifer will proxy them for free.
+
+## See the router pick a model
+
+Conifer can also pick the model for you based on how hard the question is. In
+the recording below, an easy question ("what port?") goes to a cheap fast model
+and answers in 3 seconds. A hard one, with the dial set to *best*, goes to
+Claude Opus 5 and takes a minute. Same session, real screen recording, not sped
+up.
 
 <div align="center">
   <a href="https://conifer.build/#router">
@@ -45,21 +68,20 @@ minute. Same session, nothing restarted, no frame sped up.
   <sub><b><a href="https://conifer.build/#router">▶ Watch the router choose (50s, no audio)</a></b> — a real screen recording, playing on <a href="https://conifer.build">conifer.build</a></sub>
 </div>
 
+## Install the SDK
+
 ```bash
-export CONIFER_API_KEY='sk-conifer-…'   # mint one at https://conifer.build/console#/keys
+npm i conifer-sdk                 # TypeScript
+pip install "conifer-sdk[tls]"    # Python — keep the [tls] extra
+
+export CONIFER_API_KEY='sk-conifer-…'   # get one at https://conifer.build/console#/keys
 ```
 
-> ```bash
-> npm i conifer-sdk                 # TypeScript
-> pip install "conifer-sdk[tls]"    # Python — keep the [tls] extra
-> ```
->
-> Both are live: `conifer-sdk` on npm and on PyPI. The npm package is
-> UNSCOPED — `@conifer/sdk` is not ours and does not exist.
->
-> On macOS, `[tls]` is what keeps a fresh python.org venv from failing its first
-> call with `CERTIFICATE_VERIFY_FAILED`. [Why it is an extra rather than a
-> dependency](#python-and-tls).
+The npm package name is unscoped: `conifer-sdk`. (`@conifer/sdk` is not ours.)
+On macOS keep the `[tls]` extra, or a fresh python.org venv fails its first call
+with `CERTIFICATE_VERIFY_FAILED` — [why](#python-and-tls).
+
+Then:
 
 ```ts
 import { Conifer, textOf } from "conifer-sdk";
@@ -415,10 +437,16 @@ const answer = await conifer.chat({
 answer.fallbackIndex;          // 0 = the model you asked for, 1 = the first fallback
 ```
 
-Only a *retryable* failure advances that client chain. A 402 or a bad request is
-the same answer on every member, and spending on a second model would not fix
-it — which is precisely why the server chain, which can see more, is the better
-default.
+Two things advance that client chain: a *retryable* failure, and a *capability*
+refusal (`ConiferCapabilityError`) — the one 400 a different model can fix, such
+as image content sent to a model without the `vision` cap. That refusal is
+issued by the gateway before any upstream call and bills nothing, so a chain
+like `{model: "deepseek-v4-flash", fallbackModels: ["glm-5.3-flash"],
+allowClientFallback: true}` absorbs an image turn the primary cannot take. Note
+the server chain does NOT cover this case: capability refusals are the gateway's
+own 400, and `serverFallbackModels` only fires on upstream failures. Every other
+4xx throws immediately — a 402 or a malformed request is the same answer on
+every member, and spending on a second model would not fix it.
 
 ## The MCP server
 

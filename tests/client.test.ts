@@ -529,7 +529,7 @@ test("the catalog keeps every field, and absence stays absence", async () => {
           caps: ["tools", "vision"],
           pricing: { input: 1, output: 5 },
         },
-        { id: "bare-model", endpoint_kind: "byok", fee_pct: 4.5 },
+        { id: "bare-model", endpoint_kind: "byok", fee_pct: 1.25 },
       ],
     }),
   ]);
@@ -537,7 +537,7 @@ test("the catalog keeps every field, and absence stays absence", async () => {
   assert.equal(models[0]!.contextWindow, 200000);
   assert.deepEqual(models[0]!.caps, ["tools", "vision"]);
   assert.equal(models[1]!.caps, undefined, "undeclared caps stay undefined, never []");
-  assert.equal(models[1]!.feePct, 4.5);
+  assert.equal(models[1]!.feePct, 1.25);
   assert.equal(models[0]!.raw.id, "claude-haiku-4-5");
 });
 

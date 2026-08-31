@@ -1,8 +1,31 @@
-# The `@conifer` npm scope — blocked, and what to do about it
+# The `@conifer` npm scope — blocked, and deliberately left that way
 
-Status as of 2026-08-28. Owned by whoever holds the npm account; nothing here
-can be finished by an agent, because every remaining step needs a browser 2FA
-approval that cannot be scripted.
+OWNER DECISION (2026-08-29): not worth a support ticket. The scope is
+org-owned, so the same broken state that blocks us blocks any would-be
+squatter — an unpublishable scope cannot be squatted. The real package
+(`conifer-sdk`, unscoped) is live on both registries and the docs say
+explicitly that `@conifer/sdk` is not ours. Revisit only if npm ever
+un-wedges the org or a squat actually appears.
+
+Status as of 2026-08-29 evening: **still blocked, re-confirmed.** A publish
+attempt reached the EOTP browser prompt (which looked like progress), the
+owner approved 2FA, and the PUT **still 404'd** — the same signature as
+2026-08-28. The EOTP prompt only proves the token needed refreshing; it says
+nothing about scope permissions. Root cause unchanged: the org has zero teams
+(`GET /-/org/conifer/team -> []`), and npm grants package-create rights
+through a team.
+
+ROOT CAUSE FOUND (2026-08-29 23:20): `GET /-/org/conifer/package` returns
+only `@ambre/*` packages (`@ambre/cli`, `@ambre/ui`, `ambre`, ...). This org
+was RENAMED from `ambre` to `conifer`. npm's rename carried the membership
+and the old scope's packages but never granted create rights in the new
+`@conifer` scope, and never recreated the default team. No token, OTP, or
+team-create can fix rename damage from the client side.
+
+The support ticket should say exactly this: "our org was renamed from
+`ambre` to `conifer`; it still lists only @ambre packages, has zero teams,
+and its owner cannot create the first package in the @conifer scope (PUT
+404s after successful 2FA)."
 
 ## The short version
 

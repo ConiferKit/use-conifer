@@ -371,7 +371,7 @@ class WireTests(unittest.TestCase):
                             "pricing": {"in_usd_per_mtok": "1", "out_usd_per_mtok": "5"},
                             "context_window": 100,
                         },
-                        {"id": "bare", "endpoint_kind": "byok", "fee_pct": 4.5},
+                        {"id": "bare", "endpoint_kind": "byok", "fee_pct": 1.25},
                     ],
                 },
             )
@@ -379,7 +379,7 @@ class WireTests(unittest.TestCase):
         models = client(transport).models()
         self.assertEqual(models[0].context_window, 100)
         self.assertIsNone(models[1].caps, "undeclared caps stay None, never []")
-        self.assertEqual(models[1].fee_pct, 4.5)
+        self.assertEqual(models[1].fee_pct, 1.25)
         self.assertEqual(models[0].raw["id"], "a")
 
         _, transport = scripted((200, {}, {"remaining_nanodollars": 12_500_000_000}))
