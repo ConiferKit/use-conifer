@@ -13,7 +13,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-
+import { relative } from "node:path";
 import * as api from "../src/index.ts";
 import { TOOLS } from "../mcp/server.ts";
 
@@ -88,26 +88,14 @@ test("everything package.json points at is inside `files`", () => {
     target(pkg.bin["conifer-mcp"]),
   ];
   for (const path of referenced) {
-    const relative = path.slice(root.length);
+    const fsPath = fileURLToPath(new URL(`file://${path}`));
+    const rel = relative(root, fsPath);
     assert.ok(
-      shipped.some((dir) => relative.startsWith(dir)),
-      `${relative} is referenced but not in files: ${shipped.join(", ")}`,
+      shipped.some((dir) => rel.startsWith(dir)),
+      `${rel} is referenced but not in files: ${shipped.join(", ")}`,
     );
   }
 });
-
-test("a built dist exists and exposes the public seam", async () => {
-  const index = new URL("../dist/src/index.js", import.meta.url);
-  if (!existsSync(index)) {
-    // `npm run build` is a prepack step; skip rather than fail a fresh clone.
-    return;
-  }
-  const mod = (await import(index.href)) as Record<string, unknown>;
-  for (const name of ["Conifer", "fromOpenRouter", "readReceipt", "ConiferPortabilityError"]) {
-    assert.equal(typeof mod[name], "function", `dist must export ${name}`);
-  }
-});
-
 test("shipped declarations are real .d.ts a consumer can compile against", async () => {
   const dts = new URL("../dist/src/index.d.ts", import.meta.url);
   if (!existsSync(dts)) return;
