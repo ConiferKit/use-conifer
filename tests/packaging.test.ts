@@ -96,6 +96,18 @@ test("everything package.json points at is inside `files`", () => {
     );
   }
 });
+test("a built dist exists and exposes the public seam", async () => {
+  const index = new URL("../dist/src/index.js", import.meta.url);
+  if (!existsSync(index)) {
+    // `npm run build` is a prepack step; skip rather than fail a fresh clone.
+    return;
+  }
+  const mod = (await import(index.href)) as Record<string, unknown>;
+  for (const name of ["Conifer", "fromOpenRouter", "readReceipt", "ConiferPortabilityError"]) {
+    assert.equal(typeof mod[name], "function", `dist must export ${name}`);
+  }
+});
+
 test("shipped declarations are real .d.ts a consumer can compile against", async () => {
   const dts = new URL("../dist/src/index.d.ts", import.meta.url);
   if (!existsSync(dts)) return;
