@@ -69,9 +69,14 @@ export class ConiferPaymentError extends ConiferError {
   readonly balanceNanoUsd?: number;
   constructor(init: ConiferErrorInit) {
     super(init);
-    const [required, balance] = twoIntegers(init.message);
-    this.requiredNanoUsd = required;
-    this.balanceNanoUsd = balance;
+    // Anchored on the gateway's wording ("this request needs up to N
+    // nanodollars but {you hold|the account holds} M"), never "the first two
+    // integers": a delegated key's message opens with the billed ACCOUNT id,
+    // whose digits were being read as the amount. The 402 body carries the
+    // balance STRUCTURED (`error.balance_nanodollars`); that wins over prose.
+    this.requiredNanoUsd = integerAfter(init.message, /needs up to (-?\d+) nanodollars/);
+    this.balanceNanoUsd =
+      structuredBalance(init.body) ?? integerAfter(init.message, /holds? (-?\d+)/);
   }
 }
 
@@ -229,6 +234,19 @@ export class ConiferPortabilityError extends ConiferError {
     super({ status: 0, type: "unsupported_by_conifer", message });
     this.field = field;
   }
+}
+
+/** The integer the pattern's first group captures, or nothing — never a guess. */
+function integerAfter(message: string, pattern: RegExp): number | undefined {
+  const found = message.match(pattern);
+  return found?.[1] === undefined ? undefined : Number(found[1]);
+}
+
+/** `error.balance_nanodollars`, which the gateway sends on the 402 body. */
+function structuredBalance(body: unknown): number | undefined {
+  const envelope = (body as { error?: { balance_nanodollars?: unknown } } | undefined)?.error;
+  const value = envelope?.balance_nanodollars;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 /** The first two integers in a gateway money message, in order. */

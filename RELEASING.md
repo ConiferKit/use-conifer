@@ -108,6 +108,27 @@ npm init -y && npm i ./conifer-sdk-0.1.0.tgz
 python3 -m venv /tmp/pyconsumer && /tmp/pyconsumer/bin/pip install "path/to/python[tls]"
 ```
 
+## The public mirror (`ConiferKit/use-conifer`)
+
+The public repo is generated, never hand-edited. It is the `sdk-public` branch
+of the workspace repo, pushed to the mirror's `main`:
+
+```bash
+bash sdk/scripts/public-split.sh                                  # regenerate
+git push https://github.com/ConiferKit/use-conifer sdk-public:main
+```
+
+It is a **filtered** split, not `git subtree split --prefix=sdk`. Some paths
+under `sdk/` are deliberately private, and a plain subtree split publishes
+them — that is not hypothetical: `agents/` (the unreleased `conifer-agents`
+package) shipped to the public mirror at `fcb7dd7` that way, and was removed at
+`30b4a97`. The exclusion list lives in `scripts/public-split.sh` and the script
+re-checks recursively that each exclusion actually took, so a typo fails loudly
+instead of publishing.
+
+Editing the mirror directly is the other way this goes wrong: the next split
+overwrites it, silently. Land the change in `sdk/` on `main` and regenerate.
+
 ## Publishing
 
 ```bash

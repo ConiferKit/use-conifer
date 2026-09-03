@@ -12,7 +12,25 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-03
+
+The learned router is live on the gateway. `model: "auto"` now routes for
+every key, and this release adds the call that returns the decision alone.
+
 ### Added
+
+- `route()` (TS) / `route()` (Python), over the gateway's new `POST /v1/route`:
+  the learned router's pick for a query WITHOUT the completion. Free. Returns a
+  model id you can call, up to three fallbacks in the router's order, the
+  policy, and the router artifact version. It never returns scores. For a
+  caller with its own completion path (a Slack bot on a vendor SDK); a caller
+  that wants route-and-complete in one call sends `model: "auto"` (or
+  `balanced` / `best`) to `chat()` and reads `receipt.effectiveModel`, which
+  already worked and is now backed by the learned router when the gateway has
+  one configured. The router's other two names, `cost-effective` and `fast`,
+  are muted on the gateway until their value floor is measured (unlisted;
+  `chat()` serves the default model `as_requested`, `route()` is a 400; never
+  a quiet substitute). A gateway with no router answers `route()` with a 503.
 
 - `serverFallbackModels` (TS) / `server_fallback_models` (Python): models the
   GATEWAY falls back to, in order, when the requested model's upstream call
@@ -56,6 +74,43 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
   - Helicone's `Helicone-Fallbacks` maps to the server chain rather than the
     client one — Helicone walked it in the proxy, on one request, and mapping it
     client-side silently turned that into several billed requests.
+
+### Fixed
+
+- A streamed turn that the gateway fails AFTER the 200 head — sent as a
+  `data: {"error": …}` frame — now throws the same typed error a refused
+  request would (`ConiferUpstreamError`, `ConiferRateLimitError`, …, with
+  `status: 200` and the request id). It used to be yielded as an ordinary
+  chunk, so the loop ended normally and the text was silently cut short.
+  The Python client raises identically.
+- Aborting a stream now works after the first byte (TypeScript): the caller's
+  `signal` stays wired to the connection until the body is done, an early
+  `break` (or a throw) cancels the body so the gateway stops generating and
+  billing what nobody is reading, and a stream that goes silent for 120 s
+  (the gateway's own `stream_idle`) is cut with a `ConiferTimeoutError`
+  instead of being waited on forever. Previously abort and timeout stopped
+  applying the moment the response head arrived. The idle clock is unref'd:
+  a stream that is awaited but never iterated does not keep a Node process
+  alive. The Python client has no abort or idle clock (`urllib` has no signal
+  to wire).
+- An abort during the connection-error backoff now stops the request with a
+  `ConiferTimeoutError`, as an abort during a `Retry-After` wait does. It used
+  to fire the next attempt immediately.
+- `stream.receipt()` resolves immediately — it is read from the response
+  head — so it can be awaited before or without iterating. It used to resolve
+  only once the loop ran to the end.
+- SSE frames delimited with CRLF are parsed; multi-line `data:` fields are
+  joined with a newline as the spec says (they were concatenated, and a CRLF
+  stream accumulated to the end and then failed to parse, silently).
+- `ConiferPaymentError.requiredNanoUsd` / `balanceNanoUsd` (and the Python
+  `required_nano_usd` / `balance_nano_usd`) are read from the gateway's
+  structured `balance_nanodollars` field and the anchored wording
+  "needs up to N nanodollars". They were "the first two integers in the
+  message", which on a delegated key's 402 — whose message opens with the
+  billed account id — read the digits of the account id as the amount.
+- A `Retry-After` wait is capped at the request timeout and ends the moment
+  the caller aborts. A CDN's `Retry-After: 3600` used to park the call for an
+  hour with no way out.
 
 ## [0.1.2] - 2026-08-29
 
@@ -143,7 +198,8 @@ First public release, on [npm](https://www.npmjs.com/package/conifer-sdk) and
   produces a **blank PyPI project page**. Caught by inspecting the built wheel's
   metadata rather than trusting a green build.
 
-[Unreleased]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.2...HEAD
+[Unreleased]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.2.0...HEAD
+[0.2.0]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.2...sdk-v0.2.0
 [0.1.2]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.1...sdk-v0.1.2
 [0.1.1]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.0...sdk-v0.1.1
 [0.1.0]: https://github.com/ConiferKit/use-conifer/releases/tag/sdk-v0.1.0

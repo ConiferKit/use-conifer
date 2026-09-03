@@ -37,6 +37,8 @@ from .types import (
     Embedding,
     EmbeddingsRequest,
     EmbeddingsResponse,
+    RouteDecision,
+    RouteRequest,
     is_terminal_job,
 )
 
@@ -311,8 +313,17 @@ class Conifer:
         try:
             for line in response:
                 chunk = parse_frame(line.decode("utf-8"))
-                if chunk is not None:
-                    yield chunk
+                if chunk is None:
+                    continue
+                if chunk.get("error") is not None and "choices" not in chunk:
+                    # The gateway failing a turn it already answered 200 to:
+                    # the frame is the error envelope, and is raised as one.
+                    raise error_from(
+                        response.status,
+                        chunk,
+                        {k.lower(): v for k, v in response.headers.items()},
+                    )
+                yield chunk
         finally:
             response.close()
 
@@ -578,6 +589,20 @@ class Conifer:
         """Cheapest catalog entry DECLARING every capability asked for."""
         return pick_cheapest(self.models(), caps, min_context_window)
 
+    def route(self, request: RouteRequest) -> RouteDecision:
+        """The learned router's pick for a query, WITHOUT the completion.
+
+        ``POST /v1/route``. Free: a decision moves no money. For a caller with
+        its own completion path (a Slackbot on a vendor SDK, a batch planner).
+        To route AND complete in one call, send ``model="auto"`` (or a policy
+        id) to ``chat()`` and read ``receipt.effective_model``.
+
+        A 503 means this gateway has no router configured or it did not
+        answer; name a model yourself for that turn.
+        """
+        data, _ = self.request("POST", "/v1/route", body=route_body(request))
+        return to_route_decision(data or {})
+
     # ------------------------------------------------------------- embeddings
 
     def embed(self, request: EmbeddingsRequest) -> EmbeddingsResponse:
@@ -781,6 +806,31 @@ def chat_headers(request: ChatRequest, idempotency_key: str) -> Dict[str, str]:
         if chain is not None:
             headers["x-conifer-fallback-models"] = chain
     return headers
+
+
+def route_body(request: RouteRequest) -> Dict[str, Any]:
+    """The ``/v1/route`` wire body, exactly the gateway's field names."""
+    body: Dict[str, Any] = {"query": request.query}
+    if request.policy is not None:
+        body["policy"] = request.policy
+    if request.candidates is not None:
+        body["candidates"] = list(request.candidates)
+    if request.tools is not None:
+        body["tools"] = request.tools
+    if request.max_output_tokens is not None:
+        body["max_output_tokens"] = request.max_output_tokens
+    return body
+
+
+def to_route_decision(data: Mapping[str, Any]) -> RouteDecision:
+    fallbacks = [f for f in (data.get("fallbacks") or []) if isinstance(f, str)]
+    return RouteDecision(
+        model=str(data.get("model") or ""),
+        fallbacks=fallbacks,
+        policy=str(data.get("policy") or "balanced"),
+        router_version=str(data.get("router_version") or ""),
+        raw=dict(data),
+    )
 
 
 def to_catalog_model(entry: Mapping[str, Any]) -> CatalogModel:

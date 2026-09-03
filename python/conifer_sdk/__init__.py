@@ -12,7 +12,7 @@ Standard library only, so ``pip install`` pulls no tree and the SDK works in a
 lambda, a Slack bot, or a locked-down build image unchanged.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 from .client import (
     Conifer,
@@ -27,6 +27,8 @@ from .client import (
     turn_identity,
     parse_frame,
     resolve_base_url,
+    route_body,
+    to_route_decision,
 )
 from .errors import (
     ConiferAuthError,
@@ -75,6 +77,9 @@ from .types import (
     Embedding,
     EmbeddingsRequest,
     EmbeddingsResponse,
+    ROUTE_POLICIES,
+    RouteDecision,
+    RouteRequest,
     vector_of,
 )
 
@@ -128,6 +133,11 @@ __all__ = [
     "Completion",
     "CatalogModel",
     "Balance",
+    "ROUTE_POLICIES",
+    "RouteDecision",
+    "RouteRequest",
+    "route_body",
+    "to_route_decision",
     "from_openrouter",
     "attribution_from_openrouter",
     "from_helicone_headers",

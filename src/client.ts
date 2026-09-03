@@ -7,9 +7,10 @@ import {
   ConiferError,
   ConiferPortabilityError,
   ConiferTimeoutError,
+  errorFrom,
 } from "./errors.ts";
-import { nanoUsdToUsdString, readReceipt, type Receipt } from "./receipt.ts";
-import { Transport, type FetchLike } from "./transport.ts";
+import { nanoUsdToUsdString, readReceipt } from "./receipt.ts";
+import { Transport, type FetchLike, type StreamLease } from "./transport.ts";
 import {
   isTerminalJob,
   type Balance,
@@ -20,6 +21,9 @@ import {
   type DeferredJob,
   type EmbeddingsRequest,
   type EmbeddingsResponse,
+  type RouteDecision,
+  type RoutePolicy,
+  type RouteRequest,
   type StreamChunk,
 } from "./types.ts";
 
@@ -229,7 +233,7 @@ export class Conifer {
     return toDeferredJob((data ?? {}) as Record<string, unknown>);
   }
 
-  /** The same turn, streamed. The receipt resolves when the stream ends. */
+  /** The same turn, streamed. The (routing) receipt is readable at once. */
   async stream(request: ChatRequest): Promise<CompletionStream> {
     if (request.fallbackModels?.length) {
       // Be honest about the boundary: once bytes are flowing the turn is
@@ -240,7 +244,7 @@ export class Conifer {
         "a client-side fallback chain cannot be applied to a stream: the first token commits the turn. Call chat() for a chain, or handle the failure and re-stream yourself.",
       );
     }
-    const { response } = await this.transport.request({
+    const { response, lease } = await this.transport.request({
       method: "POST",
       path: "/v1/chat/completions",
       body: chatBody(request, true),
@@ -248,7 +252,7 @@ export class Conifer {
       signal: request.signal,
       raw: true,
     });
-    return makeStream(response);
+    return makeStream(response, lease);
   }
 
   /** `GET /v1/models`, projected without loss (`raw` keeps every field). */
@@ -293,6 +297,48 @@ export class Conifer {
     const models = await this.models();
     return pickCheapest(models, caps, options);
   }
+
+  /**
+   * The learned router's pick for a query, WITHOUT the completion:
+   * `POST /v1/route`. Free (a decision moves no money). For a caller with
+   * its own completion path (a Slackbot on a vendor SDK, a batch planner).
+   * To route AND complete in one call, send `model: "auto"` (or a policy id)
+   * to `chat()` instead and read `receipt.effectiveModel`.
+   *
+   * A 503 means this gateway has no router configured or it did not answer;
+   * name a model yourself for that turn.
+   */
+  async route(request: RouteRequest): Promise<RouteDecision> {
+    const { data } = await this.transport.request({
+      method: "POST",
+      path: "/v1/route",
+      body: routeBody(request),
+    });
+    return toRouteDecision((data ?? {}) as Record<string, unknown>);
+  }
+}
+
+/** The `/v1/route` wire body, exactly the gateway's field names. */
+export function routeBody(request: RouteRequest): Record<string, unknown> {
+  const body: Record<string, unknown> = { query: request.query };
+  if (request.policy !== undefined) body.policy = request.policy;
+  if (request.candidates !== undefined) body.candidates = request.candidates;
+  if (request.tools !== undefined) body.tools = request.tools;
+  if (request.maxOutputTokens !== undefined) body.max_output_tokens = request.maxOutputTokens;
+  return body;
+}
+
+function toRouteDecision(data: Record<string, unknown>): RouteDecision {
+  const fallbacks = Array.isArray(data.fallbacks)
+    ? (data.fallbacks as unknown[]).filter((f): f is string => typeof f === "string")
+    : [];
+  return {
+    model: String(data.model ?? ""),
+    fallbacks,
+    policy: (data.policy as RoutePolicy) ?? "balanced",
+    routerVersion: String(data.router_version ?? ""),
+    raw: data,
+  };
 }
 
 /**
@@ -905,61 +951,124 @@ function decimal(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-/** Wrap an SSE response as an async iterable of chunks plus a terminal receipt. */
-function makeStream(response: Response): CompletionStream {
-  const receipt = readReceipt(response.headers);
-  let resolveReceipt: (value: Receipt) => void = () => {};
-  const receiptPromise = new Promise<Receipt>((resolve) => {
-    resolveReceipt = resolve;
-  });
+/** An SSE event boundary: a blank line, whichever line ending the server uses. */
+const FRAME_BOUNDARY = /\r?\n\r?\n/;
 
+/**
+ * Wrap an SSE response as an async iterable of chunks plus its receipt.
+ *
+ * Three exits and one failure are handled here, and each was silent before:
+ *   - an ERROR FRAME (`data: {"error":…}` with no `choices`) is how the gateway
+ *     fails a turn it already answered 200 to. It is thrown through the same
+ *     `errorFrom` a refused request uses, never yielded as a chunk — yielding
+ *     it ended the loop normally with the text cut short;
+ *   - an early `break`, a throw, or the caller's abort CANCELS the body, so
+ *     the gateway stops generating (and billing) what nobody is reading;
+ *   - the lease's idle clock cuts a stream that has gone silent.
+ */
+function makeStream(response: Response, lease: StreamLease): CompletionStream {
+  // The receipt is read from the response HEAD, which has already arrived, so
+  // it is available before the first token — and before any iteration at all.
+  const receipt = Promise.resolve(readReceipt(response.headers));
+
+  const accept = (frame: string): StreamChunk | undefined => {
+    const chunk = parseFrame(frame);
+    if (chunk !== undefined && isErrorFrame(chunk)) {
+      throw errorFrom(response.status, chunk, response.headers);
+    }
+    return chunk;
+  };
+
+  // Set by `iterate` once it owns the body's reader, so `cancel()` reaches a
+  // pending `read()` instead of throwing on a locked body.
+  let cancelReader: (() => Promise<void>) | undefined;
   async function* iterate(): AsyncGenerator<StreamChunk> {
     const body = response.body;
     if (body === null) {
-      resolveReceipt(receipt);
+      lease.release();
       return;
     }
+    const reader = body.getReader();
+    // Cancelling settles a pending `read()` as done, which is how an abort
+    // reaches a loop that is waiting on the network. Once is enough.
+    let cancelled: Promise<void> | undefined;
+    const cancel = () => (cancelled ??= reader.cancel().catch(() => undefined));
+    cancelReader = cancel;
+    lease.signal.addEventListener("abort", cancel);
     const decoder = new TextDecoder();
     let buffer = "";
-    const reader = body.getReader();
+    let finished = false;
     try {
       for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let boundary = buffer.indexOf("\n\n");
-        while (boundary !== -1) {
-          const frame = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 2);
-          const chunk = parseFrame(frame);
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await reader.read();
+        } catch (cause) {
+          if (lease.signal.aborted) throw lease.error();
+          throw cause;
+        }
+        if (lease.signal.aborted) throw lease.error();
+        if (result.done) break;
+        lease.touch();
+        buffer += decoder.decode(result.value, { stream: true });
+        let boundary = FRAME_BOUNDARY.exec(buffer);
+        while (boundary !== null) {
+          const frame = buffer.slice(0, boundary.index);
+          buffer = buffer.slice(boundary.index + boundary[0].length);
+          const chunk = accept(frame);
           if (chunk !== undefined) yield chunk;
-          boundary = buffer.indexOf("\n\n");
+          boundary = FRAME_BOUNDARY.exec(buffer);
         }
       }
-      const tail = parseFrame(buffer);
+      const tail = accept(buffer);
       if (tail !== undefined) yield tail;
+      finished = true;
     } finally {
-      // The cost is disclosed on the response HEAD, which we already read; the
-      // promise exists so the caller has one obvious place to await it.
-      resolveReceipt(receipt);
+      lease.signal.removeEventListener("abort", cancel);
+      // Any exit but the natural end tells the gateway to stop.
+      if (!finished) await cancel();
+      lease.release();
       reader.releaseLock();
     }
   }
 
   return {
     [Symbol.asyncIterator]: iterate,
-    receipt: () => receiptPromise,
+    receipt: () => receipt,
+    async cancel() {
+      // Safe in every state. Before iteration (the receipt-only caller):
+      // cancel the un-owned body so the gateway stops generating — and
+      // billing — what nobody will read. Mid-iteration: cancel through the
+      // reader, which settles the pending `read()` as done. After the
+      // natural end: both paths are no-ops.
+      lease.release();
+      if (cancelReader !== undefined) {
+        await cancelReader();
+      } else {
+        await response.body?.cancel().catch(() => undefined);
+      }
+    },
     fallbackIndex: 0,
   };
 }
 
-/** One SSE frame -> one chunk. `[DONE]`, comments, and blanks yield nothing. */
+/** The gateway's failure-after-200 shape: an error envelope where a chunk would be. */
+function isErrorFrame(chunk: StreamChunk): boolean {
+  return chunk.error !== undefined && chunk.error !== null && chunk.choices === undefined;
+}
+
+/**
+ * One SSE frame -> one chunk. `[DONE]`, comments, and blanks yield nothing.
+ * Lines may end in CRLF or LF; several `data:` lines are one payload joined
+ * with a newline, as the SSE spec says (joined with "" they fused into a
+ * value the server never sent).
+ */
 export function parseFrame(frame: string): StreamChunk | undefined {
   const data = frame
-    .split("\n")
+    .split(/\r?\n/)
     .filter((line) => line.startsWith("data:"))
     .map((line) => line.slice(5).trim())
-    .join("");
+    .join("\n");
   if (data === "" || data === "[DONE]") return undefined;
   try {
     return JSON.parse(data) as StreamChunk;

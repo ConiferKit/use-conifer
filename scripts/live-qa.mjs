@@ -564,6 +564,71 @@ await check("a chain that de-duplicates away sends no header at all", async () =
   return "served, not 400'd";
 });
 
+// ------------------------------------------------------------ the router
+//
+// The router runs on a GPU that scales to zero. The first call after a quiet
+// spell wakes it: route() answers 503 and chat(model: "auto") serves the pin
+// with reason "as_requested". Both are documented behavior, not failures, so
+// each check below warms first and retries once across the cold window.
+
+console.log("\nthe router");
+
+const ROUTER_WAKE_MS = 70_000;
+
+/** Call route() until the router answers, waiting through one cold start. */
+async function routeWarm(request) {
+  const started = Date.now();
+  for (;;) {
+    try {
+      return await conifer.route(request);
+    } catch (error) {
+      const waking = error?.status === 503;
+      if (!waking || Date.now() - started > ROUTER_WAKE_MS) throw error;
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
+  }
+}
+
+await check("route() returns a servable pick, its fallbacks and the artifact version", async () => {
+  const pick = await routeWarm({ query: "What is 17 * 23?", policy: "balanced" });
+  if (!pick.model) throw new Error("no model in the decision");
+  if (!Array.isArray(pick.fallbacks)) throw new Error("fallbacks is not a list");
+  if (!pick.routerVersion) throw new Error("no router version");
+  eq(pick.policy, "balanced", "policy echoed");
+  const catalog = await conifer.models();
+  if (!catalog.some((m) => m.id === pick.model)) throw new Error(`pick ${pick.model} is not in this key's catalog`);
+  return `${pick.model} (+${pick.fallbacks.length} fallbacks)`;
+});
+
+await check("a muted or unknown policy is a 400, never a quiet substitute", async () => {
+  try {
+    await conifer.route({ query: "x", policy: "fast" });
+  } catch (error) {
+    if (error?.status === 400) return "400 for fast";
+    if (error?.status === 503) return "router waking; 400 path not reached (cold start, not a failure)";
+    throw error;
+  }
+  throw new Error("fast was served");
+});
+
+await check("chat(model: auto) is routed and the receipt names the pick", async () => {
+  await routeWarm({ query: "warm", policy: "balanced" });
+  let answer;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    answer = await conifer.chat({
+      model: "auto",
+      messages: [{ role: "user", content: "What is 17 * 23? Reply with just the number." }],
+      maxTokens: 16,
+    });
+    if (answer.receipt.reason === "routed") break;
+    await new Promise((r) => setTimeout(r, 5_000));
+  }
+  eq(answer.receipt.requestedModel, "auto", "requested model");
+  eq(answer.receipt.reason, "routed", "receipt reason");
+  if (answer.receipt.effectiveModel === "auto") throw new Error("effective model is still the alias");
+  return `${answer.receipt.effectiveModel}, ${answer.receipt.costNanoUsd} nUSD`;
+});
+
 // ----------------------------------------------------------------- verdict
 
 console.log(`\n${failed === 0 ? "PASS" : "FAIL"} — ${passed} passed, ${failed} failed\n`);

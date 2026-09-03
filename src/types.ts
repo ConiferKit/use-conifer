@@ -230,10 +230,20 @@ export interface StreamChunk {
  */
 export interface CompletionStream extends AsyncIterable<StreamChunk> {
   /**
-   * The receipt for the streamed turn. Resolves when the stream ends.
-   * Read it AFTER the loop: the cost is settled at the end, not at the start.
+   * The ROUTING receipt for the streamed turn, read from the response head.
+   * It resolves at once, before the first chunk. The COST fields are absent
+   * on a stream (the head is sent before the money is settled); reconcile
+   * from the terminal `usage` chunk.
    */
   receipt(): Promise<Receipt>;
+  /**
+   * Stop the stream NOW: cancels the body so the gateway stops generating
+   * (and billing) what nobody is reading, and releases the idle lease. The
+   * one call a receipt-only caller must make — reading `receipt()` alone
+   * never starts iteration, and without this the socket idled open for the
+   * whole idle window while the gateway kept serving.
+   */
+  cancel(): Promise<void>;
   fallbackIndex: number;
 }
 
@@ -282,6 +292,52 @@ export interface Balance {
   allowanceRemainingNanoUsd?: number;
   creditsRemainingNanoUsd?: number;
   remainingUsd: string;
+}
+
+// ---------------------------------------------------------------- routing
+
+/**
+ * The routing policies the gateway serves. They are also model ids:
+ * `chat({ model: "auto" })` runs `balanced` and the gateway serves the pick,
+ * disclosing it in `receipt.effectiveModel` with `receipt.reason === "routed"`.
+ * `route()` is the same decision without the completion.
+ *
+ * The router itself has two more closed names, `cost-effective` and `fast`,
+ * muted on the gateway until their value floor is measured: they are not
+ * listed, `chat()` with one serves the default model `as_requested`, and
+ * `route()` with one is a 400. The virtual rows of `models()` are the
+ * authority for what a given gateway serves; this type will widen when that
+ * does. The wire is a plain string, so an unmuted name passes through today.
+ */
+export type RoutePolicy = "balanced" | "best" | (string & {});
+
+export interface RouteRequest {
+  /** The current ask, as the model would see it (the last user message). */
+  query: string;
+  /** Defaults to `balanced`. */
+  policy?: RoutePolicy;
+  /**
+   * Narrow the field to these catalog ids. The gateway intersects them with
+   * your own listing: an id you cannot call is dropped, never routed to.
+   * Omit to route over everything your key can call.
+   */
+  candidates?: string[];
+  /** The turn will carry tool schemas; seats that cannot take tools are masked. */
+  tools?: boolean;
+  /** The completion cap the turn will run under (context fit + cost estimate). */
+  maxOutputTokens?: number;
+}
+
+/** What the router decided. A pick and fallbacks; never a score. */
+export interface RouteDecision {
+  /** The catalog id to call. Always one of your own listing. */
+  model: string;
+  /** The router's next picks, in order, if `model` fails you. At most three. */
+  fallbacks: string[];
+  policy: RoutePolicy;
+  /** Pins the response to the exact router artifact that produced it. */
+  routerVersion: string;
+  raw: Record<string, unknown>;
 }
 
 // ----------------------------------------------------------------- embeddings

@@ -3,7 +3,9 @@
 // about bytes we would put on the wire or values we would hand back.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   Conifer,
@@ -14,6 +16,10 @@ import {
   ConiferPaymentError,
   ConiferPortabilityError,
   ConiferRateLimitError,
+  ConiferTimeoutError,
+  ConiferUpstreamError,
+  STREAM_IDLE_MS,
+  Transport,
   chatBody,
   chatHeaders,
   emptyReason,
@@ -26,6 +32,7 @@ import {
   readReceipt,
   resolveBaseUrl,
   resolveChain,
+  routeBody,
   serverFallbackHeader,
   textOf,
   withCost,
@@ -445,6 +452,48 @@ test("streaming yields chunks and resolves the receipt after the loop", async ()
   assert.equal(receipt.costNanoUsd, 1_250_000);
 });
 
+test("a receipt-only caller can cancel(): the body is torn down and the lease released", async () => {
+  // `receipt()` resolves from the head without starting iteration, so a
+  // caller that only wants the receipt used to leave the socket open (and
+  // the gateway generating and billing) for the whole idle window (review
+  // P1, 2026-09-01). `cancel()` is the receipt-only caller's release.
+  let bodyCancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      bodyCancelled = true;
+    },
+    // Never enqueues: the "gateway" is still generating.
+    pull() {
+      return new Promise(() => undefined);
+    },
+  });
+  const { fetchImpl } = stubFetch([
+    new Response(body, { status: 200, headers: { ...RECEIPT_HEADERS, "content-type": "text/event-stream" } }),
+  ]);
+  const stream = await client(fetchImpl).stream({ model: "m", messages: [] });
+  const receipt = await stream.receipt();
+  assert.equal(receipt.effectiveModel, "claude-haiku-4-5");
+  await stream.cancel();
+  assert.ok(bodyCancelled, "cancel() must tear the body down so the gateway stops");
+});
+
+test("cancel() mid-iteration settles the pending read and ends the loop", async () => {
+  const { body } = byteBody('data: {"choices":[{"delta":{"content":"pine"}}]}\n\n', [], {
+    stallAfterLast: true,
+  });
+  const { fetchImpl } = stubFetch([
+    new Response(body, { status: 200, headers: { ...RECEIPT_HEADERS, "content-type": "text/event-stream" } }),
+  ]);
+  const stream = await client(fetchImpl).stream({ model: "m", messages: [] });
+  const seen: unknown[] = [];
+  for await (const chunk of stream) {
+    seen.push(chunk);
+    // The next read would stall forever; cancel() must settle it as done.
+    void stream.cancel();
+  }
+  assert.equal(seen.length, 1, "one chunk before the cancel");
+});
+
 test("a streamed receipt carries routing but NOT cost, because the wire cannot", async () => {
   // Measured live 2026-08-26: on SSE the response HEAD is sent before the
   // first token, so the gateway knows the route but not yet the money. The
@@ -541,6 +590,52 @@ test("the catalog keeps every field, and absence stays absence", async () => {
   assert.equal(models[0]!.raw.id, "claude-haiku-4-5");
 });
 
+test("route sends the /v1/route wire and returns a pick, never a score", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse({
+      model: "deepseek-v4-flash",
+      fallbacks: ["gemini-3.6-flash", "claude-haiku-4-5"],
+      policy: "balanced",
+      router_version: "25dfa407c0e5-ddab747cf582@405043b6",
+    }),
+  ]);
+  const decision = await client(fetchImpl).route({
+    query: "what is 17 * 23?",
+    candidates: ["deepseek-v4-flash", "gemini-3.6-flash", "claude-haiku-4-5"],
+    tools: false,
+    maxOutputTokens: 200,
+  });
+  assert.equal(calls[0]!.url, "https://api.conifer.build/v1/route");
+  assert.equal(calls[0]!.init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0]!.init.body), {
+    query: "what is 17 * 23?",
+    candidates: ["deepseek-v4-flash", "gemini-3.6-flash", "claude-haiku-4-5"],
+    tools: false,
+    max_output_tokens: 200,
+  });
+  assert.equal(decision.model, "deepseek-v4-flash");
+  assert.deepEqual(decision.fallbacks, ["gemini-3.6-flash", "claude-haiku-4-5"]);
+  assert.equal(decision.policy, "balanced");
+  assert.equal(decision.routerVersion, "25dfa407c0e5-ddab747cf582@405043b6");
+  for (const key of Object.keys(decision.raw)) {
+    assert.ok(!/score|bar|abilit|rank/.test(key), `route must never surface ${key}`);
+  }
+  // The minimal body carries only the query: the gateway defaults the policy
+  // and the field to the caller's own listing.
+  assert.deepEqual(routeBody({ query: "q" }), { query: "q" });
+  assert.deepEqual(routeBody({ query: "q", policy: "best" }), { query: "q", policy: "best" });
+});
+
+test("route surfaces a router-off gateway as the typed 503, not a pick", async () => {
+  const { fetchImpl } = stubFetch([
+    jsonResponse(
+      { error: { message: "the learned router is not configured on this gateway", type: "unavailable" } },
+      { status: 503 },
+    ),
+  ]);
+  await assert.rejects(client(fetchImpl).route({ query: "q" }), (error: any) => error.status === 503);
+});
+
 test("balance converts nanodollars to an exact decimal string", async () => {
   const { fetchImpl } = stubFetch([
     jsonResponse({
@@ -618,6 +713,10 @@ test("SSE frames that are not data are ignored", () => {
   assert.equal(parseFrame("data: [DONE]"), undefined);
   assert.equal(parseFrame(""), undefined);
   assert.deepEqual(parseFrame('data: {"id":"x"}'), { id: "x" });
+  // Several `data:` lines join with a newline, never "": JSON ignores the
+  // whitespace inside a structure, so the only place the join is observable
+  // is two bare tokens, which "" fused into `12` — a value never sent.
+  assert.equal(parseFrame("data: 1\ndata: 2"), undefined);
 });
 
 test("a stray OPENAI_BASE_URL cannot redirect Conifer traffic elsewhere", () => {
@@ -914,4 +1013,291 @@ test("a completion carries the cost in its body, not only its receipt", async ()
   // Same number, two places: whichever half of the response a tool keeps.
   assert.equal(answer.usage?.cost_nanousd, answer.receipt.costNanoUsd);
   assert.equal(answer.usage?.cost_nanousd, 1_250_000);
+});
+
+// ---------------------------------------------------------------------------
+// Streaming, adversarially. One table, one loop, every way a body can arrive
+// or end: split at arbitrary byte boundaries, CRLF-framed, multi-line data, a
+// mid-stream error frame, an early `break`, a caller abort, and a receipt read
+// before the first token. Each row asks: what would this stream do to a
+// caller who trusted the loop to end only when the turn did?
+
+/** A body delivered in pieces cut at the given byte offsets, with a cancel spy. */
+function byteBody(text: string, cuts: number[], options: { stallAfterLast?: boolean } = {}) {
+  const bytes = new TextEncoder().encode(text);
+  const pieces: Uint8Array[] = [];
+  let at = 0;
+  for (const cut of [...cuts, bytes.length]) {
+    pieces.push(bytes.slice(at, cut));
+    at = cut;
+  }
+  let cancels = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const next = pieces.shift();
+      if (next !== undefined) {
+        controller.enqueue(next);
+        return;
+      }
+      // A gateway that has gone quiet: the read never settles on its own.
+      if (options.stallAfterLast) return new Promise<void>(() => {});
+      controller.close();
+    },
+    cancel() {
+      cancels += 1;
+    },
+  });
+  return { body, cancels: () => cancels };
+}
+
+const PINE = 'data: {"choices":[{"delta":{"content":"pine"}}]}';
+const CONE = 'data: {"choices":[{"delta":{"content":"cone"}}]}';
+const ERROR_FRAME = 'data: {"error":{"type":"upstream_error","message":"the provider closed the connection"}}';
+
+interface StreamCase {
+  name: string;
+  sse: string;
+  cuts: number[];
+  stall?: boolean;
+  /** Stop iterating after this many chunks (an early `break`). */
+  breakAfter?: number;
+  /** Abort the caller's signal after this many chunks. */
+  abortAfter?: number;
+  receiptFirst?: boolean;
+  text: string;
+  throws?: { type: Function; message: RegExp; status?: number };
+  cancels: number;
+}
+
+const STREAM_CASES: StreamCase[] = [
+  {
+    name: "LF frames cut at arbitrary byte boundaries reassemble",
+    sse: `${PINE}\n\n${CONE}\n\ndata: [DONE]\n\n`,
+    cuts: [3, 17, PINE.length + 1, PINE.length + 2, PINE.length + 30],
+    text: "pinecone",
+    cancels: 0,
+  },
+  {
+    name: "CRLF frames are frames too, even when the boundary is cut in half",
+    sse: `${PINE}\r\n\r\n${CONE}\r\n\r\ndata: [DONE]\r\n\r\n`,
+    cuts: [PINE.length + 1, PINE.length + 3, PINE.length + 4 + CONE.length + 2],
+    text: "pinecone",
+    cancels: 0,
+  },
+  {
+    // The newline (not "") join itself is pinned on `parseFrame` directly:
+    // inside a JSON structure both joins parse the same.
+    name: "several data: lines in one frame are one payload",
+    sse: 'data: {"choices":[{"delta":\ndata: {"content":"pine"}}]}\n\ndata: [DONE]\n\n',
+    cuts: [],
+    text: "pine",
+    cancels: 0,
+  },
+  {
+    name: "a mid-stream error frame throws after the chunks before it",
+    // The body stays OPEN after the error frame: the cancel is what stops it.
+    sse: `${PINE}\n\n${ERROR_FRAME}\n\n`,
+    cuts: [PINE.length + 5],
+    stall: true,
+    text: "pine",
+    throws: { type: ConiferUpstreamError, message: /closed the connection/, status: 200 },
+    cancels: 1,
+  },
+  {
+    name: "an early break cancels the body so the gateway stops generating",
+    sse: `${PINE}\n\n${CONE}\n\ndata: [DONE]\n\n`,
+    cuts: [PINE.length + 2],
+    breakAfter: 1,
+    text: "pine",
+    cancels: 1,
+  },
+  {
+    name: "a caller abort mid-stream throws and cancels the body",
+    sse: `${PINE}\n\n`,
+    cuts: [],
+    stall: true,
+    abortAfter: 1,
+    text: "pine",
+    throws: { type: ConiferTimeoutError, message: /aborted/ },
+    cancels: 1,
+  },
+  {
+    name: "the receipt resolves before iteration: it is read from the head",
+    sse: `${PINE}\n\n${CONE}\n\ndata: [DONE]\n\n`,
+    cuts: [],
+    receiptFirst: true,
+    text: "pinecone",
+    cancels: 0,
+  },
+];
+
+for (const row of STREAM_CASES) {
+  test(`stream: ${row.name}`, async () => {
+    const { body, cancels } = byteBody(row.sse, row.cuts, { stallAfterLast: row.stall });
+    const { fetchImpl } = stubFetch([
+      new Response(body, {
+        status: 200,
+        headers: { ...RECEIPT_HEADERS, "content-type": "text/event-stream" },
+      }),
+    ]);
+    const controller = new AbortController();
+    const stream = await client(fetchImpl).stream({
+      model: "m",
+      messages: [],
+      signal: controller.signal,
+    });
+    if (row.receiptFirst) {
+      const early = await stream.receipt();
+      assert.equal(early.requestId, "req-abc");
+    }
+    const text: string[] = [];
+    let seen = 0;
+    const drive = async () => {
+      for await (const chunk of stream) {
+        const delta = chunk.choices?.[0]?.delta as { content?: string } | undefined;
+        if (delta?.content !== undefined) text.push(delta.content);
+        seen += 1;
+        if (row.breakAfter === seen) break;
+        if (row.abortAfter === seen) controller.abort();
+      }
+    };
+    if (row.throws === undefined) {
+      await drive();
+    } else {
+      const failure = await drive().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      assert.ok(failure instanceof row.throws.type, `expected ${row.throws.type.name}, got ${String(failure)}`);
+      assert.match((failure as Error).message, row.throws.message);
+      if (row.throws.status !== undefined) {
+        assert.equal((failure as { status: number }).status, row.throws.status);
+        assert.equal((failure as { requestId?: string }).requestId, "req-abc");
+      }
+    }
+    assert.equal(text.join(""), row.text);
+    assert.equal(cancels(), row.cancels, "body cancel count");
+    const receipt = await stream.receipt();
+    assert.equal(receipt.costNanoUsd, 1_250_000);
+  });
+}
+
+test("a stream that goes silent is cut by the idle clock, not waited on forever", async () => {
+  const contract = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../contracts/gateway-contract.json", import.meta.url)), "utf8"),
+  ) as { timeouts_secs: { stream_idle: number } };
+  assert.equal(STREAM_IDLE_MS, contract.timeouts_secs.stream_idle * 1000);
+
+  const { body } = byteBody(`${PINE}\n\n`, [], { stallAfterLast: true });
+  const { fetchImpl } = stubFetch([
+    new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+  ]);
+  const transport = new Transport({
+    baseUrl: "https://gw.test",
+    apiKey: "k",
+    fetch: fetchImpl,
+    timeoutMs: 10_000,
+    maxRetries: 0,
+    defaultHeaders: {},
+    streamIdleMs: 20,
+  });
+  const { lease } = await transport.request({ method: "POST", path: "/v1/chat/completions", body: {}, raw: true });
+  assert.ok(lease, "a raw request hands back its lease");
+  // Bytes keep it alive…
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  lease.touch();
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(lease.signal.aborted, false, "touched inside the window");
+  // …silence does not.
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(lease.signal.aborted, true);
+  const error = lease.error();
+  assert.ok(error instanceof ConiferTimeoutError);
+  assert.match(error.message, /20ms/);
+  lease.release();
+});
+
+test("a Retry-After beyond the request timeout is capped at the timeout", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse({ error: { type: "rate_limit_error", message: "slow down" } }, { status: 429, headers: { "retry-after": "3600" } }),
+    jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS }),
+  ]);
+  const started = Date.now();
+  await client(fetchImpl, { maxRetries: 1, timeoutMs: 50 }).chat({ model: "m", messages: [] });
+  assert.equal(calls.length, 2);
+  assert.ok(Date.now() - started < 2_000, "did not sleep for an hour");
+});
+
+test("a Retry-After sleep ends the moment the caller aborts", async () => {
+  const { calls, fetchImpl } = stubFetch([
+    jsonResponse({ error: { type: "rate_limit_error", message: "slow down" } }, { status: 429, headers: { "retry-after": "3600" } }),
+    jsonResponse(COMPLETION, { headers: RECEIPT_HEADERS }),
+  ]);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 10);
+  const started = Date.now();
+  await assert.rejects(
+    client(fetchImpl, { maxRetries: 1 }).chat({ model: "m", messages: [], signal: controller.signal }),
+    (error: unknown) => error instanceof ConiferTimeoutError && /aborted/.test(error.message),
+  );
+  assert.equal(calls.length, 1, "no second attempt after the abort");
+  assert.ok(Date.now() - started < 2_000);
+});
+
+test("an abort during the connection-error backoff stops, not fires a second attempt", async () => {
+  const calls: number[] = [];
+  const fetchImpl = async () => {
+    calls.push(Date.now());
+    throw new TypeError("fetch failed");
+  };
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 10);
+  await assert.rejects(
+    client(fetchImpl, { maxRetries: 1 }).chat({ model: "m", messages: [], signal: controller.signal }),
+    (error: unknown) => error instanceof ConiferTimeoutError && /aborted/.test(error.message),
+  );
+  assert.equal(calls.length, 1, "no second attempt after the abort");
+});
+
+test("a lease nobody releases does not keep the process alive", async () => {
+  // `await client.stream()` with no iteration (or only a `receipt()` read)
+  // never releases the lease. Its idle timer must be unref'd, or a 120 s
+  // clock holds `node` open for the whole window: the suite went from 2 s
+  // to 120 s on exactly one such test.
+  const IDLE_MS = 60_000;
+  // Every timer armed with the lease's own delay; the head timer (timeoutMs)
+  // is cleared on return and not the subject here.
+  const idleTimers: Array<{ hasRef?(): boolean }> = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    const handle = realSetTimeout(...args);
+    if (args[1] === IDLE_MS) idleTimers.push(handle as unknown as { hasRef?(): boolean });
+    return handle;
+  }) as typeof setTimeout;
+  try {
+    const { body } = byteBody(`${PINE}\n\n`, [], { stallAfterLast: true });
+    const { fetchImpl } = stubFetch([
+      new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+    ]);
+    const transport = new Transport({
+      baseUrl: "https://gw.test",
+      apiKey: "k",
+      fetch: fetchImpl,
+      timeoutMs: 10_000,
+      maxRetries: 0,
+      defaultHeaders: {},
+      streamIdleMs: IDLE_MS,
+    });
+    const { lease } = await transport.request({ method: "POST", path: "/v1/chat/completions", body: {}, raw: true });
+    assert.ok(lease);
+    lease.touch(); // the re-armed clock too
+    assert.equal(idleTimers.length, 2, "the initial and the re-armed idle timers");
+    assert.ok(
+      idleTimers.every((timer) => timer.hasRef?.() === false),
+      "an idle timer holds a ref: an unreleased lease would keep the process alive",
+    );
+    lease.release();
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
 });

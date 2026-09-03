@@ -59,7 +59,14 @@ class ConiferPaymentError(ConiferError):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.required_nano_usd, self.balance_nano_usd = _two_integers(self.message)
+        # Anchored on the gateway's wording, never "the first two integers": a
+        # delegated key's message opens with the billed ACCOUNT id, whose digits
+        # were being read as the amount. The 402 body carries the balance
+        # structured (``error.balance_nanodollars``); that wins over the prose.
+        self.required_nano_usd = _integer_after(self.message, r"needs up to (-?\d+) nanodollars")
+        self.balance_nano_usd = _structured_balance(self.body)
+        if self.balance_nano_usd is None:
+            self.balance_nano_usd = _integer_after(self.message, r"holds? (-?\d+)")
 
 
 class ConiferCostCeilingError(ConiferError):
@@ -210,6 +217,17 @@ class ConiferPortabilityError(ConiferError):
     def __init__(self, field: str, message: str) -> None:
         super().__init__(status=0, type="unsupported_by_conifer", message=message)
         self.field = field
+
+
+def _integer_after(message: str, pattern: str) -> Optional[int]:
+    found = re.search(pattern, message)
+    return int(found.group(1)) if found else None
+
+
+def _structured_balance(body: Any) -> Optional[int]:
+    envelope = body.get("error") if isinstance(body, dict) else None
+    value = envelope.get("balance_nanodollars") if isinstance(envelope, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _two_integers(message: str) -> tuple[Optional[int], Optional[int]]:

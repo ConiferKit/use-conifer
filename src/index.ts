@@ -21,6 +21,7 @@ export {
   priceOf,
   resolveBaseUrl,
   resolveChain,
+  routeBody,
   serverFallbackHeader,
   toCatalogModel,
   toDeferredJob,
@@ -50,6 +51,9 @@ export type {
   Message,
   JobStatus,
   Role,
+  RouteDecision,
+  RoutePolicy,
+  RouteRequest,
   StreamChunk,
   Usage,
 } from "./types.ts";
@@ -86,8 +90,8 @@ export {
 export { ReceiptCollector, SpendBudget } from "./receipts.ts";
 export type { ObservedReceipt, ReceiptTotal } from "./receipts.ts";
 
-export { Transport, backoffMs, minimumBackoffMs } from "./transport.ts";
-export type { FetchLike, RequestSpec, TransportOptions } from "./transport.ts";
+export { STREAM_IDLE_MS, Transport, backoffMs, minimumBackoffMs } from "./transport.ts";
+export type { FetchLike, RequestSpec, StreamLease, TransportOptions } from "./transport.ts";
 
 // Portability: migrate from another gateway without silently changing what runs.
 export {

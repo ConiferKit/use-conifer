@@ -33,6 +33,8 @@ from conifer_sdk import (  # noqa: E402
     SpendBudget,
     SpendBudgetExceeded,
     EmbeddingsRequest,
+    RouteRequest,
+    route_body,
     MIN_DEFER_WINDOW_SECONDS,
     TERMINAL_JOB_STATUSES,
     is_terminal_job,
@@ -227,6 +229,49 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(caught.exception.required_nano_usd, 900)
         self.assertEqual(caught.exception.balance_nano_usd, 100)
 
+    def test_a_delegated_key_402_reads_the_amounts_not_the_account_id(self):
+        # The billed ACCOUNT id opens the message and carries digits; "the
+        # first two integers" read it as the amount. The words are the anchor
+        # and the structured `balance_nanodollars` on the body wins.
+        message = (
+            "insufficient allowance on billed account acct_7f3a91: this request needs "
+            "up to 6200000 nanodollars but the account holds 12; the account owner must add credits"
+        )
+        _, structured = scripted(
+            (
+                402,
+                {},
+                {
+                    "error": {
+                        "type": "insufficient_allowance",
+                        "message": message,
+                        "balance_nanodollars": 7,
+                        "billed_account": "acct_7f3a91",
+                    }
+                },
+            )
+        )
+        with self.assertRaises(ConiferPaymentError) as caught:
+            client(structured).chat(ChatRequest(model="m", messages=[]))
+        self.assertEqual(caught.exception.required_nano_usd, 6200000)
+        self.assertEqual(caught.exception.balance_nano_usd, 7)
+
+        _, scraped = scripted(
+            (402, {}, {"error": {"type": "insufficient_allowance", "message": message}})
+        )
+        with self.assertRaises(ConiferPaymentError) as caught:
+            client(scraped).chat(ChatRequest(model="m", messages=[]))
+        self.assertEqual(caught.exception.required_nano_usd, 6200000)
+        self.assertEqual(caught.exception.balance_nano_usd, 12)
+
+        _, bare = scripted(
+            (402, {}, {"error": {"type": "insufficient_allowance", "message": "account 42 refused"}})
+        )
+        with self.assertRaises(ConiferPaymentError) as caught:
+            client(bare).chat(ChatRequest(model="m", messages=[]))
+        self.assertIsNone(caught.exception.required_nano_usd)
+        self.assertIsNone(caught.exception.balance_nano_usd)
+
     def test_rate_limit_carries_retry_after(self):
         _, transport = scripted(
             (429, {"retry-after": "7"}, {"error": {"type": "rate_limited", "message": "slow"}})
@@ -386,6 +431,62 @@ class WireTests(unittest.TestCase):
         balance = client(transport).balance()
         self.assertEqual(balance.remaining_usd, "12.500000000")
 
+    def test_route_sends_the_wire_and_returns_a_pick_never_a_score(self):
+        calls, transport = scripted(
+            (
+                200,
+                {},
+                {
+                    "model": "deepseek-v4-flash",
+                    "fallbacks": ["gemini-3.6-flash", "claude-haiku-4-5"],
+                    "policy": "balanced",
+                    "router_version": "25dfa407c0e5-ddab747cf582@405043b6",
+                },
+            )
+        )
+        decision = client(transport).route(
+            RouteRequest(
+                query="what is 17 * 23?",
+                candidates=["deepseek-v4-flash", "gemini-3.6-flash", "claude-haiku-4-5"],
+                tools=False,
+                max_output_tokens=200,
+            )
+        )
+        call = calls[0]
+        self.assertEqual(call["method"], "POST")
+        self.assertTrue(call["url"].endswith("/v1/route"))
+        self.assertEqual(
+            call["body"],
+            {
+                "query": "what is 17 * 23?",
+                "candidates": ["deepseek-v4-flash", "gemini-3.6-flash", "claude-haiku-4-5"],
+                "tools": False,
+                "max_output_tokens": 200,
+            },
+        )
+        self.assertEqual(decision.model, "deepseek-v4-flash")
+        self.assertEqual(decision.fallbacks, ["gemini-3.6-flash", "claude-haiku-4-5"])
+        self.assertEqual(decision.policy, "balanced")
+        self.assertEqual(decision.router_version, "25dfa407c0e5-ddab747cf582@405043b6")
+        for key in decision.raw:
+            self.assertNotRegex(key, r"score|bar|abilit|rank")
+        self.assertEqual(route_body(RouteRequest(query="q")), {"query": "q"})
+        self.assertEqual(
+            route_body(RouteRequest(query="q", policy="best")), {"query": "q", "policy": "best"}
+        )
+
+    def test_route_surfaces_a_router_off_gateway_as_503(self):
+        _, transport = scripted(
+            (
+                503,
+                {},
+                {"error": {"message": "the learned router is not configured", "type": "unavailable"}},
+            )
+        )
+        with self.assertRaises(ConiferError) as caught:
+            client(transport).route(RouteRequest(query="q"))
+        self.assertEqual(caught.exception.status, 503)
+
     def test_cheapest_reads_the_catalogs_decimal_string_prices(self):
         # Regression: an earlier version summed only NUMERIC pricing values, so
         # against the real catalog (money as strings) every model ranked as
@@ -515,6 +616,38 @@ class ServerFallbackTests(unittest.TestCase):
             "k",
         )
         self.assertEqual(headers["x-conifer-fallback-models"], "gpt-5.5")
+
+    def test_a_mid_stream_error_frame_raises_instead_of_ending_the_loop_quietly(self):
+        # The gateway fails a turn it already answered 200 to by sending the
+        # error envelope as a data frame. Yielding it as a chunk ended the
+        # loop normally with the text silently cut short.
+        class Body:
+            status = 200
+            headers = {"X-Conifer-Request-Id": "gw-9"}
+            closed = False
+
+            def __iter__(self):
+                yield b'data: {"choices":[{"delta":{"content":"pine"}}]}\r\n'
+                yield b"\r\n"
+                yield b'data: {"error":{"type":"upstream_error","message":"provider died"}}\n'
+                yield b"\n"
+                yield b'data: {"choices":[{"delta":{"content":"cone"}}]}\n'
+
+            def close(self):
+                self.closed = True
+
+        body = Body()
+        c = client(lambda *a: None)
+        c._open_stream = lambda payload, headers: body
+        seen = []
+        with self.assertRaises(ConiferError) as caught:
+            for chunk in c.stream(ChatRequest(model="m", messages=[])):
+                seen.append(chunk)
+        self.assertEqual(seen, [{"choices": [{"delta": {"content": "pine"}}]}])
+        self.assertEqual(caught.exception.status, 200)
+        self.assertEqual(caught.exception.type, "upstream_error")
+        self.assertEqual(caught.exception.request_id, "gw-9")
+        self.assertTrue(body.closed)
 
     def test_frames_parse_and_terminators_yield_nothing(self):
         self.assertIsNone(parse_frame("data: [DONE]"))

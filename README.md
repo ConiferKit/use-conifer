@@ -68,6 +68,51 @@ up.
   <sub><b><a href="https://conifer.build/#router">▶ Watch the router choose (50s, no audio)</a></b> — a real screen recording, playing on <a href="https://conifer.build">conifer.build</a></sub>
 </div>
 
+### Let the router pick
+
+Send `model: "auto"` and the gateway chooses the model for that turn, serves it,
+and tells you which one in the receipt:
+
+```ts
+const answer = await conifer.chat({
+  model: "auto",                                  // or "balanced" | "best"
+  messages: [{ role: "user", content: "What is 17 * 23?" }],
+  maxTokens: 200,
+});
+console.log(answer.receipt.effectiveModel);       // "deepseek-v4-flash"
+console.log(answer.receipt.reason);               // "routed"
+```
+
+`auto` is the `balanced` policy: the router scores the question against every
+model you can call, keeps the ones predicted to answer it, and takes the best
+value among them. `best` ranks that same shortlist on ability alone and costs
+what the strongest model costs. The router has two more names,
+`cost-effective` and `fast`, muted on the gateway until their value floor is
+measured: they are not listed, and asking for one gets the default model, not
+a quiet substitute. This README will change when that does.
+
+Measured on held-out task families the router had never seen (n = 4,171):
+`balanced` matched the best single frontier model within the noise on
+accuracy at two thirds of its cost. It does not beat that model on accuracy,
+and it is not meant to; it is meant to keep landing near it as the catalog
+changes, without anyone re-picking.
+
+If you would rather make the call yourself, the same decision is one request
+away, free, with no completion attached:
+
+```ts
+const pick = await conifer.route({ query: text, policy: "balanced" });
+pick.model;        // "deepseek-v4-flash" — always a model your key can call
+pick.fallbacks;    // ["gemini-3.6-flash", "claude-haiku-4-5"] — next picks, in order
+```
+
+```python
+pick = conifer.route(RouteRequest(query=text, policy="balanced"))
+```
+
+It returns a model id and up to three fallbacks. It does not return scores,
+and it never will: the pick is the product, the scoring is not.
+
 ## Install the SDK
 
 ```bash
@@ -490,7 +535,7 @@ Six tools, each one real gateway call:
 The reason `conifer_complete` reports its cost is that an agent that can see
 what its last call cost can be told to spend less. One that cannot, cannot.
 
-### A Slack bot that routes by cost
+### A Slack bot that lets the router choose
 
 ```ts
 import { Conifer } from "conifer-sdk";
@@ -498,23 +543,21 @@ import { Conifer } from "conifer-sdk";
 const conifer = new Conifer({ defaultHeaders: { "x-conifer-client": "slack-bot" } });
 
 export async function onMention(text: string, isLongTask: boolean) {
-  // Pick from what the catalog actually declares, not from a hardcoded list.
-  const model = await conifer.cheapestFor(isLongTask ? ["tools"] : [], {
-    minContextWindow: isLongTask ? 200_000 : undefined,
-  });
-  if (model === undefined) return "no model in the catalog fits that request";
-
   const answer = await conifer.chat({
-    model: model.id,
+    model: isLongTask ? "best" : "auto",  // the router picks; the receipt says what it picked
     messages: [{ role: "user", content: text }],
     maxTokens: 800,
-    maxCostNanoUsd: 20_000_000,          // $0.02 per Slack reply, hard ceiling
-    deadlineSeconds: isLongTask ? 900 : undefined,  // advisory: may serve on a cheaper tier
+    maxCostNanoUsd: 20_000_000,           // $0.02 per Slack reply, hard ceiling
   });
 
-  return `${answer.choices[0]?.message?.content}\n\n_${model.id} · $${answer.receipt.costUsd}_`;
+  return `${answer.choices[0]?.message?.content}\n\n_${answer.receipt.effectiveModel} · $${answer.receipt.costUsd}_`;
 }
 ```
+
+A bot that completes through its own vendor SDK asks for the pick alone:
+`const { model } = await conifer.route({ query: text })`, then calls that model
+wherever it likes. The routing lives in the cloud either way, so the bot's host
+needs no GPU.
 
 ## The cards
 
@@ -626,12 +669,12 @@ what ran:
 
 ```ts
 import { VERSION } from "conifer-sdk";
-console.log(VERSION);            // "0.1.2"
+console.log(VERSION);            // "0.2.0"
 ```
 
 ```python
 import conifer_sdk
-print(conifer_sdk.__version__)   # "0.1.2"
+print(conifer_sdk.__version__)   # "0.2.0"
 ```
 
 A receipt's `id` identifies the turn on the gateway; quoting it alongside the

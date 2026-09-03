@@ -36,6 +36,87 @@ export interface TransportOptions {
   timeoutMs: number;
   maxRetries: number;
   defaultHeaders: Record<string, string>;
+  /** Silence a streaming body may fall to before it is cut. Default {@link STREAM_IDLE_MS}. */
+  streamIdleMs?: number;
+}
+
+/**
+ * How long a streaming body may go silent before the SDK gives up on it.
+ *
+ * `timeoutMs` bounds the wait for HEADERS. A stream's body is read by the
+ * caller over the minutes that follow, so a second clock is needed there —
+ * one that restarts on every byte, because a slow stream is healthy and a
+ * silent one is dead. The value is the gateway's own `stream_idle`
+ * (`contracts/gateway-contract.json`, `timeouts_secs`): a stream quieter than
+ * that is one the gateway has already cut, so waiting longer buys nothing.
+ */
+export const STREAM_IDLE_MS = 120_000;
+
+/**
+ * The abort wiring of a streaming response, kept alive until its body is done.
+ *
+ * `request()` unhooks the caller's signal and its own timer the moment the
+ * response head arrives. That is right for JSON, whose body is read before
+ * `request()` returns, and wrong for a stream, whose body the caller reads
+ * over the next minutes: the caller's abort stopped applying at the first
+ * byte, and a gateway that went silent mid-stream was waited on forever while
+ * it kept generating and billing. The lease holds both until `release()`.
+ */
+export interface StreamLease {
+  /** Fires when the caller aborts, or the body goes silent for the idle window. */
+  readonly signal: AbortSignal;
+  /** Bytes arrived: restart the idle clock. */
+  touch(): void;
+  /** The body is finished with, however it ended. Idempotent. */
+  release(): void;
+  /** The typed failure for why `signal` fired. */
+  error(): ConiferError;
+}
+
+function leaseStream(
+  controller: AbortController,
+  outer: AbortSignal | undefined,
+  idleMs: number,
+): StreamLease {
+  let why: "caller" | "idle" | undefined;
+  let released = false;
+  const abort = (cause: "caller" | "idle") => {
+    why ??= cause;
+    controller.abort();
+  };
+  const onOuterAbort = () => abort("caller");
+  // The idle clock must never be what keeps a process alive: a caller that
+  // awaits `stream()` and never iterates (or only reads `receipt()`) never
+  // releases the lease, and a ref'd 120 s timer held `node` open for the
+  // whole window. Node timers unref; a browser returns a number, hence `?.`.
+  const arm = () => {
+    const timer = setTimeout(() => abort("idle"), idleMs);
+    (timer as { unref?(): void }).unref?.();
+    return timer;
+  };
+  let idle = arm();
+  if (outer?.aborted) abort("caller");
+  else outer?.addEventListener("abort", onOuterAbort);
+  return {
+    signal: controller.signal,
+    touch() {
+      if (released) return;
+      clearTimeout(idle);
+      idle = arm();
+    },
+    release() {
+      released = true;
+      clearTimeout(idle);
+      outer?.removeEventListener("abort", onOuterAbort);
+    },
+    error() {
+      return why === "idle"
+        ? new ConiferTimeoutError(
+            `no bytes for ${idleMs}ms mid-stream; the turn may still have been served and billed`,
+          )
+        : new ConiferTimeoutError("the caller aborted this stream");
+    },
+  };
 }
 
 export interface RequestSpec {
@@ -92,7 +173,13 @@ export class Transport {
    * The abort signal is the CLIENT's deadline, defaulted to the gateway's own
    * 300s edge silent-cut so we never give up on a turn still being served.
    */
-  async request(spec: RequestSpec): Promise<{ data: unknown; response: Response }> {
+  request(
+    spec: RequestSpec & { raw: true },
+  ): Promise<{ data: undefined; response: Response; lease: StreamLease }>;
+  request(spec: RequestSpec): Promise<{ data: unknown; response: Response }>;
+  async request(
+    spec: RequestSpec,
+  ): Promise<{ data: unknown; response: Response; lease?: StreamLease }> {
     const url = `${this.options.baseUrl}${spec.path}`;
     const headers = this.headersFor(spec);
     const body = spec.body === undefined ? undefined : JSON.stringify(spec.body);
@@ -125,7 +212,10 @@ export class Transport {
               cause,
             );
         if (attempt < this.options.maxRetries) {
-          await sleep(backoffMs(attempt));
+          await sleep(backoffMs(attempt), spec.signal);
+          if (spec.signal?.aborted) {
+            throw new ConiferTimeoutError("the caller aborted this request");
+          }
           continue;
         }
         throw lastError;
@@ -135,7 +225,17 @@ export class Transport {
       }
 
       if (response.ok) {
-        if (spec.raw) return { data: undefined, response };
+        if (spec.raw) {
+          // The body is still on the wire. Re-arm the caller's signal on the
+          // SAME controller the fetch is bound to, so an abort tears the
+          // socket down, and start the idle clock the head timer cannot keep.
+          const lease = leaseStream(
+            controller,
+            spec.signal,
+            this.options.streamIdleMs ?? STREAM_IDLE_MS,
+          );
+          return { data: undefined, response, lease };
+        }
         return { data: await parseJson(response), response };
       }
 
@@ -148,11 +248,17 @@ export class Transport {
         failure.retryable && RETRYABLE_STATUS.has(response.status);
       if (retryable && attempt < this.options.maxRetries) {
         const hinted = (failure as { retryAfterSeconds?: number }).retryAfterSeconds;
+        // A `retry-after` is honored up to the request's own timeout: a CDN's
+        // 3600 would otherwise park the caller for an hour, silently.
         await sleep(
           hinted !== undefined
-            ? hinted * 1000
+            ? Math.min(hinted * 1000, this.options.timeoutMs)
             : Math.max(backoffMs(attempt), minimumBackoffMs(response.status)),
+          spec.signal,
         );
+        if (spec.signal?.aborted) {
+          throw new ConiferTimeoutError("the caller aborted this request");
+        }
         lastError = failure;
         continue;
       }
@@ -202,6 +308,16 @@ export function minimumBackoffMs(status: number): number {
   return status === 409 ? 1_500 : 0;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** A wait the caller's signal can end early; the caller re-checks `aborted`. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done);
+  });
 }

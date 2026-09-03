@@ -176,7 +176,11 @@ test("an unknown URL is a bad request, not a missing model", () => {
 test("the money 402s stay distinguishable, and keep parsing their amounts", () => {
   const payment = errorFrom(
     402,
-    envelope("insufficient_allowance", undefined, "requires 6200000 nanodollars, balance 12"),
+    envelope(
+      "insufficient_allowance",
+      undefined,
+      "insufficient allowance: this request needs up to 6200000 nanodollars but you hold 12; add credits at https://conifer.build/console#/billing",
+    ),
     headers(),
   );
   assert.ok(payment instanceof ConiferPaymentError);
@@ -196,6 +200,51 @@ test("the money 402s stay distinguishable, and keep parsing their amounts", () =
   assert.ok(ceiling instanceof ConiferCostCeilingError);
   assert.equal(ceiling.projectedNanoUsd, 6_200_000);
   assert.equal(ceiling.ceilingNanoUsd, 1);
+});
+
+/**
+ * A delegated key's 402 opens with the BILLED ACCOUNT id (gateway `error.rs`,
+ * item 33), and account ids carry digits. "The first two integers in the
+ * message" therefore read the id as the amount. The wording is the anchor, and
+ * the balance the gateway sends STRUCTURED on the body wins over any scrape.
+ */
+test("a delegated-key 402 reads the amounts, not the digits of the account id", () => {
+  const message =
+    "insufficient allowance on billed account acct_7f3a91: this request needs up to 6200000 nanodollars but the account holds 12; the account owner must add credits";
+  const structured = errorFrom(
+    402,
+    {
+      error: {
+        type: "insufficient_allowance",
+        message,
+        balance_nanodollars: 12,
+        billed_account: "acct_7f3a91",
+      },
+    },
+    headers(),
+  );
+  assert.ok(structured instanceof ConiferPaymentError);
+  assert.equal(structured.requiredNanoUsd, 6_200_000);
+  assert.equal(structured.balanceNanoUsd, 12);
+
+  // An older deploy without the structured field still parses from the words.
+  const scraped = errorFrom(402, envelope("insufficient_allowance", undefined, message), headers());
+  assert.ok(scraped instanceof ConiferPaymentError);
+  assert.equal(scraped.requiredNanoUsd, 6_200_000);
+  assert.equal(scraped.balanceNanoUsd, 12);
+
+  // The structured balance is authoritative even when the prose disagrees.
+  const drifted = errorFrom(
+    402,
+    { error: { type: "insufficient_allowance", message, balance_nanodollars: 7 } },
+    headers(),
+  );
+  assert.equal((drifted as ConiferPaymentError).balanceNanoUsd, 7);
+
+  // No anchor, no number — never a guess.
+  const bare = errorFrom(402, envelope("insufficient_allowance", undefined, "account 42 refused"), headers());
+  assert.equal((bare as ConiferPaymentError).requiredNanoUsd, undefined);
+  assert.equal((bare as ConiferPaymentError).balanceNanoUsd, undefined);
 });
 
 /**

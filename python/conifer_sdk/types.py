@@ -198,6 +198,51 @@ class Balance:
     credits_remaining_nano_usd: Optional[int] = None
 
 
+# ------------------------------------------------------------------- routing
+
+#: The routing policies the gateway serves. They are also model ids:
+#: ``chat(model="auto")`` runs ``balanced`` and the gateway serves the pick,
+#: disclosing it in ``receipt.effective_model`` with reason ``routed``.
+#: ``route()`` is the same decision without the completion. The router has two
+#: more closed names, ``cost-effective`` and ``fast``, muted on the gateway until
+#: their value floor is measured: not listed, ``chat()`` with one serves the
+#: default model ``as_requested``, ``route()`` with one is a 400. The virtual
+#: rows of ``models()`` are the authority for what a given gateway serves; the
+#: wire is a plain string, so an unmuted name passes through today.
+ROUTE_POLICIES = ("balanced", "best")
+
+
+@dataclass
+class RouteRequest:
+    """One routing decision: the query, and optionally the policy and field."""
+
+    #: The current ask, as the model would see it (the last user message).
+    query: str
+    #: Defaults to ``balanced``.
+    policy: Optional[str] = None
+    #: Narrow the field to these catalog ids. Intersected with your own
+    #: listing: an id you cannot call is dropped, never routed to.
+    candidates: Optional[List[str]] = None
+    #: The turn will carry tool schemas; seats that cannot take tools are masked.
+    tools: Optional[bool] = None
+    #: The completion cap the turn will run under.
+    max_output_tokens: Optional[int] = None
+
+
+@dataclass
+class RouteDecision:
+    """What the router decided. A pick and fallbacks; never a score."""
+
+    #: The catalog id to call. Always one of your own listing.
+    model: str
+    #: The router's next picks, in order, if ``model`` fails you. At most three.
+    fallbacks: List[str]
+    policy: str
+    #: Pins the response to the exact router artifact that produced it.
+    router_version: str
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
 # ------------------------------------------------------------------ embeddings
 
 
