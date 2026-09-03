@@ -17,6 +17,16 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 The learned router is live on the gateway. `model: "auto"` now routes for
 every key, and this release adds the call that returns the decision alone.
 
+### Changed
+
+- The source is reorganised, one module per concern (`chat`, `catalog`,
+  `embeddings`, `jobs`, `keys`, `route`, `stream`, `transport` in TypeScript;
+  `chat`, `catalog`, `embeddings`, `jobs`, `transport` in Python) with short
+  doc comments in place of the previous narrative ones. Nothing a caller
+  imports has moved: `conifer-sdk` and `conifer_sdk` export the same names
+  as 0.1.2, and `conifer_sdk.client` still re-exports the helpers it used to
+  define. No behavior changed; the 0.1.2 test suites pass unmodified.
+
 ### Added
 
 - `route()` (TS) / `route()` (Python), over the gateway's new `POST /v1/route`:

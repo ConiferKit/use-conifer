@@ -1,11 +1,5 @@
-// portability/openrouter.ts — take an OpenRouter request, get a Conifer one.
-//
-// The whole design decision is in cards/portability.card.json: a field Conifer
-// cannot honor THROWS. OpenRouter's `provider` block pins a serving host, its
-// `plugins` inject server-side behavior, and its `transforms` rewrite the
-// prompt. Dropping any of them silently would leave a migrated app running a
-// materially different request and quietly costing something else. So the shim
-// refuses, names the field, and says what to use instead.
+// OpenRouter request to Conifer request. A field Conifer cannot honour throws
+// with the field named, so a migration never silently changes what runs.
 
 import { ConiferPortabilityError } from "../errors.ts";
 import type { ChatRequest, Message } from "../types.ts";
@@ -24,13 +18,9 @@ export interface OpenRouterRequest {
   tool_choice?: unknown;
   response_format?: unknown;
   reasoning?: Record<string, unknown>;
-  /**
-   * OpenRouter's fallback list. With `route: "fallback"` it becomes the
-   * GATEWAY-side chain (one request, one bill); on its own it stays an opt-in
-   * CLIENT-SIDE chain, which is what it has always meant here.
-   */
+  /** OpenRouter's fallback list. With `route: "fallback"` it becomes the gateway-side chain. */
   models?: string[];
-  /** Only `"fallback"` maps — onto the gateway-side chain, with `models`. */
+  /** Only `"fallback"` maps. */
   route?: string;
   provider?: unknown;
   plugins?: unknown[];
@@ -46,49 +36,27 @@ export interface OpenRouterRequest {
 }
 
 export interface ShimOptions {
-  /** Accept that `models` becomes N separate billed requests. */
+  /** Accept that `models` becomes separate billed requests. */
   allowClientFallback?: boolean;
-  /**
-   * Forward sampling knobs Conifer does not model (`top_k`, `min_p`, …) into
-   * the body anyway. Off by default: an unmodelled knob may be ignored by the
-   * upstream, and pretending otherwise is the thing this file exists to avoid.
-   */
+  /** Forward sampling knobs Conifer does not model. The upstream may ignore them. */
   passthroughUnknown?: boolean;
 }
 
 const REFUSALS: Record<string, string> = {
   provider:
-    "OpenRouter's `provider` preferences pin a serving host. Conifer picks the host for the admitted model itself, by price and health, and no client can override it. Remove the block, or use `maxCostNanoUsd` if the goal was cost control.",
+    "OpenRouter's `provider` preferences pin a serving host. Conifer picks the host for the admitted model itself. Remove the block, or use `maxCostNanoUsd` if the goal was cost control.",
   plugins:
     "OpenRouter plugins (web, file-parser, response-healing, context-compression) run inside their gateway. Conifer has no equivalent, so this request would silently lose that behavior.",
   transforms:
-    "`transforms` (middle-out) rewrites your prompt server-side. Conifer refuses an over-window request with a typed 400 naming the window instead. Trim the prompt yourself, or pick a model with a larger context window.",
+    "`transforms` (middle-out) rewrites your prompt server-side. Conifer refuses an over-window request with a typed 400 instead. Trim the prompt, or pick a model with a larger context window.",
   prompt:
-    "`prompt` is the legacy text-completion field. The gateway DOES serve it at POST /v1/completions (billed and receipted like any other turn), but this shim converts to the chat wire and this SDK client does not drive that door — and note /v1/completions is non-streaming, so `stream: true` there is refused. Send `messages` instead, or call /v1/completions directly with your existing OpenAI-compatible client.",
+    "`prompt` is the legacy text-completion field. The gateway serves it at POST /v1/completions, but this shim converts to the chat wire. Send `messages`, or call /v1/completions directly.",
 };
 
 /**
- * OpenRouter fields Conifer's request card does not model.
- *
- * These are NOT refusals: the gateway forwards unknown body fields rather than
- * rejecting them (verified live 2026-08-27 — `seed`, `frequency_penalty`,
- * `presence_penalty`, `top_logprobs`, `user`, `prediction` and even an invented
- * field all return 200). Whether the UPSTREAM honors any of them is the
- * provider's business and varies by model, which is exactly why the SDK will
- * not quietly pass them along as though they were guaranteed.
- *
- * So they throw by default and are forwarded under `passthroughUnknown: true`.
- * That is the whole point: the caller learns the knob is unmodelled at the call
- * site, and opts in with their eyes open.
- *
- * KEEPING THIS LIST HONEST IS THE JOB. A field that is neither refused nor
- * listed here is SILENTLY DROPPED, which violates the first law on the
- * portability card ("never silently drop a constraint"). Six fields were being
- * dropped exactly that way until this list was checked against OpenRouter's
- * current published request schema rather than against our own card:
- * `frequency_penalty`, `presence_penalty`, `top_logprobs`, `prediction`,
- * `debug`, and (differently) `user`. `tests/portability.test.ts` now drives
- * this from the vendor's field list so the next divergence fails the build.
+ * Fields the gateway forwards but Conifer does not model. They throw unless
+ * `passthroughUnknown` is set, so the caller learns the knob is unmodelled.
+ * Kept in step with OpenRouter's published schema by tests/portability.test.ts.
  */
 const UNMODELLED = [
   "top_k",
@@ -97,8 +65,6 @@ const UNMODELLED = [
   "repetition_penalty",
   "logit_bias",
   "seed",
-  // Added 2026-08-27, from OpenRouter's current schema. Each was previously
-  // accepted and then dropped without a word.
   "frequency_penalty",
   "presence_penalty",
   "top_logprobs",
@@ -106,17 +72,8 @@ const UNMODELLED = [
   "debug",
 ] as const;
 
-/**
- * OpenRouter request -> Conifer request.
- *
- * Model ids need no rewriting: the gateway resolves `vendor/model` by trying
- * the full id first and the last segment second, so `anthropic/claude-opus-5`
- * lands on the catalog's `claude-opus-5` without the client guessing.
- */
-export function fromOpenRouter(
-  request: OpenRouterRequest,
-  options: ShimOptions = {},
-): ChatRequest {
+/** Convert. Model ids need no rewriting: the gateway resolves `vendor/model` itself. */
+export function fromOpenRouter(request: OpenRouterRequest, options: ShimOptions = {}): ChatRequest {
   for (const [field, why] of Object.entries(REFUSALS)) {
     if (request[field] !== undefined) throw new ConiferPortabilityError(field, why);
   }
@@ -129,9 +86,6 @@ export function fromOpenRouter(
   if (request.messages === undefined) {
     throw new ConiferPortabilityError("messages", "`messages` is required.");
   }
-  // `route: "fallback"` asks the GATEWAY to fail over, which Conifer now does
-  // (`x-conifer-fallback-models`). It only means something with a list to walk,
-  // and any other value is a routing mode we do not have.
   if (request.route !== undefined) {
     if (request.route !== "fallback") {
       throw new ConiferPortabilityError(
@@ -142,7 +96,7 @@ export function fromOpenRouter(
     if (request.models === undefined || request.models.length === 0) {
       throw new ConiferPortabilityError(
         "route",
-        '`route: "fallback"` asks for server-side failover but names nothing to fail over TO. On OpenRouter that used an account-level list; Conifer has no account default, so send `models` with the substitutes you accept.',
+        '`route: "fallback"` asks for server-side failover but names nothing to fail over to. Send `models` with the substitutes you accept.',
       );
     }
   }
@@ -153,7 +107,7 @@ export function fromOpenRouter(
     if (options.passthroughUnknown !== true) {
       throw new ConiferPortabilityError(
         knob,
-        `\`${knob}\` is not part of Conifer's request card; the upstream may ignore it. Pass \`passthroughUnknown: true\` to forward it anyway, at your own risk.`,
+        `\`${knob}\` is not part of Conifer's request; the upstream may ignore it. Pass \`passthroughUnknown: true\` to forward it anyway.`,
       );
     }
     extraBody[knob] = request[knob];
@@ -170,47 +124,28 @@ export function fromOpenRouter(
     toolChoice: request.tool_choice,
     responseFormat: request.response_format,
     reasoning: request.reasoning,
-    // `user` is OpenRouter's abuse-detection identifier; the nearest honest
-    // Conifer equivalent is caller attribution, which is what it becomes.
     client: request.user,
-    // `models` is OpenRouter's chain. With `route: "fallback"` it is a
-    // GATEWAY-side chain (one request, one bill) — the honest equivalent, and
-    // needing no client opt-in because no extra request is implied. Without
-    // it, `models` keeps its historical meaning here: an opt-in CLIENT chain.
     ...(request.route === "fallback"
       ? { serverFallbackModels: request.models }
-      : {
-          fallbackModels: request.models,
-          allowClientFallback: options.allowClientFallback,
-        }),
+      : { fallbackModels: request.models, allowClientFallback: options.allowClientFallback }),
     extraBody: Object.keys(extraBody).length === 0 ? undefined : extraBody,
   };
   return stripUndefined(converted);
 }
 
-/**
- * OpenRouter's app-attribution headers -> Conifer's.
- *
- * `HTTP-Referer` and `X-Title` exist to rank your app on OpenRouter's public
- * board. Conifer has no such board, so they become usage attribution only.
- */
+/** OpenRouter's app-attribution headers become Conifer's `client` name. */
 export function attributionFromOpenRouter(headers: Record<string, string>): string | undefined {
   const lower: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) lower[key.toLowerCase()] = value;
-  // `X-OpenRouter-Categories` assigns MARKETPLACE categories on openrouter.ai.
-  // Conifer runs no marketplace and no public leaderboard, so there is nothing
-  // for it to become. Refusing beats returning it as an app name — which is
-  // what a lenient reading would do, mislabelling every turn's attribution.
   if (lower["x-openrouter-categories"] !== undefined) {
     throw new ConiferPortabilityError(
       "X-OpenRouter-Categories",
-      "this header assigns categories in OpenRouter's public model marketplace. Conifer has no marketplace or leaderboard to list your app on, so there is no equivalent. Drop it; `x-conifer-client` carries the app NAME for your own usage attribution.",
+      "this header assigns categories in OpenRouter's public marketplace. Conifer has no marketplace, so there is no equivalent. Drop it; `x-conifer-client` carries the app name for your own usage attribution.",
     );
   }
   return lower["x-openrouter-title"] ?? lower["x-title"] ?? lower["http-referer"];
 }
 
-/** Drop explicit `undefined` keys so a converted request serializes cleanly. */
 function stripUndefined(request: ChatRequest): ChatRequest {
   const bag = request as unknown as Record<string, unknown>;
   for (const key of Object.keys(bag)) {

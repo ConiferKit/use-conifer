@@ -1,17 +1,7 @@
-// portability/helicone.ts — Helicone's header protocol, mapped or refused.
-//
-// Helicone is a header-driven proxy that sits in front of YOUR provider key.
-// Conifer is the biller and the router itself. That shape difference decides
-// every mapping here:
-//
-//   · `Helicone-Auth` + your provider key  ->  one `CONIFER_API_KEY`. If you
-//     want your own provider key used, that is BYOK custody (`client.keys.put`),
-//     not a second header.
-//   · `Helicone-Target-URL` -> nothing. Conifer IS the destination. A migrated
-//     app that still believes it is proxying elsewhere is a bug, so this throws.
-//   · Safety features (moderation, LLM security, token-limit handlers) throw
-//     rather than no-op: a security control that silently does nothing is worse
-//     than an error, because the error is visible.
+// Helicone's header protocol, mapped to Conifer request fields or refused.
+// Helicone is a proxy in front of your own provider key; Conifer is the
+// destination and the biller. Headers for controls Conifer does not have
+// (moderation, prompt registry, retention switches) throw rather than no-op.
 
 import { ConiferPortabilityError } from "../errors.ts";
 import type { ChatRequest } from "../types.ts";
@@ -39,9 +29,7 @@ const REFUSALS: Record<string, string> = {
   "helicone-session-name": "see Helicone-Session-Id.",
   "helicone-posthog-key": "Conifer does not fan out to third-party analytics.",
   "helicone-posthog-host": "see Helicone-Posthog-Key.",
-  // PRIVACY. Dropping either is the worst case in this file: the request
-  // succeeds, nothing errors, and a promise the caller made to THEIR OWN users
-  // — that prompts or completions are not retained — has quietly lapsed.
+  // Retention switches are promises the caller made to their own users.
   "helicone-omit-request":
     "Conifer has no per-request switch to omit the prompt from what it retains, so this cannot be honored and MUST NOT be dropped — it is a promise you may have made to your own users. See https://conifer.build/privacy for what the gateway retains, and decide with that in hand.",
   "helicone-omit-response":
@@ -49,27 +37,19 @@ const REFUSALS: Record<string, string> = {
   "helicone-auth":
     "this is your HELICONE credential, and it means the request was going through Helicone as a proxy. Conifer is the destination: drop it and authenticate with CONIFER_API_KEY.",
   "helicone-retry-enabled":
-    "Helicone retries server-side, on its own policy. This SDK retries in the CLIENT, narrowly (transport faults and 409/429/502/503/504), and every retry reuses one idempotency key so it cannot double-bill. Set `maxRetries` if you want a different budget \u2014 but a server-side retry you cannot see is not something Conifer will imitate.",
+    "Helicone retries server-side, on its own policy. This SDK retries in the CLIENT, narrowly (transport faults and 409/429/502/503/504), and every retry reuses one idempotency key so it cannot double-bill. Set `maxRetries` for a different budget.",
 };
 
-/**
- * Helicone headers that are OBSERVED rather than converted: they change what
- * Helicone recorded, not what the model did, so there is nothing to refuse and
- * nothing to send. Listed so the catch-all below can tell "deliberately inert"
- * from "we have never heard of this".
- */
+/** Headers that are converted below or deliberately inert, so the catch-all can tell them from unknown ones. */
 const INERT = new Set(["helicone-property-", "helicone-cache-enabled", "helicone-request-id", "helicone-user-id", "helicone-fallbacks", "helicone-ratelimit-policy"]);
 
 /**
- * A Helicone header bag -> the Conifer request fields it implies.
- *
- * Returns a PARTIAL request you merge into your own call, plus the custom
- * properties Helicone would have indexed server-side — handed back to you
- * because Conifer stores no arbitrary property index and will not pretend to.
+ * A Helicone header bag to the Conifer request fields it implies. Returns a
+ * partial request to merge into your call, plus the `Helicone-Property-*`
+ * values, which Conifer does not store.
  */
 export function fromHeliconeHeaders(headers: HeliconeHeaders): {
   request: Partial<ChatRequest>;
-  /** `Helicone-Property-*` values. Yours to log; Conifer does not store them. */
   properties: Record<string, string>;
 } {
   const lower: Record<string, string> = {};
@@ -95,8 +75,7 @@ export function fromHeliconeHeaders(headers: HeliconeHeaders): {
   const attribution = lower["helicone-user-id"];
   if (attribution !== undefined) request.client = attribution;
 
-  // The cache header is asymmetric on purpose (see the gateway's own note):
-  // it can only turn caching OFF.
+  // The cache header can only turn caching off.
   const cache = lower["helicone-cache-enabled"];
   if (cache === "false") request.promptCache = "off";
   if (cache === "true") {
@@ -108,23 +87,14 @@ export function fromHeliconeHeaders(headers: HeliconeHeaders): {
 
   const fallbacks = lower["helicone-fallbacks"];
   if (fallbacks !== undefined) {
-    // Maps to the GATEWAY-side chain (`x-conifer-fallback-models`), which is
-    // the honest equivalent of what Helicone did: the proxy — not your app —
-    // walked the chain, on one logical request. Before that header existed
-    // this could only become a CLIENT chain, which silently changed the
-    // semantics (a second billed request, no help on a stream, and no way to
-    // act on the 4xx classes the proxy could see).
+    // The gateway-side chain: the proxy walked it on one request, and so does Conifer.
     request.serverFallbackModels = parseFallbacks(fallbacks);
   }
 
   const policy = lower["helicone-ratelimit-policy"];
   if (policy !== undefined) request.maxCostNanoUsd = ceilingFromPolicy(policy);
 
-  // Anything left is a Helicone header we have never heard of. NOT safe to
-  // ignore: an unknown header is exactly the case where we cannot judge
-  // whether it carried a constraint, and this shim exists so that a constraint
-  // cannot go missing in transit. (Two of the headers above are privacy
-  // promises that were being dropped here until 2026-08-27.)
+  // An unknown Helicone header may carry a constraint, so it is refused, not ignored.
   const unknown = Object.keys(lower).filter(
     (key) =>
       key.startsWith("helicone-") &&
@@ -142,7 +112,7 @@ export function fromHeliconeHeaders(headers: HeliconeHeaders): {
   return { request, properties };
 }
 
-/** `Helicone-Fallbacks` is a JSON dump; we want the model ids, in order. */
+/** `Helicone-Fallbacks` is a JSON array; return the model ids in order. */
 export function parseFallbacks(raw: string): string[] {
   let parsed: unknown;
   try {
@@ -168,16 +138,9 @@ export function parseFallbacks(raw: string): string[] {
 }
 
 /**
- * `[quota];w=[window];u=[unit];s=[segment]` -> a nanodollar ceiling.
- *
- * Only a `cents` quota converts: Conifer's control is a per-request MONEY
- * ceiling, which is strictly stronger than a request count but is not the same
- * quantity, so `u=requests` throws instead of being invented.
- *
- * Note the semantic narrowing, which is honest but real: Helicone's quota is a
- * budget over a WINDOW; `x-conifer-max-cost-nanousd` caps ONE request. The
- * mapped value is therefore a per-request ceiling of the whole window's budget
- * — an upper bound that no single call may exceed, not a running total.
+ * `[quota];w=[window];u=[unit];s=[segment]` to a nanodollar ceiling. Only a
+ * `cents` quota converts, and it becomes a per-request ceiling, not a
+ * window budget.
  */
 export function ceilingFromPolicy(policy: string): number {
   const parts = policy.split(";").map((part) => part.trim());
@@ -195,6 +158,5 @@ export function ceilingFromPolicy(policy: string): number {
       `Conifer's per-request control is a money ceiling, so only \`u=cents\` maps. \`u=${unit ?? "requests"}\` has no equivalent: use your own limiter for request counts.`,
     );
   }
-  // 1 cent = 10^7 nanodollars.
   return quota * 10_000_000;
 }

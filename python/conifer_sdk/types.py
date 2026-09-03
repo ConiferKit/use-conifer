@@ -1,4 +1,5 @@
-"""Public shapes for the Python SDK — the same cards as the TypeScript twin."""
+"""Public request and response shapes. Every field maps to a real gateway
+input or output."""
 
 from __future__ import annotations
 
@@ -10,10 +11,14 @@ from .receipt import Receipt
 Message = Dict[str, Any]
 
 
+# ---------------------------------------------------------------------- chat
+
+
 @dataclass
 class ChatRequest:
-    """One turn. Every field maps to a real gateway input (cards/sdk.input)."""
+    """One chat turn."""
 
+    #: A catalog id, or ``auto`` / ``balanced`` / ``best`` to let the router pick.
     model: str
     messages: List[Message]
     max_tokens: Optional[int] = None
@@ -25,62 +30,43 @@ class ChatRequest:
     response_format: Optional[Any] = None
     reasoning: Optional[Dict[str, Any]] = None
 
-    #: HARD ceiling on the caller-total worst case, in integer nanodollars.
+    #: Hard ceiling on this call's cost, in integer nanodollars. Over it, the call is refused.
     max_cost_nano_usd: Optional[int] = None
-    #: ADVISORY window in whole seconds. Widens HOW a turn is served, never what.
+    #: Advisory completion window in whole seconds.
     deadline_seconds: Optional[int] = None
-    #: Opt into the 202 deferred-job protocol. Refused loudly if unhonorable.
+    #: Submit as a deferred job. Use ``defer()``, which returns the job.
     defer: bool = False
-    #: HARD venue constraint. This gateway is ``cloud``.
+    #: Hard venue constraint. The hosted gateway is ``cloud``.
     venue: Optional[str] = None
-    #: Only ``"off"`` is meaningful: skip prompt-cache annotation for this turn.
+    #: ``"off"`` skips prompt-cache annotation for this turn.
     prompt_cache: Optional[str] = None
 
     idempotency_key: Optional[str] = None
     request_id: Optional[str] = None
+    #: Your app's name, for your own usage attribution.
     client: Optional[str] = None
     headers: Dict[str, str] = field(default_factory=dict)
+    #: Fields the SDK does not model, merged into the body.
     extra_body: Dict[str, Any] = field(default_factory=dict)
 
-    #: A CLIENT-SIDE chain of separate billed requests. Needs the opt-in below.
+    #: Client-side chain: models to try in order, each as a separate billed
+    #: request, when the primary fails retryably. Requires ``allow_client_fallback``.
     fallback_models: Optional[List[str]] = None
     allow_client_fallback: bool = False
-
-    #: Models the GATEWAY falls back to, in order, if the requested model's
-    #: upstream call fails. Sent as ``x-conifer-fallback-models``.
-    #:
-    #: Prefer this over ``fallback_models`` for production traffic. The
-    #: difference is where the retry lives: ``fallback_models`` is a CLIENT
-    #: chain (a second HTTP request, decided here, only after a retryable
-    #: refusal reaches you — useless on a stream, separately billed), while
-    #: this is ONE request. The gateway holds money once for the whole chain,
-    #: dispatches the members in your order, settles ONCE against whichever
-    #: served, and refunds in full if none did. Because the gateway sees the
-    #: provider's own failure it advances on classes the client never gets to
-    #: judge — including the 4xx a mis-configured model surface returns, which
-    #: is the failure this exists for.
-    #:
-    #: Every member is admitted like a primary BEFORE anything is spent: an
-    #: unknown model, a composed model, a duplicate, a self-reference, or more
-    #: than 3 members is refused by name rather than silently dropped.
-    #:
-    #: A served fallback is never silent: the receipt's ``effective_model``
-    #: names the model that answered and ``reason`` reads ``provider_failover``
-    #: (the gateway reuses that code rather than minting a new one). On a
-    #: STREAMED turn the handshake headers are written before the failover
-    #: resolves, so ``reason`` reads ``as_requested`` there while
-    #: ``effective_model`` is still correct — read the model, not the reason.
-    #:
-    #: Not available with ``defer``, on the BYOK lane, or for composed models.
+    #: Server-side chain: models the gateway falls back to inside one request
+    #: when the requested model's upstream call fails. One hold, one bill; a
+    #: served fallback is disclosed in ``receipt.effective_model`` with reason
+    #: ``provider_failover``. At most three. Not available with ``defer``.
     server_fallback_models: Optional[List[str]] = None
 
 
 @dataclass
 class Completion:
-    """The OpenAI chat wire, plus the settled receipt for this exact call."""
+    """The OpenAI chat wire plus the settled receipt for this call."""
 
     choices: List[Dict[str, Any]]
     receipt: Receipt
+    #: Which chain member served. 0 is the model you asked for.
     fallback_index: int
     id: Optional[str] = None
     model: Optional[str] = None
@@ -89,7 +75,7 @@ class Completion:
 
     @property
     def text(self) -> Optional[str]:
-        """First text content of the first choice, or ``None``."""
+        """The first choice's text content, or ``None``."""
         if not self.choices:
             return None
         content = (self.choices[0].get("message") or {}).get("content")
@@ -97,36 +83,19 @@ class Completion:
 
     @property
     def empty_reason(self) -> Optional[str]:
-        """Why this completion came back with no text, when it did.
-
-        ``None`` means there is text and nothing to explain. Otherwise this is
-        a sentence you can log or raise, because an empty string is the single
-        most confusing thing this API returns and the reason is never in the
-        content.
-
-        THE TRAP THIS EXISTS FOR (measured live 2026-08-27, on BOTH the OpenAI
-        and Anthropic wires). A reasoning model spends ``max_tokens`` on its
-        thinking block FIRST. Ask ``claude-fable-5`` a question needing real
-        reasoning with ``max_tokens=16`` and you get ``content: ""``,
-        ``finish_reason: "length"``, and a bill for 16 output tokens — the
-        model never reached the visible answer.
-
-        Nothing about that is a bug, and nothing about it is discoverable: the
-        empty string looks like a refusal, a content filter, or a broken SDK,
-        and the one distinguishing signal is a field most callers never read.
-        So the SDK reads it for you.
-        """
+        """Why this completion has no text, as a sentence, or ``None`` when it
+        has text or a tool call. The common cause is a reasoning model spending
+        ``max_tokens`` on its thinking block before the visible answer."""
         if not self.choices:
             return (
                 "the gateway returned no choices at all. If this was a deferred turn, use "
-                "defer() and jobs_wait() — a 202 job envelope is not a completion."
+                "defer() and jobs_wait(); a 202 job envelope is not a completion."
             )
         choice = self.choices[0]
         message = choice.get("message") or {}
         content = message.get("content")
         if isinstance(content, str) and content != "":
             return None
-        # A tool call IS the answer. Absent text there is correct.
         if message.get("tool_calls"):
             return None
         finish = choice.get("finish_reason")
@@ -138,13 +107,12 @@ class Completion:
                 return (
                     f"the model hit max_tokens while still reasoning ({reasoning} of {spent} "
                     "output tokens went to thinking), so it never reached the visible answer. "
-                    'Raise max_tokens, or set reasoning={"effort": "none"} / "low" on a model '
-                    "that supports it."
+                    "Raise max_tokens, or lower reasoning effort on a model that supports it."
                 )
             return (
                 "the model hit max_tokens before emitting visible text. On a reasoning model "
-                "the thinking block is spent FIRST, so a small max_tokens can be consumed "
-                "entirely before the answer starts. Raise max_tokens."
+                "the thinking block is spent FIRST, so a small max_tokens can be used up "
+                "before the answer starts. Raise max_tokens."
             )
         if finish == "content_filter":
             return (
@@ -154,35 +122,30 @@ class Completion:
         return f"the model returned empty content with finish_reason {finish!r}."
 
 
+# ------------------------------------------------------------------- catalog
+
+
 @dataclass
 class CatalogModel:
-    """One ``GET /v1/models`` entry. ``raw`` keeps every field, losing nothing."""
+    """One ``GET /v1/models`` entry. ``raw`` keeps every field."""
 
     id: str
+    #: ``"conifer"`` (credits) or ``"byok"`` (your own key serves it).
     endpoint_kind: Optional[str] = None
     display_name: Optional[str] = None
     provider: Optional[str] = None
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
     max_tools: Optional[int] = None
-    #: Declared capabilities. ``None`` means UNDECLARED, not unsupported.
+    #: Declared capabilities. ``None`` means undeclared, not unsupported.
     caps: Optional[List[str]] = None
-    #: The vector width an embedding seat returns, on rows whose ``caps``
-    #: include ``embeddings``.
-    #:
-    #: Typed rather than left in ``raw`` because it is a DDL decision, not a
-    #: curiosity: a pgvector column is declared ``vector(1536)`` before the
-    #: first call, and getting it wrong means a migration on a populated
-    #: table. The catalog publishes it so you can size the column without
-    #: spending a token, and llms.txt tells agents to do exactly that.
-    #:
-    #: This is the seat's NATIVE width; passing ``dimensions`` on the request
-    #: (Matryoshka shortening) overrides it.
+    #: Native vector width of an embedding model. ``dimensions`` on a request overrides it.
     embedding_dimensions: Optional[int] = None
-    #: The AS-CHARGED price for THIS entry's lane only. Never both lanes.
+    #: The as-charged price for this entry's lane.
     pricing: Optional[Dict[str, Any]] = None
-    #: BYOK take rate as a percent. Display-only.
+    #: BYOK take rate as a percent.
     fee_pct: Optional[float] = None
+    #: True when BYOK custody is degraded for a provider you hold a key for.
     unavailable: Optional[bool] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -200,30 +163,24 @@ class Balance:
 
 # ------------------------------------------------------------------- routing
 
-#: The routing policies the gateway serves. They are also model ids:
-#: ``chat(model="auto")`` runs ``balanced`` and the gateway serves the pick,
-#: disclosing it in ``receipt.effective_model`` with reason ``routed``.
-#: ``route()`` is the same decision without the completion. The router has two
-#: more closed names, ``cost-effective`` and ``fast``, muted on the gateway until
-#: their value floor is measured: not listed, ``chat()`` with one serves the
-#: default model ``as_requested``, ``route()`` with one is a 400. The virtual
-#: rows of ``models()`` are the authority for what a given gateway serves; the
-#: wire is a plain string, so an unmuted name passes through today.
+#: The routing policies the gateway serves. They double as model ids:
+#: ``chat(model="auto")`` runs ``balanced``. ``cost-effective`` and ``fast``
+#: exist in the router but are muted on the gateway; the virtual rows of
+#: ``models()`` are the authority for what a given gateway serves.
 ROUTE_POLICIES = ("balanced", "best")
 
 
 @dataclass
 class RouteRequest:
-    """One routing decision: the query, and optionally the policy and field."""
+    """One routing decision."""
 
-    #: The current ask, as the model would see it (the last user message).
+    #: The current ask: the last user message.
     query: str
     #: Defaults to ``balanced``.
     policy: Optional[str] = None
-    #: Narrow the field to these catalog ids. Intersected with your own
-    #: listing: an id you cannot call is dropped, never routed to.
+    #: Restrict the field to these catalog ids. Intersected with your own listing.
     candidates: Optional[List[str]] = None
-    #: The turn will carry tool schemas; seats that cannot take tools are masked.
+    #: The turn will carry tool schemas.
     tools: Optional[bool] = None
     #: The completion cap the turn will run under.
     max_output_tokens: Optional[int] = None
@@ -231,63 +188,50 @@ class RouteRequest:
 
 @dataclass
 class RouteDecision:
-    """What the router decided. A pick and fallbacks; never a score."""
+    """The router's decision: a pick and fallbacks, never a score."""
 
-    #: The catalog id to call. Always one of your own listing.
+    #: A catalog id you can call.
     model: str
-    #: The router's next picks, in order, if ``model`` fails you. At most three.
+    #: The router's next picks, in order. At most three.
     fallbacks: List[str]
     policy: str
-    #: Pins the response to the exact router artifact that produced it.
+    #: The router artifact that produced this decision.
     router_version: str
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
-# ------------------------------------------------------------------ embeddings
+# ---------------------------------------------------------------- embeddings
 
 
 @dataclass
 class EmbeddingsRequest:
-    """One embeddings turn.
+    """One embeddings call. Billed on input only, so there are no sampling fields."""
 
-    The gateway bills embeddings on INPUT ONLY — there is no completion, so
-    there is no output term and the catalog carries a zero output rate for
-    every embedding seat. That is why this request has no ``max_tokens``, no
-    sampling knobs and no stream: none of them mean anything here, and offering
-    them would imply a control the wire does not have.
-    """
-
-    #: Must DECLARE ``caps: ["embeddings"]``. A chat model is refused with a
-    #: 400 naming the chat door.
+    #: A model whose ``caps`` include ``embeddings``.
     model: str
-    #: Text, or a batch of texts. A batch returns one vector per member, in the
-    #: order you sent them. Token-id arrays are NOT accepted: the gateway
-    #: cannot size a spend hold from token ids it did not tokenize.
+    #: Text or a list of texts. Token-id arrays are refused.
     input: Any
-    #: Matryoshka shortening, on models that support it. Forwarded verbatim.
+    #: Matryoshka shortening, where the model supports it.
     dimensions: Optional[int] = None
-    #: The WIRE encoding, which is not the same question as what you get back.
-    #: Leave it alone unless you need the raw provider bytes: the SDK requests
-    #: ``base64`` by default and decodes it for you (same numbers, ~3x less
-    #: network). See :meth:`conifer_sdk.client.Embeddings.create`.
+    #: Wire encoding. Defaults to ``base64``, which the SDK decodes to floats.
     encoding_format: Optional[str] = None
-    #: Opaque end-user id, forwarded verbatim for the provider's abuse tooling.
+    #: Opaque end-user id, forwarded verbatim.
     user: Optional[str] = None
 
-    #: HARD ceiling on the caller-total worst case, in integer nanodollars.
+    #: Hard ceiling on this call's cost, in integer nanodollars.
     max_cost_nano_usd: Optional[int] = None
     idempotency_key: Optional[str] = None
     request_id: Optional[str] = None
     #: Your app's name, for your own usage attribution.
     client: Optional[str] = None
     headers: Dict[str, str] = field(default_factory=dict)
-    #: Fields the SDK does not model, merged into the body at your own risk.
+    #: Fields the SDK does not model, merged into the body.
     extra_body: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class Embedding:
-    """One vector, always as floats whatever the wire encoding was."""
+    """One vector, as floats whatever the wire encoding was."""
 
     index: int
     embedding: List[float]
@@ -296,57 +240,45 @@ class Embedding:
 
 @dataclass
 class EmbeddingsResponse:
-    """One embeddings turn's result, with the settled cost of that call."""
+    """One embeddings call's result with its settled cost."""
 
     data: List[Embedding]
-    #: The x-conifer-* disclosure, parsed. Embeddings settle in-band, so unlike
-    #: a stream the cost IS present here.
     receipt: Receipt
     model: Optional[str] = None
     object: Optional[str] = None
-    #: Input tokens only. There is no ``completion_tokens``: there is no
-    #: completion.
+    #: Input tokens only.
     usage: Optional[Dict[str, Any]] = None
-    #: The provider's own body, untouched — base64 strings included.
+    #: The provider's own body, untouched.
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
 def vector_of(response: EmbeddingsResponse) -> Optional[List[float]]:
-    """The first vector, for the overwhelmingly common single-input call."""
+    """The first vector, for the single-input call."""
     return response.data[0].embedding if response.data else None
 
 
-# ------------------------------------------------------------ deferred jobs
+# ------------------------------------------------------------- deferred jobs
 
-#: The states a deferred job can never leave. Polling one is a wasted call.
-#:
-#: The distinction is a money question, not a formality: ``ended``/``fetched``
-#: mean you were charged and there is a result, while ``expired``,
-#: ``cancelled`` and ``failed`` all carry a refund of the unfinished work.
+#: States a job never leaves. ``ended`` and ``fetched`` were charged and have a
+#: result; ``expired``, ``cancelled`` and ``failed`` refund the unfinished work.
 TERMINAL_JOB_STATUSES = ("fetched", "expired", "cancelled", "failed")
 
 
 def is_terminal_job(status: Optional[str]) -> bool:
-    """True once a job has reached a state it can never leave."""
     return status in TERMINAL_JOB_STATUSES
 
 
 @dataclass
 class DeferredJob:
-    """A deferred job, as returned by the 202 accept and by every status poll.
-
-    Carries no content and no cost: the money is disclosed on the RESULT, which
-    is a separate call.
-    """
+    """A deferred job as returned by the 202 accept and every status poll. No content, no cost."""
 
     job_id: str
-    #: One of queued / submitted / ended / fetched / expired / cancelled / failed.
+    #: queued / submitted / ended / fetched / expired / cancelled / failed.
     status: str
-    #: Unix seconds. After this the job expires and unfinished work is refunded.
+    #: Unix seconds. After this the job expires.
     deadline_utc: Optional[int] = None
     created_utc: Optional[int] = None
-    #: The model the job was accepted for.
     model: Optional[str] = None
-    #: The gateway's own poll path, relative to the base URL.
+    #: The gateway's poll path, relative to the base URL.
     poll_url: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)

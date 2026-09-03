@@ -1,34 +1,22 @@
-// index.ts — the SDK's one public seam. Consumers import from here.
+// The public surface. Consumers import from here and nowhere else.
 
-export {
-  Conifer,
-  Embeddings,
-  JobsApi,
-  KeysApi,
-  DEFAULT_BASE_URL,
-  DEFAULT_TIMEOUT_MS,
-  MIN_DEFER_WINDOW_SECONDS,
-  MAX_SERVER_FALLBACK_MODELS,
-} from "./client.ts";
+export { Conifer, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS, MIN_DEFER_WINDOW_SECONDS, resolveBaseUrl } from "./client.ts";
 export type { ConiferOptions } from "./client.ts";
 export {
+  MAX_SERVER_FALLBACK_MODELS,
   chatBody,
   chatHeaders,
-  decodeVector,
-  embeddingsBody,
-  embeddingsHeaders,
-  pickCheapest,
-  priceOf,
-  resolveBaseUrl,
   resolveChain,
-  routeBody,
   serverFallbackHeader,
-  toCatalogModel,
-  toDeferredJob,
-  withCost,
   turnIdentity,
-  parseFrame,
-} from "./client.ts";
+  withCost,
+} from "./chat.ts";
+export { pickCheapest, priceOf, toCatalogModel } from "./catalog.ts";
+export { Embeddings, decodeVector, embeddingsBody, embeddingsHeaders } from "./embeddings.ts";
+export { JobsApi, toDeferredJob } from "./jobs.ts";
+export { KeysApi } from "./keys.ts";
+export { routeBody } from "./route.ts";
+export { parseFrame } from "./stream.ts";
 
 export {
   textOf,

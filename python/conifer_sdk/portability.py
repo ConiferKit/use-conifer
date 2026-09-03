@@ -1,9 +1,6 @@
-"""Migration shims — the Python twin of src/portability/.
-
-Same law, from cards/portability.card.json: a field Conifer cannot honor
-RAISES and names its replacement. Dropping a provider pin, a moderation flag, or
-a spend policy is what makes a migration look clean and bill wrong.
-"""
+"""Migration shims for OpenRouter, Helicone and the Vercel AI Gateway. A
+field Conifer cannot honour raises with the field named, so a migration
+never silently changes what runs or what it costs."""
 
 from __future__ import annotations
 
@@ -43,20 +40,9 @@ _OPENROUTER_REFUSALS: Dict[str, str] = {
     ),
 }
 
-#: OpenRouter fields Conifer's request card does not model.
-#:
-#: NOT refusals: the gateway forwards unknown body fields rather than rejecting
-#: them (verified live 2026-08-27 — seed, frequency_penalty, presence_penalty,
-#: top_logprobs, user, prediction and even an invented field all return 200).
-#: Whether the UPSTREAM honors any of them is the provider's business and
-#: varies by model, which is why the SDK will not quietly pass them along as
-#: though they were guaranteed. They throw by default and forward under
-#: ``passthrough_unknown=True``, so the caller opts in with eyes open.
-#:
-#: KEEPING THIS LIST HONEST IS THE JOB. A field neither refused nor listed here
-#: is SILENTLY DROPPED, violating the first law on the portability card. Five
-#: were being dropped exactly that way until this was checked against
-#: OpenRouter's current published schema rather than against our own card.
+#: Fields the gateway forwards but Conifer does not model. They raise unless
+#: ``passthrough_unknown=True``. Kept in step with OpenRouter's published schema
+#: by the test suite.
 _UNMODELLED = (
     "top_k",
     "min_p",
@@ -64,8 +50,6 @@ _UNMODELLED = (
     "repetition_penalty",
     "logit_bias",
     "seed",
-    # Added 2026-08-27 from OpenRouter's current schema. Each was previously
-    # accepted and then dropped without a word.
     "frequency_penalty",
     "presence_penalty",
     "top_logprobs",
@@ -79,11 +63,7 @@ def from_openrouter(
     allow_client_fallback: bool = False,
     passthrough_unknown: bool = False,
 ) -> ChatRequest:
-    """OpenRouter request -> Conifer request.
-
-    Model ids need no rewriting: the gateway resolves ``vendor/model`` by trying
-    the full id first and the last segment second.
-    """
+    """OpenRouter request -> Conifer request."""
     for field, why in _OPENROUTER_REFUSALS.items():
         if request.get(field) is not None:
             raise ConiferPortabilityError(field, why)
@@ -108,9 +88,6 @@ def from_openrouter(
             )
         extra_body[knob] = request[knob]
 
-    # `route: "fallback"` asks the GATEWAY to fail over, which Conifer now does
-    # (x-conifer-fallback-models). It only means something with a list to walk,
-    # and any other value is a routing mode we do not have.
     route = request.get("route")
     if route is not None:
         if route != "fallback":
@@ -141,11 +118,7 @@ def from_openrouter(
         # `user` is OpenRouter's abuse-detection identifier; the nearest honest
         # Conifer equivalent is caller attribution.
         client=request.get("user"),
-        # `models` is OpenRouter's chain. With `route: "fallback"` it is a
-        # GATEWAY-side chain (one request, one bill) — the honest equivalent,
-        # needing no client opt-in because no extra request is implied.
-        # Without it, `models` keeps its historical meaning: an opt-in CLIENT
-        # chain of separately billed turns.
+        # With route="fallback", `models` is the gateway-side chain; otherwise an opt-in client chain.
         server_fallback_models=(
             request.get("models") if request.get("route") == "fallback" else None
         ),
@@ -159,18 +132,8 @@ def from_openrouter(
 
 
 def attribution_from_openrouter(headers: Mapping[str, str]) -> Optional[str]:
-    """OpenRouter's app-attribution headers -> the Conifer caller tag.
-
-    ``HTTP-Referer`` and ``X-Title`` exist to rank your app on OpenRouter's
-    public board. Conifer has no such board, so they become usage attribution
-    only. Twin of ``attributionFromOpenRouter`` in the TypeScript SDK, which
-    Python was missing entirely.
-    """
+    """OpenRouter's app-attribution headers -> the Conifer caller tag."""
     lower = {key.lower(): value for key, value in headers.items()}
-    # `X-OpenRouter-Categories` assigns MARKETPLACE categories on openrouter.ai.
-    # Conifer runs no marketplace and no public leaderboard, so there is nothing
-    # for it to become. Refusing beats returning it as an app name — which is
-    # what a lenient reading would do, mislabelling every turn's attribution.
     if "x-openrouter-categories" in lower:
         raise ConiferPortabilityError(
             "X-OpenRouter-Categories",
@@ -217,9 +180,7 @@ _HELICONE_REFUSALS: Dict[str, str] = {
     "helicone-session-name": "see Helicone-Session-Id.",
     "helicone-posthog-key": "Conifer does not fan out to third-party analytics.",
     "helicone-posthog-host": "see Helicone-Posthog-Key.",
-    # PRIVACY. Dropping either is the worst case in this file: the request
-    # succeeds, nothing errors, and a promise the caller made to THEIR OWN
-    # users — that prompts or completions are not retained — has quietly lapsed.
+    # Retention switches are promises the caller made to their own users.
     "helicone-omit-request": (
         "Conifer has no per-request switch to omit the prompt from what it retains, so "
         "this cannot be honored and MUST NOT be dropped — it is a promise you may have "
@@ -245,10 +206,7 @@ _HELICONE_REFUSALS: Dict[str, str] = {
     ),
 }
 
-#: Helicone headers that are OBSERVED rather than converted: they change what
-#: Helicone recorded, not what the model did, so there is nothing to refuse and
-#: nothing to send. Listed so the catch-all can tell "deliberately inert" from
-#: "we have never heard of this".
+#: Headers that are converted below or deliberately inert, so the catch-all can tell them from unknown ones.
 _HELICONE_INERT = {
     "helicone-cache-enabled",
     "helicone-request-id",
@@ -261,11 +219,7 @@ _HELICONE_INERT = {
 def from_helicone_headers(
     headers: Mapping[str, str]
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
-    """A Helicone header bag -> (Conifer request fields, custom properties).
-
-    The properties come back to YOU because Conifer stores no arbitrary property
-    index and will not pretend to.
-    """
+    """A Helicone header bag -> (Conifer request fields, custom properties)."""
     lowered = {key.lower(): value for key, value in headers.items() if value is not None}
 
     for name, why in _HELICONE_REFUSALS.items():
@@ -296,19 +250,12 @@ def from_helicone_headers(
         )
 
     if "helicone-fallbacks" in lowered:
-        # Maps to the GATEWAY-side chain (x-conifer-fallback-models), which is
-        # the honest equivalent of what Helicone did: the proxy — not your app
-        # — walked the chain, on one logical request.
         fields["server_fallback_models"] = parse_fallbacks(lowered["helicone-fallbacks"])
 
     if "helicone-ratelimit-policy" in lowered:
         fields["max_cost_nano_usd"] = ceiling_from_policy(lowered["helicone-ratelimit-policy"])
 
-    # Anything left is a Helicone header we have never heard of. NOT safe to
-    # ignore: an unknown header is exactly the case where we cannot judge
-    # whether it carried a constraint, and this shim exists so that a
-    # constraint cannot go missing in transit. (Two of the headers above are
-    # privacy promises that were being dropped here until 2026-08-27.)
+    # An unknown Helicone header may carry a constraint, so it is refused, not ignored.
     unknown = [
         key
         for key in lowered
@@ -358,15 +305,7 @@ def parse_fallbacks(raw: str) -> List[str]:
 
 
 def ceiling_from_policy(policy: str) -> int:
-    """``[quota];w=[window];u=[unit];s=[segment]`` -> a nanodollar ceiling.
-
-    Only a ``cents`` quota converts: Conifer's control is a per-request MONEY
-    ceiling, strictly stronger than a request count but not the same quantity.
-
-    The narrowing is real and worth stating: Helicone's quota is a budget over a
-    WINDOW; ``x-conifer-max-cost-nanousd`` caps ONE request. The mapped value is
-    an upper bound no single call may exceed, not a running total.
-    """
+    """``[quota];w=[window];u=[unit];s=[segment]`` -> a nanodollar ceiling."""
     parts = [part.strip() for part in policy.split(";")]
     try:
         quota = int(parts[0])
@@ -395,7 +334,6 @@ _VERCEL_UNSUPPORTED: Dict[str, str] = {
         "there is no Conifer OIDC exchange. Mint a key at "
         "https://conifer.build/console#/keys and set CONIFER_API_KEY."
     ),
-    # Verified live 2026-08-27: each of these answers 404 with `unknown_url`.
     "rerank": (
         "Conifer does not serve reranking. The embedding models on this gateway "
         '(GET /v1/models, caps includes "embeddings") can rank by cosine similarity, '
@@ -456,17 +394,7 @@ def conifer_openai_compatible_config(
     }
 
 
-#: Every ``providerOptions.gateway`` key Vercel documents, and why it refuses.
-#:
-#: THE FAILURE THIS PREVENTS. An earlier version refused only ``order`` and
-#: ``only``, converted ``models``, and let EVERYTHING ELSE fall out of the dict
-#: unremarked — so a caller who had set ``zdr`` or ``dataCollection`` migrated to
-#: Conifer and silently lost the constraint. That is the exact failure the
-#: portability card's first law forbids, and for the privacy keys it is the most
-#: consequential possible instance: the request still runs, nothing errors, and
-#: a promise the caller made to THEIR users is quietly no longer being kept.
-#:
-#: The rule: a gateway key is converted, or it throws. Never dropped.
+#: Every documented ``providerOptions.gateway`` key is converted or refused, never dropped.
 _VERCEL_GATEWAY_REFUSALS: Dict[str, str] = {
     "order": (
         "provider pinning has no Conifer equivalent: the gateway picks the host for the "
@@ -508,9 +436,7 @@ _VERCEL_GATEWAY_REFUSALS: Dict[str, str] = {
         "one would be worse than refusing. Use max_cost_nano_usd, a HARD ceiling on the "
         "whole turn's worst case, enforced before any upstream call."
     ),
-    # PRIVACY constraints. Dropping either is the worst case in this file: the
-    # turn still succeeds, so nothing surfaces, while a commitment the caller
-    # made to their own users has quietly lapsed.
+    # Retention constraints are promises the caller made to their own users.
     "dataCollection": (
         "Conifer has no per-request data-collection toggle, so this cannot be honored and "
         "MUST NOT be dropped — it is a promise you may have made to your own users. See "
@@ -527,12 +453,7 @@ _VERCEL_GATEWAY_REFUSALS: Dict[str, str] = {
 def from_vercel_provider_options(
     provider_options: Mapping[str, Any], allow_client_fallback: bool = False
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """``providerOptions`` -> (Conifer request fields, passthrough options).
-
-    Keys under ``gateway`` are Vercel-specific routing controls, and every one
-    is either converted or refused. Keys for OTHER providers are returned for
-    you to place in ``extra_body`` deliberately.
-    """
+    """``providerOptions`` -> (Conifer request fields, passthrough options)."""
     gateway = provider_options.get("gateway") or {}
     for key, why in _VERCEL_GATEWAY_REFUSALS.items():
         if gateway.get(key) is not None:
@@ -541,9 +462,7 @@ def from_vercel_provider_options(
     if gateway.get("models") is not None:
         fields["fallback_models"] = list(gateway["models"])
         fields["allow_client_fallback"] = allow_client_fallback
-    # Anything left is a control we have never heard of. NOT safe to ignore:
-    # an unknown key is exactly the case where we cannot judge whether it
-    # mattered, and the whole point is that a constraint cannot go missing.
+    # An unknown gateway key may be a constraint, so it is refused, not ignored.
     unknown = [k for k, v in gateway.items() if k != "models" and v is not None]
     if unknown:
         joined = "`, `".join(unknown)
@@ -561,19 +480,7 @@ def from_vercel_provider_options(
 
 
 def assert_supported_vercel_surface(surface: str) -> None:
-    """Refuse, at the CALL SITE, a surface this gateway does not serve.
-
-    The alternative is a 404 at runtime, in production, with a provider name in
-    it and no indication of what to do — which is exactly how a migration
-    "succeeds" and then fails on the one code path nobody exercised. Every
-    entry was probed against api.conifer.build on 2026-08-27.
-
-    Note what is NOT here: ``embeddings``. It was listed until the gateway
-    shipped ``/v1/embeddings`` on 2026-08-26, and the SDK now serves that door
-    directly (:meth:`conifer_sdk.Conifer.embed`). A shim that refuses a surface
-    the gateway actually serves is as wrong as one that admits a surface it
-    does not.
-    """
+    """Refuse, at the CALL SITE, a surface this gateway does not serve."""
     key = _VERCEL_SURFACE_ALIASES.get(surface, surface)
     why = _VERCEL_UNSUPPORTED.get(key)
     if why is not None:

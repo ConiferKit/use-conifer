@@ -1,15 +1,8 @@
-"""The Conifer gateway SDK for Python.
+"""The Conifer gateway SDK for Python. Standard library only.
 
-Same cards as the TypeScript SDK (``sdk/cards/``), same laws:
-
-* the receipt is parsed absence-preserving — a header the gateway omitted stays
-  ``None``, because zero-filling turns "we do not know" into a wrong number;
-* retries are narrow (transport faults and 429/502/503/504 only) and always
-  carry one idempotency key, so a retry cannot double-bill;
-* a portability input Conifer cannot honor raises rather than being dropped.
-
-Standard library only, so ``pip install`` pulls no tree and the SDK works in a
-lambda, a Slack bot, or a locked-down build image unchanged.
+    from conifer_sdk import Conifer, ChatRequest
+    answer = Conifer().chat(ChatRequest(model="auto", messages=[...]))
+    answer.text, answer.receipt.cost_nano_usd
 """
 
 __version__ = "0.2.0"

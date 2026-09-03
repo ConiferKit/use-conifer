@@ -1,9 +1,6 @@
-"""One error class per gateway ``error.type`` — the Python twin of src/errors.ts.
-
-Branching on a name rather than a status is the whole point: a 402 is either
-"the account is out of credit" or "your own ceiling refused this turn", and the
-remedies are opposite.
-"""
+"""One error class per kind of gateway refusal. Branch on the class, not the
+status: a 402 alone does not say whether to add credit, raise a ceiling, or
+mint a new key."""
 
 from __future__ import annotations
 
@@ -14,9 +11,7 @@ from typing import Any, Mapping, Optional, Sequence
 class ConiferError(Exception):
     """Base class. Every Conifer failure carries these fields."""
 
-    #: Whether re-sending the SAME bytes could plausibly succeed. Only transport
-    #: faults and 429/502/503/504 qualify: a 4xx the gateway authored refuses
-    #: the same bytes again, so retrying it is pure latency and burnt quota.
+    #: Whether re-sending the same bytes could succeed. Transport faults and 429/5xx only.
     retryable: bool = False
 
     def __init__(
@@ -33,44 +28,34 @@ class ConiferError(Exception):
         self.status = status
         self.type = type
         self.message = message
-        #: The OpenAI-compatible ``error.code``, when the gateway sent one.
-        #:
-        #: Not decoration: the gateway speaks the INDUSTRY vocabulary, in which
-        #: ``type`` collapses a 401 and a 400 into one ``invalid_request_error``.
-        #: ``code`` is what separates them (``invalid_api_key``,
-        #: ``model_not_found``, ``context_length_exceeded``,
-        #: ``unsupported_parameter``, ``unknown_url``, …), and it is the field
-        #: LangChain, LiteLLM and openai-python already branch on.
+        #: The OpenAI-compatible ``error.code``, which distinguishes refusals that share a ``type``.
         self.code = code
-        #: The OpenAI-compatible ``error.param`` — the request field the
-        #: refusal is about (``tools``, ``tool_choice``, ``messages``,
-        #: ``max_tokens``, ``model``). Present on field-scoped refusals only.
+        #: The request field the refusal is about, when it is field-scoped.
         self.param = param
         self.request_id = request_id
+        #: The raw envelope.
         self.body = body
 
 
 class ConiferAuthError(ConiferError):
-    """401."""
+    """401 or 403."""
 
 
 class ConiferPaymentError(ConiferError):
-    """402: the billed account cannot cover this turn's worst case."""
+    """402: the account is out of credit. Add funds."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        # Anchored on the gateway's wording, never "the first two integers": a
-        # delegated key's message opens with the billed ACCOUNT id, whose digits
-        # were being read as the amount. The 402 body carries the balance
-        # structured (``error.balance_nanodollars``); that wins over the prose.
+        #: Worst-case cost of the refused request, in nanodollars.
         self.required_nano_usd = _integer_after(self.message, r"needs up to (-?\d+) nanodollars")
+        #: What the billed account holds, in nanodollars.
         self.balance_nano_usd = _structured_balance(self.body)
         if self.balance_nano_usd is None:
             self.balance_nano_usd = _integer_after(self.message, r"holds? (-?\d+)")
 
 
 class ConiferCostCeilingError(ConiferError):
-    """402: YOUR ``max_cost_nano_usd`` refused it, before any upstream call."""
+    """402: your own ``max_cost_nano_usd`` refused this request. Raise it or send less."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -78,20 +63,8 @@ class ConiferCostCeilingError(ConiferError):
 
 
 class ConiferKeySpendCapError(ConiferError):
-    """402: this API KEY's own lifetime spend cap is exhausted.
-
-    The THIRD distinct 402, and the reason branching on status is not enough.
-    All three are 402, nothing is charged for any of them, and the remedy
-    differs in each case:
-
-    - :class:`ConiferPaymentError` — the ACCOUNT is out of credit. Add funds.
-    - :class:`ConiferCostCeilingError` — YOUR per-request ceiling refused this
-      turn. Raise it, or send less.
-    - :class:`ConiferKeySpendCapError` — the KEY you are holding has spent its
-      lifetime cap. The account may be fully funded and every other key still
-      works; the fix is a new key or a raised cap, and adding credit does
-      nothing at all.
-    """
+    """402: this API key's lifetime spend cap is spent. Adding credit does
+    nothing; raise the cap or mint a key."""
 
 
 class ConiferBadRequestError(ConiferError):
@@ -99,61 +72,22 @@ class ConiferBadRequestError(ConiferError):
 
 
 class ConiferCapabilityError(ConiferBadRequestError):
-    """400: the MODEL cannot serve this request's shape.
-
-    Its published catalog ``caps`` omit a capability the request uses, or a
-    declared ceiling is exceeded. The gateway refuses BEFORE any charge, with
-    ``code: unsupported_parameter`` (or ``invalid_value``) and ``param`` naming
-    the field: ``messages`` when the request carries images a no-vision model
-    cannot take, ``tools``/``tool_choice`` on a no-tool model, ``tools`` again
-    for an over-``max_tools`` array.
-
-    This is the ONE 400 a different model can fix — a statement about the
-    PAIRING of this request with this model, not about the bytes. Catch it to
-    re-route to a capable model (e.g. an image turn from ``deepseek-v4-flash``
-    to ``glm-5.3-flash``). Born from the 2026-08-29 OpenTag incident: an image
-    turn on a text-only model came back as provider-prose upstream errors and
-    was retried to death; now it is this class on the first try.
-    """
+    """400: this model cannot take this request's shape (images on a
+    no-vision model, tools on a no-tool model). The one 400 a different model
+    fixes; catch it to re-route."""
 
     #: A different model may serve these bytes; the same model never will.
     model_switchable = True
 
 
 class ConiferModelNotFoundError(ConiferError):
-    """404.
-
-    The gateway deliberately cannot distinguish "no such model" from "a model
-    you may not see": both are absent from your catalog listing and both render
-    this refusal. Do not treat it as proof of non-existence.
-    """
+    """404. The gateway does not distinguish "no such model" from "not in your catalog"."""
 
 
 class ConiferConflictError(ConiferError):
-    """409: an idempotency key that cannot be answered right now.
-
-    The gateway authors THREE different 409s under this one type, and they do
-    not mean the same thing (``handlers.rs``, measured live 2026-08-27):
-
-    - "idempotency key was already used with a different request body" —
-      TERMINAL. You reused a key for different bytes. Retrying re-sends the
-      same conflict forever; change the key or the body.
-    - "this request is already in progress; retry shortly" — TRANSIENT. A first
-      attempt is still in flight, possibly on another replica.
-    - "this request has no replayable response; retry shortly" — TRANSIENT. The
-      key is known but the body lives in another replica's cache, and the
-      gateway will not guess between "settled elsewhere" and "still running"
-      because either guess can double-charge or wrongly refund.
-
-    The last two are the gateway explicitly asking to be asked again, and
-    retrying them is SAFE precisely because the key is the same — that is what
-    idempotency is for. So ``retryable`` is decided by the gateway's own
-    wording rather than by the status code, which cannot tell these apart.
-
-    Found by the live QA harness: a run hit ``replayed_no_body_unresolved`` on
-    a FIRST call, and the SDK surfaced a hard failure for a turn the gateway
-    was willing to serve on a second ask.
-    """
+    """409: an idempotency key that cannot be answered right now. Retryable
+    when the gateway says "retry shortly" (a first attempt is still in
+    flight); terminal when the key was reused with a different body."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -161,7 +95,7 @@ class ConiferConflictError(ConiferError):
 
 
 class ConiferByokKeyError(ConiferError):
-    """422: your own provider key was rejected or is marked failed."""
+    """The provider rejected your own key on the BYOK lane."""
 
 
 class ConiferRateLimitError(ConiferError):
@@ -171,11 +105,12 @@ class ConiferRateLimitError(ConiferError):
 
     def __init__(self, retry_after_seconds: Optional[int] = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        #: From the ``retry-after`` header, when sent.
         self.retry_after_seconds = retry_after_seconds
 
 
 class ConiferUpstreamError(ConiferError):
-    """502 (transport-shaped, retryable) or 422 (refused on the merits)."""
+    """The upstream provider failed. A 502 may be retried; a 422 refused these bytes on their merits."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -189,7 +124,7 @@ class ConiferUnavailableError(ConiferError):
 
 
 class ConiferTimeoutError(ConiferError):
-    """No verdict arrived. We make no claim about whether the turn was billed."""
+    """No verdict arrived in time. Whether the turn was billed is unknown."""
 
     retryable = True
 
@@ -198,7 +133,7 @@ class ConiferTimeoutError(ConiferError):
 
 
 class ConiferConnectionError(ConiferError):
-    """The socket failed. Same "no verdict" caveat as the timeout."""
+    """The socket failed. Whether the turn was billed is unknown."""
 
     retryable = True
 
@@ -207,15 +142,12 @@ class ConiferConnectionError(ConiferError):
 
 
 class ConiferPortabilityError(ConiferError):
-    """A migration input Conifer cannot honor.
-
-    Raised, never swallowed: dropping a spend ceiling, a provider restriction,
-    or a moderation flag would make a migration LOOK successful while quietly
-    changing what runs and what it costs.
-    """
+    """A request carries something Conifer cannot honour. Raised rather than
+    dropped, so a migration never silently changes what runs or what it costs."""
 
     def __init__(self, field: str, message: str) -> None:
         super().__init__(status=0, type="unsupported_by_conifer", message=message)
+        #: The field with no Conifer equivalent.
         self.field = field
 
 
@@ -237,18 +169,12 @@ def _two_integers(message: str) -> tuple[Optional[int], Optional[int]]:
     return first, second
 
 
-#: The gateway's RETIRED private type names, kept so an older deploy or a
-#: recorded fixture maps to exactly the same class. The names it speaks now
-#: (``invalid_request_error``, ``rate_limit_error``) are industry vocabulary
-#: and are resolved by code+status in :func:`error_from`, not by this table.
+#: The gateway's retired private type names, still accepted.
 _BY_TYPE = {
     "unauthorized": ConiferAuthError,
     "insufficient_allowance": ConiferPaymentError,
     "cost_ceiling_exceeded": ConiferCostCeilingError,
     "key_spend_cap_exceeded": ConiferKeySpendCapError,
-    # 404. A BYOK provider name the gateway does not serve — a caller-side typo
-    # in the same family as a model that does not exist, so it shares the class
-    # a caller already handles for "that name is not a thing here".
     "unknown_provider": ConiferModelNotFoundError,
     "invalid_request": ConiferBadRequestError,
     "model_not_found": ConiferModelNotFoundError,
@@ -262,25 +188,10 @@ _BY_TYPE = {
 
 
 def error_from(status: int, body: Any, headers: Mapping[str, str]) -> ConiferError:
-    """Map a gateway refusal onto its class.
-
-    THE ``invalid_request_error`` COLLAPSE (measured live 2026-08-27). The
-    gateway speaks the INDUSTRY error vocabulary rather than a third schema of
-    its own: a 401 and a 400 both render ``type: "invalid_request_error"`` and a
-    429 renders ``rate_limit_error``, because that is what OpenAI, Groq,
-    Together, Fireworks, DeepSeek and xAI send and therefore what every existing
-    client already branches on.
-
-    That collapse is good for portability and fatal for a lookup on ``type``
-    alone. An earlier version of this function keyed only the gateway's older
-    private names (``unauthorized``, ``invalid_request``, ``rate_limited``),
-    which the gateway has since retired — so :class:`ConiferAuthError`,
-    :class:`ConiferBadRequestError` and :class:`ConiferRateLimitError` were
-    UNREACHABLE against the live gateway, every 401 and 400 arrived as a bare
-    :class:`ConiferError`, and a 429 lost its ``retry-after``.
-
-    So the discriminator is (type, code, status), in that order of authority.
-    """
+    """Map a refusal onto its class. The gateway speaks the industry
+    vocabulary, where ``invalid_request_error`` covers 400, 401 and 404, so
+    the discriminator is ``type``, then ``code``, then status. Unknown types
+    stay a plain :class:`ConiferError`."""
     envelope = body.get("error") if isinstance(body, dict) else None
     envelope = envelope if isinstance(envelope, dict) else {}
     type_ = envelope.get("type") if isinstance(envelope.get("type"), str) else f"http_{status}"
@@ -311,17 +222,11 @@ def error_from(status: int, body: Any, headers: Mapping[str, str]) -> ConiferErr
             retry_after = None
         return ConiferRateLimitError(retry_after_seconds=retry_after, **kwargs)
 
-    # The industry-vocabulary types, resolved by code then status.
     if type_ == "invalid_request_error":
         if code == "invalid_api_key" or status in (401, 403):
             return ConiferAuthError(**kwargs)
         if code == "model_not_found" or status == 404:
             return ConiferModelNotFoundError(**kwargs)
-        # A capability refusal is a statement about THIS model, not these
-        # bytes: ``unsupported_parameter`` = the published caps do not cover
-        # the request (images on a no-vision model, tools on a no-tool model);
-        # ``invalid_value`` on ``tools`` = the array exceeds ``max_tools``.
-        # Both are exactly what a fallback to a more capable model fixes.
         if code == "unsupported_parameter" or (code == "invalid_value" and param == "tools"):
             return ConiferCapabilityError(**kwargs)
         return ConiferBadRequestError(**kwargs)
@@ -331,8 +236,6 @@ def error_from(status: int, body: Any, headers: Mapping[str, str]) -> ConiferErr
     cls = _BY_TYPE.get(type_)
     if cls is not None:
         return cls(**kwargs)
-    # Unknown code: fall back to the STATUS for retryability only, keeping the
-    # gateway's own type string intact so a new code is still readable.
     if status >= 500 or status == 429:
         return ConiferUnavailableError(**kwargs)
     return ConiferError(**kwargs)

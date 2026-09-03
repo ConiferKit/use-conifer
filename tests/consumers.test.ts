@@ -103,6 +103,11 @@ test("the consumer list is still the three things this file knows how to check",
 test("every TypeScript helper has a Python twin", () => {
   const pythonSource = [
     readSource("python/conifer_sdk/client.py"),
+    readSource("python/conifer_sdk/catalog.py"),
+    readSource("python/conifer_sdk/chat.py"),
+    readSource("python/conifer_sdk/embeddings.py"),
+    readSource("python/conifer_sdk/jobs.py"),
+    readSource("python/conifer_sdk/transport.py"),
     readSource("python/conifer_sdk/errors.py"),
     readSource("python/conifer_sdk/portability.py"),
     readSource("python/conifer_sdk/receipt.py"),

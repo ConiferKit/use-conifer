@@ -1,33 +1,11 @@
-// mcp/server.ts — Conifer as an MCP server.
-//
-// WHY THIS EXISTS. A one-line env drop-in swaps the model BEHIND your coding
-// agent. This server does something different: it puts the whole catalog IN
-// FRONT of the agent, as tools it can call mid-task. The shape follows from
-// how people actually use it inside a development pipeline:
-//
-//   · "Ask a second model" — your Cursor/Claude Code session is driven by one
-//     model, but a task often wants another: a cheap one for a bulk rewrite, a
-//     reasoning one for a design review. `conifer_complete` is that door, with
-//     full multi-turn messages, not just a one-shot prompt.
-//   · "Which model should this job use?" — `conifer_compare` runs the SAME
-//     prompt across several models in parallel and returns each answer beside
-//     its exact settled cost, so choosing a model for a pipeline step is an
-//     experiment, not a vibe.
-//   · "What can I even call, and what does it cost?" — `conifer_list_models`,
-//     `conifer_choose_model`, `conifer_balance`.
-//
-// Every spending tool takes `max_cost_nanousd`. An agent that can see and bound
-// what its calls cost can be told to spend less; one that cannot, cannot.
-//
-// WHY NO SDK DEPENDENCY. MCP over stdio is newline-delimited JSON-RPC 2.0. The
-// whole protocol surface we need is initialize / tools/list / tools/call, so
-// implementing it directly costs ~80 lines and buys a server that installs with
-// no npm tree at all — which is the difference between "add this line to your
-// config" and "set up a build first".
-//
-// WHY IT REPORTS COST. Every completion this server returns carries its own
-// settled nanodollar receipt in the tool result. An agent that can see what its
-// last call cost can be told to spend less; one that cannot, cannot.
+// Conifer as an MCP server over stdio: the catalog as tools an agent can
+// call mid-task. `conifer_complete` asks any model with a full conversation;
+// `conifer_compare` runs one prompt across several models and returns each
+// answer beside its settled cost; `conifer_list_models`, `conifer_choose_model`
+// and `conifer_balance` read the catalog. Every spending tool takes
+// `max_cost_nanousd`. The protocol surface (initialize, tools/list,
+// tools/call) is small enough to implement directly, so this has no
+// dependency tree.
 
 import { Conifer, emptyReason } from "../src/index.ts";
 import { ConiferError } from "../src/errors.ts";
@@ -136,15 +114,8 @@ export const TOOLS: ToolDefinition[] = [
       );
       return {
         text: completion.choices[0]?.message?.content ?? "",
-        // WHY the text is empty, when it is. An agent that receives `text: ""`
-        // and nothing else will usually retry — spending the caller's money a
-        // second time on a turn that will fail the same way. The single most
-        // common cause is a reasoning model spending `max_tokens` on its
-        // thinking block before reaching the visible answer, which is a
-        // budget problem the agent can actually fix. Absent when there is
-        // text, and absent for a tool call, where empty text is correct.
+        // Why the text is empty, so the agent fixes the budget instead of retrying.
         empty_reason: emptyReason(completion),
-        // Vendor reasoning trace, when the model emitted one. Absent otherwise.
         reasoning:
           completion.choices[0]?.message?.reasoning ??
           completion.choices[0]?.message?.reasoning_content,
@@ -196,9 +167,6 @@ export const TOOLS: ToolDefinition[] = [
             return {
               model: completion.receipt.effectiveModel ?? model,
               text,
-              // A reasoning model can spend the whole token budget thinking
-              // and return empty text — a blank row reads as "broken" when
-              // the honest reading is "give it more max_tokens". Say so.
               ...(text === "" && {
                 note: "empty answer: the model spent its max_tokens on reasoning; raise max_tokens or set reasoning_effort on conifer_complete",
               }),
@@ -259,11 +227,7 @@ export const TOOLS: ToolDefinition[] = [
         maxCostNanoUsd: args.max_cost_nanousd as number | undefined,
         client: "conifer-mcp",
       });
-      // The vectors themselves are deliberately NOT returned in full: a single
-      // 1536-dimension embedding is ~30 KB of digits, and a batch would blow
-      // any agent's context window for numbers no model can read anyway. The
-      // caller gets the shape, the cost, and a short preview to confirm the
-      // call worked; a program that needs the values should use the SDK.
+      // Full vectors would flood the agent's context; return shape, cost and a preview.
       return {
         model: result.model,
         count: result.data.length,
@@ -287,11 +251,7 @@ export const TOOLS: ToolDefinition[] = [
   },
 ];
 
-/**
- * The shared complete/compare request builder. One construction site so the
- * two spending tools cannot drift: same message assembly, same ceiling, same
- * attribution tag.
- */
+/** The request builder shared by complete and compare. */
 export function completeRequest(
   args: Record<string, unknown>,
   defaults: { maxTokensDefault: number },
@@ -334,11 +294,7 @@ function summarize(model: CatalogModel) {
   };
 }
 
-/**
- * Handle one JSON-RPC message. Pure: takes a request and a client, returns the
- * response object (or `undefined` for a notification). Exported so the tests
- * drive the real protocol rather than a paraphrase of it.
- */
+/** Handle one JSON-RPC message. Returns the response, or `undefined` for a notification. */
 export async function handle(
   request: JsonRpcRequest,
   client: () => Conifer,
@@ -381,9 +337,7 @@ export async function handle(
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         });
       } catch (error) {
-        // A gateway refusal is DATA for the agent, not a transport fault: it
-        // carries the remedy (add credits, lower the ceiling, pick another
-        // model), and an agent that sees it can act on it.
+        // A gateway refusal is data for the agent: it carries the remedy.
         const message =
           error instanceof ConiferError
             ? `${error.type}: ${error.message}`
@@ -402,8 +356,7 @@ export async function handle(
 
 /** stdio transport: newline-delimited JSON-RPC in, the same out. */
 export function serve(input: NodeJS.ReadableStream, output: NodeJS.WritableStream): void {
-  // Constructed lazily so `--help`-style probes and tools/list work even before
-  // a key is present; only a tool that actually calls the gateway needs one.
+  // Lazy, so tools/list works before a key is present.
   let cached: Conifer | undefined;
   const client = () => (cached ??= new Conifer());
 
@@ -434,17 +387,9 @@ export function serve(input: NodeJS.ReadableStream, output: NodeJS.WritableStrea
   });
 }
 
-// Run as a binary, stay importable as a module.
-//
-// The obvious guard — comparing `import.meta.url` to `process.argv[1]` — is
-// WRONG for a published package, and silently so: `npx conifer-mcp` runs the
-// bin shim, so argv[1] is the shim's path and never this module's. The server
-// then started nothing and exited 0, which looks exactly like an MCP host
-// getting no answer. Measured against a real `npm i` consumer on Node 22.
-//
-// So the shim asks explicitly (`bin/conifer-mcp.mjs` sets the flag by importing
-// this module for its side effect), and a direct `node mcp/server.ts` still
-// works via the argv comparison for the development path.
+// Run as a binary, stay importable as a module. Under `npx conifer-mcp`
+// argv[1] is the bin shim, so the shim sets a flag instead; the argv
+// comparison covers `node mcp/server.ts` in development.
 function shouldServe(): boolean {
   if (typeof process === "undefined") return false;
   const entry = process.argv[1];

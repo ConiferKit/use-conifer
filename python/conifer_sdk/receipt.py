@@ -1,13 +1,6 @@
-"""The ``x-conifer-*`` disclosure headers, parsed. Twin of src/receipt.ts.
-
-STREAMING CAVEAT (measured live 2026-08-26): on an SSE turn the response HEAD
-is sent before the completion settles, so the routing receipt is present but the
-COST headers are not. Reconcile a stream from its terminal ``usage`` chunk.
-
-Absence is preserved: the gateway OMITS ``x-conifer-cost-components-nanousd``
-rather than approximate it, and omits ``x-conifer-service-tier`` when no
-completion window was declared. Zero-filling either would be a confident lie.
-"""
+"""The ``x-conifer-*`` receipt headers, parsed. A header the gateway omitted
+stays ``None``: on a stream the head is sent before the cost settles, so the
+routing fields are present and the cost fields are not."""
 
 from __future__ import annotations
 
@@ -37,7 +30,7 @@ class Receipt:
     cost_usd: Optional[str] = None
     cost_components_nano_usd: Optional[CostComponents] = None
     service_tier: Optional[str] = None
-    #: The venue that SERVED the turn; this gateway is always ``cloud``.
+    #: The venue that served the turn.
     receipt_venue: Optional[str] = None
     #: Retail counterfactual at the documented default pin. OMITTED unless the
     #: routed predicate holds, and never 0-as-guess: absence means "not

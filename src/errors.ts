@@ -1,51 +1,28 @@
-// errors.ts — one class per gateway `error.type`.
-//
-// The gateway authors a typed envelope (`{error: {type, message, ...}}`) for
-// every refusal it owns. Branching on a NAME rather than a status number is the
-// difference between "402" (two very different remedies) and
-// `ConiferPaymentError` vs `ConiferCostCeilingError`. See cards/sdk.output.card.json.
+// One error class per kind of gateway refusal. Branch on the class, not the
+// status: a 402 alone does not say whether to add credit, raise a ceiling,
+// or mint a new key.
 
-/** Fields every Conifer error carries. */
 export interface ConiferErrorInit {
   status: number;
   type: string;
   message: string;
-  /**
-   * The OpenAI-compatible `error.code`, when the gateway sent one.
-   *
-   * This is not decoration: the gateway speaks the INDUSTRY vocabulary, in
-   * which `type` collapses a 401 and a 400 into one `invalid_request_error`.
-   * `code` is what separates them (`invalid_api_key`, `model_not_found`,
-   * `context_length_exceeded`, `unsupported_parameter`, `unknown_url`, …), and
-   * it is the field LangChain, LiteLLM and openai-python already branch on.
-   */
+  /** The OpenAI-compatible `error.code`, which distinguishes refusals that share a `type`. */
   code?: string;
-  /**
-   * The OpenAI-compatible `error.param` — the request field the refusal is
-   * about (`tools`, `tool_choice`, `messages`, `max_tokens`, `model`).
-   * Present on field-scoped refusals only.
-   */
+  /** The request field the refusal is about, when it is field-scoped. */
   param?: string;
   requestId?: string;
-  /** Raw envelope, so nothing the gateway said is lost behind our class names. */
+  /** The raw envelope. */
   body?: unknown;
 }
 
 export class ConiferError extends Error {
   readonly status: number;
   readonly type: string;
-  /** The OpenAI-compatible `error.code`. See {@link ConiferErrorInit.code}. */
   readonly code?: string;
-  /** The OpenAI-compatible `error.param`. See {@link ConiferErrorInit.param}. */
   readonly param?: string;
   readonly requestId?: string;
   readonly body?: unknown;
-  /**
-   * Whether re-sending the SAME bytes could plausibly succeed. Only transport
-   * faults and 429/502/503/504 are retryable: a 4xx the gateway authored will
-   * refuse the same bytes again, and retrying it is pure latency and burnt
-   * rate limit (the gateway's own doc for its 422 mapping says exactly this).
-   */
+  /** Whether re-sending the same bytes could succeed. Transport faults and 429/5xx only. */
   readonly retryable: boolean = false;
 
   constructor(init: ConiferErrorInit) {
@@ -60,30 +37,25 @@ export class ConiferError extends Error {
   }
 }
 
+/** 401 or 403. */
 export class ConiferAuthError extends ConiferError {}
 
+/** 402: the account is out of credit. Add funds. */
 export class ConiferPaymentError extends ConiferError {
-  /** Nanodollars this request could have cost, worst case. */
+  /** Worst-case cost of the refused request, in nanodollars. */
   readonly requiredNanoUsd?: number;
-  /** Nanodollars the billed account holds. */
+  /** What the billed account holds, in nanodollars. */
   readonly balanceNanoUsd?: number;
   constructor(init: ConiferErrorInit) {
     super(init);
-    // Anchored on the gateway's wording ("this request needs up to N
-    // nanodollars but {you hold|the account holds} M"), never "the first two
-    // integers": a delegated key's message opens with the billed ACCOUNT id,
-    // whose digits were being read as the amount. The 402 body carries the
-    // balance STRUCTURED (`error.balance_nanodollars`); that wins over prose.
     this.requiredNanoUsd = integerAfter(init.message, /needs up to (-?\d+) nanodollars/);
-    this.balanceNanoUsd =
-      structuredBalance(init.body) ?? integerAfter(init.message, /holds? (-?\d+)/);
+    this.balanceNanoUsd = structuredBalance(init.body) ?? integerAfter(init.message, /holds? (-?\d+)/);
   }
 }
 
+/** 402: your own `maxCostNanoUsd` refused this request. Raise it or send less. */
 export class ConiferCostCeilingError extends ConiferError {
-  /** The worst case the gateway projected, in nanodollars. */
   readonly projectedNanoUsd?: number;
-  /** The ceiling you set via `maxCostNanoUsd`. */
   readonly ceilingNanoUsd?: number;
   constructor(init: ConiferErrorInit) {
     super(init);
@@ -93,79 +65,28 @@ export class ConiferCostCeilingError extends ConiferError {
   }
 }
 
-/**
- * 402: this API KEY's own lifetime spend cap is exhausted.
- *
- * The THIRD distinct 402, and the reason branching on status is not enough.
- * The three have three different remedies and it matters which you got:
- *
- *   - `ConiferPaymentError`      — the ACCOUNT is out of credit. Add funds.
- *   - `ConiferCostCeilingError`  — YOUR per-request `maxCostNanoUsd` refused
- *                                  this turn. Raise it, or send less.
- *   - `ConiferKeySpendCapError`  — the KEY you are holding has spent its
- *                                  lifetime cap. The account may be fully
- *                                  funded and every other key still works;
- *                                  the fix is a new key or a raised cap, and
- *                                  adding credit does nothing at all.
- *
- * Nothing is charged for a refusal on any of the three.
- */
+/** 402: this API key's lifetime spend cap is spent. Adding credit does nothing; raise the cap or mint a key. */
 export class ConiferKeySpendCapError extends ConiferError {}
 
+/** 400. */
 export class ConiferBadRequestError extends ConiferError {}
 
 /**
- * 400: the MODEL cannot serve this request's shape — its published catalog
- * `caps` omit a capability the request uses, or a declared ceiling is
- * exceeded. The gateway refuses BEFORE any charge, with
- * `code: unsupported_parameter` (or `invalid_value`) and `param` naming the
- * field: `messages` when the request carries images a no-vision model cannot
- * take, `tools`/`tool_choice` on a no-tool model, `tools` again for an
- * over-`max_tools` array.
- *
- * This is the ONE 400 a different model can fix. Every other 400 refuses the
- * same bytes on every model alike — but this one is a statement about the
- * PAIRING of this request with this model, which is why the `chat()` fallback
- * chain advances on it (see `resolveChain`) while all other 4xx still throw.
- * Born from the 2026-08-29 OpenTag incident: an image turn on a text-only
- * model came back as provider-prose upstream errors and was retried to death;
- * now it is this class on the first try, and a chain with a vision member
- * absorbs it without the end user ever seeing an error.
+ * 400: this model cannot take this request's shape (images on a no-vision
+ * model, tools on a no-tool model). The one 400 a different model fixes, so
+ * the `chat()` fallback chain advances on it.
  */
 export class ConiferCapabilityError extends ConiferBadRequestError {
-  /** A different model may serve these bytes; the same model never will. */
   readonly modelSwitchable = true;
 }
-/**
- * 404. NOTE: the gateway deliberately cannot distinguish "no such model" from
- * "a model you may not see" — both are absent from your catalog listing and
- * both render this same refusal. Do not treat it as proof of non-existence.
- */
+
+/** 404. The gateway does not distinguish "no such model" from "not in your catalog". */
 export class ConiferModelNotFoundError extends ConiferError {}
+
 /**
- * 409. An idempotency key that cannot be answered right now.
- *
- * The gateway authors THREE different 409s under this one type, and they do not
- * mean the same thing (`handlers.rs`, measured live 2026-08-27):
- *
- *   - "idempotency key was already used with a different request body" —
- *     TERMINAL. You reused a key for different bytes. Retrying re-sends the
- *     same conflict forever; change the key or the body.
- *   - "this request is already in progress; retry shortly" — TRANSIENT. A first
- *     attempt is still in flight, possibly on another replica.
- *   - "this request has no replayable response; retry shortly" — TRANSIENT. The
- *     key is known but the body lives in another replica's cache, and the
- *     gateway will not guess between "settled elsewhere" and "still running"
- *     because either guess can double-charge or wrongly refund.
- *
- * The last two are the gateway explicitly asking to be asked again, and
- * retrying them is SAFE precisely because the key is the same — that is what
- * idempotency is for. So `retryable` is decided by the gateway's own wording
- * rather than by the status code, which cannot tell these apart.
- *
- * This was found by the live QA harness: a Python run hit
- * `replayed_no_body_unresolved` on a first call, and the SDK surfaced a hard
- * failure for a turn the gateway was willing to serve on a second ask.
+ * 409: an idempotency key that cannot be answered right now. Retryable when
+ * the gateway says "retry shortly" (a first attempt is still in flight);
+ * terminal when the key was reused with a different body.
  */
 export class ConiferConflictError extends ConiferError {
   readonly retryable: boolean;
@@ -174,11 +95,14 @@ export class ConiferConflictError extends ConiferError {
     this.retryable = /retry shortly/i.test(init.message);
   }
 }
+
+/** The provider rejected your own key on the BYOK lane. */
 export class ConiferByokKeyError extends ConiferError {}
 
+/** 429. */
 export class ConiferRateLimitError extends ConiferError {
   readonly retryable = true;
-  /** From `retry-after`, when the gateway sent one. */
+  /** From the `retry-after` header, when sent. */
   readonly retryAfterSeconds?: number;
   constructor(init: ConiferErrorInit & { retryAfterSeconds?: number }) {
     super(init);
@@ -186,12 +110,8 @@ export class ConiferRateLimitError extends ConiferError {
   }
 }
 
+/** The upstream provider failed. A 502 may be retried; a 422 refused these bytes on their merits. */
 export class ConiferUpstreamError extends ConiferError {
-  /**
-   * A 502 is a transport-shaped upstream failure and may be retried. A 422 is
-   * the gateway telling you the upstream refused these bytes on their merits —
-   * retrying is the exact waste the mapping exists to prevent.
-   */
   readonly retryable: boolean;
   constructor(init: ConiferErrorInit) {
     super(init);
@@ -199,11 +119,12 @@ export class ConiferUpstreamError extends ConiferError {
   }
 }
 
+/** 503. */
 export class ConiferUnavailableError extends ConiferError {
   readonly retryable = true;
 }
 
-/** No verdict arrived. We make no claim about whether the turn was billed. */
+/** No verdict arrived in time. Whether the turn was billed is unknown. */
 export class ConiferTimeoutError extends ConiferError {
   readonly retryable = true;
   constructor(message: string, requestId?: string) {
@@ -211,7 +132,7 @@ export class ConiferTimeoutError extends ConiferError {
   }
 }
 
-/** The socket failed. Same "no verdict" caveat as the timeout. */
+/** The socket failed. Whether the turn was billed is unknown. */
 export class ConiferConnectionError extends ConiferError {
   readonly retryable = true;
   constructor(message: string, cause?: unknown) {
@@ -220,15 +141,11 @@ export class ConiferConnectionError extends ConiferError {
 }
 
 /**
- * A portability shim was handed an input Conifer cannot honor.
- *
- * This is thrown, never swallowed, on purpose: dropping a spend ceiling, a
- * provider restriction, or a moderation flag would make a migration LOOK
- * successful while quietly changing what runs and what it costs. See
- * cards/portability.card.json ("never silently drop a constraint").
+ * A request carries something Conifer cannot honour. Thrown rather than
+ * dropped, so a migration never silently changes what runs or what it costs.
  */
 export class ConiferPortabilityError extends ConiferError {
-  /** The foreign field that has no Conifer equivalent. */
+  /** The field with no Conifer equivalent. */
   readonly field: string;
   constructor(field: string, message: string) {
     super({ status: 0, type: "unsupported_by_conifer", message });
@@ -236,20 +153,17 @@ export class ConiferPortabilityError extends ConiferError {
   }
 }
 
-/** The integer the pattern's first group captures, or nothing — never a guess. */
 function integerAfter(message: string, pattern: RegExp): number | undefined {
   const found = message.match(pattern);
   return found?.[1] === undefined ? undefined : Number(found[1]);
 }
 
-/** `error.balance_nanodollars`, which the gateway sends on the 402 body. */
 function structuredBalance(body: unknown): number | undefined {
   const envelope = (body as { error?: { balance_nanodollars?: unknown } } | undefined)?.error;
   const value = envelope?.balance_nanodollars;
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-/** The first two integers in a gateway money message, in order. */
 function twoIntegers(message: string): [number | undefined, number | undefined] {
   const found = message.match(/-?\d+/g);
   if (!found) return [undefined, undefined];
@@ -257,48 +171,19 @@ function twoIntegers(message: string): [number | undefined, number | undefined] 
   return [num(0), num(1)];
 }
 
-/** A 429 under either the industry name or the retired one, with its hint. */
-function rateLimit(
-  init: ConiferErrorInit,
-  headers: { get(name: string): string | null },
-): ConiferRateLimitError {
+function rateLimit(init: ConiferErrorInit, headers: { get(name: string): string | null }): ConiferRateLimitError {
   const raw = headers.get("retry-after");
   const parsed = raw === null ? Number.NaN : Number.parseInt(raw, 10);
-  return new ConiferRateLimitError({
-    ...init,
-    retryAfterSeconds: Number.isFinite(parsed) ? parsed : undefined,
-  });
+  return new ConiferRateLimitError({ ...init, retryAfterSeconds: Number.isFinite(parsed) ? parsed : undefined });
 }
 
 /**
- * Map a gateway refusal onto its class. Unknown types stay a plain ConiferError.
- *
- * THE `invalid_request_error` COLLAPSE (measured live 2026-08-27). The gateway
- * deliberately speaks the INDUSTRY error vocabulary rather than a third schema
- * of its own: a 401 and a 400 both render `type: "invalid_request_error"`, and
- * a 429 renders `rate_limit_error`, because that is what OpenAI, Groq, Together,
- * Fireworks, DeepSeek and xAI all send and therefore what every existing client
- * already branches on.
- *
- * That collapse is good for portability and fatal for a switch on `type` alone.
- * An earlier version of this function switched on the gateway's older private
- * names (`unauthorized`, `invalid_request`, `rate_limited`), which the gateway
- * has since retired — so `ConiferAuthError`, `ConiferBadRequestError` and
- * `ConiferRateLimitError` were UNREACHABLE against the live gateway and every
- * 401 and 400 arrived as a bare `ConiferError`. Worse, a 429 fell to the
- * status-based default and lost its `retry-after`.
- *
- * So the discriminator is (type, code, status), in that order of authority:
- * `error.code` disambiguates the collapsed type where the gateway sends one
- * (`invalid_api_key` for the 401), and the STATUS settles it where it does not.
- * The retired names are still accepted so an older gateway deploy, or a
- * recorded fixture, keeps mapping to the same class.
+ * Map a refusal onto its class. The gateway speaks the industry vocabulary,
+ * where `invalid_request_error` covers 400, 401 and 404, so the discriminator
+ * is `type`, then `code`, then status. The gateway's retired private type
+ * names are still accepted. Unknown types stay a plain `ConiferError`.
  */
-export function errorFrom(
-  status: number,
-  body: unknown,
-  headers: { get(name: string): string | null },
-): ConiferError {
+export function errorFrom(status: number, body: unknown, headers: { get(name: string): string | null }): ConiferError {
   const envelope =
     typeof body === "object" && body !== null && "error" in body
       ? ((body as { error: unknown }).error as Record<string, unknown>)
@@ -306,38 +191,21 @@ export function errorFrom(
   const type = typeof envelope?.type === "string" ? envelope.type : `http_${status}`;
   const code = typeof envelope?.code === "string" ? envelope.code : undefined;
   const param = typeof envelope?.param === "string" ? envelope.param : undefined;
-  const message =
-    typeof envelope?.message === "string"
-      ? envelope.message
-      : `the gateway refused with HTTP ${status}`;
-  const requestId =
-    headers.get("x-conifer-request-id") ?? headers.get("x-request-id") ?? undefined;
+  const message = typeof envelope?.message === "string" ? envelope.message : `the gateway refused with HTTP ${status}`;
+  const requestId = headers.get("x-conifer-request-id") ?? headers.get("x-request-id") ?? undefined;
   const init: ConiferErrorInit = { status, type, code, param, message, requestId, body };
 
-  // The industry-vocabulary types, resolved by code then status.
   if (type === "invalid_request_error") {
-    if (code === "invalid_api_key" || status === 401 || status === 403) {
-      return new ConiferAuthError(init);
-    }
-    if (code === "model_not_found" || status === 404) {
-      return new ConiferModelNotFoundError(init);
-    }
-    // A capability refusal is a statement about THIS model, not these bytes:
-    // `unsupported_parameter` = the caps the model published do not cover the
-    // request (no-vision model sent images, no-tool model sent tools);
-    // `invalid_value` on `tools` = the array exceeds the seat's `max_tools`.
-    // Both are exactly what a fallback to a more capable model fixes.
+    if (code === "invalid_api_key" || status === 401 || status === 403) return new ConiferAuthError(init);
+    if (code === "model_not_found" || status === 404) return new ConiferModelNotFoundError(init);
     if (code === "unsupported_parameter" || (code === "invalid_value" && param === "tools")) {
       return new ConiferCapabilityError(init);
     }
     return new ConiferBadRequestError(init);
   }
-  if (type === "rate_limit_error") {
-    return rateLimit(init, headers);
-  }
+  if (type === "rate_limit_error") return rateLimit(init, headers);
 
   switch (type) {
-    // Retired private name, kept so an older deploy maps identically.
     case "unauthorized":
       return new ConiferAuthError(init);
     case "insufficient_allowance":
@@ -346,34 +214,24 @@ export function errorFrom(
       return new ConiferCostCeilingError(init);
     case "key_spend_cap_exceeded":
       return new ConiferKeySpendCapError(init);
-    // 404. A BYOK provider name the gateway does not serve — a caller-side
-    // typo in the same family as a model that does not exist, so it shares
-    // the class a caller already handles for "that name is not a thing here".
-    case "unknown_provider":
-      return new ConiferModelNotFoundError(init);
     case "invalid_request":
       return new ConiferBadRequestError(init);
     case "model_not_found":
     case "job_not_found":
+    case "unknown_provider":
       return new ConiferModelNotFoundError(init);
     case "request_in_progress":
       return new ConiferConflictError(init);
     case "byok_key_rejected":
       return new ConiferByokKeyError(init);
-    case "rate_limited": {
-      // Retired private name; `rate_limit_error` is handled above.
+    case "rate_limited":
       return rateLimit(init, headers);
-    }
     case "service_unavailable":
       return new ConiferUnavailableError(init);
     case "upstream_error":
     case "wire_upstream_mismatch":
       return new ConiferUpstreamError(init);
     default:
-      // Unknown code: fall back to the STATUS for retryability only, and keep
-      // the gateway's own type string intact so a new code is still readable.
-      return status >= 500 || status === 429
-        ? new ConiferUnavailableError(init)
-        : new ConiferError(init);
+      return status >= 500 || status === 429 ? new ConiferUnavailableError(init) : new ConiferError(init);
   }
 }

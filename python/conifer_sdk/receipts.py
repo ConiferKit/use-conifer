@@ -1,40 +1,4 @@
-"""Receipts for the client you ALREADY use.
-
-THE PROBLEM THIS SOLVES. The exact per-turn cost is the one thing Conifer has
-that other gateways do not, and it arrives on the RESPONSE HEADERS. Every
-mainstream client — ``openai``, ``anthropic``, LangChain, LiteLLM — parses the
-JSON body and throws the headers away. So the moment someone points their
-existing client at Conifer (which is the whole point of being
-OpenAI-compatible), the differentiator becomes invisible.
-
-The old answer was "rewrite against conifer_sdk". That is a bad trade to ask for
-on day one, and it is not even necessary: the OpenAI Python SDK takes an
-``http_client``, and httpx exposes response event hooks. So this module hands
-them a hook that reads the receipt on the way past.
-
-    import httpx
-    from openai import OpenAI
-    from conifer_sdk.receipts import ReceiptCollector
-
-    receipts = ReceiptCollector()
-    openai = OpenAI(
-        base_url="https://api.conifer.build/v1",
-        api_key=os.environ["CONIFER_API_KEY"],
-        http_client=httpx.Client(event_hooks={"response": [receipts.httpx_hook]}),
-    )
-    openai.chat.completions.create(...)
-    receipts.total.cost_nano_usd      # exact, integer, itemized
-
-WHY THIS IS SAFE TO WRAP AROUND SOMEONE ELSE'S CLIENT. The hook never reads or
-consumes the response BODY. On a streaming response the body has not even
-arrived when the hook runs, and touching it would raise or break the stream.
-Headers are available immediately, so reading them costs nothing and changes
-nothing.
-
-``httpx`` is NOT imported here and is NOT a dependency: the hook takes anything
-with a ``.headers`` mapping, which is what makes this work with httpx,
-requests, urllib3 or a test double alike.
-"""
+"""Receipts for the client you already use. The OpenAI Python SDK takes an ``http_client`` and httpx exposes response hooks; this one reads the ``x-conifer-*`` headers on the way past and never touches the body."""
 
 from __future__ import annotations
 
@@ -51,9 +15,9 @@ class ObservedReceipt:
     """One turn's receipt, plus where and when it came from."""
 
     receipt: Receipt
-    #: The URL that was called, so a mixed workload stays attributable.
+    #: The URL that was called.
     url: str
-    #: When the response arrived, for correlating with your own logs.
+    #: When the response arrived.
     at: datetime
 
     @property
@@ -75,34 +39,22 @@ class ReceiptTotal:
     cost_nano_usd: int
     #: The same number as an exact decimal USD string.
     cost_usd: str
-    #: Summed counterfactual over ONLY the turns that disclosed one. The gateway
-    #: omits that header unless the routed predicate holds, so this is a sum
-    #: over a SUBSET and is not comparable to ``cost_nano_usd`` as a savings
-    #: figure — ``counterfactual_turns`` is published beside it so the
-    #: difference is visible rather than implied.
+    #: Summed counterfactual over the turns that disclosed one; a subset, not a savings figure.
     counterfactual_nano_usd: int
     counterfactual_turns: int
 
 
 class ReceiptCollector:
-    """Collects the receipt from every response that carries one.
-
-    Thread-safe: an ``openai`` client is routinely shared across threads, and a
-    spend total that silently loses increments under concurrency would be worse
-    than no total at all.
-    """
+    """Collects the receipt from every response that carries one. Thread-safe."""
 
     def __init__(
         self,
         on_receipt: Optional[Callable[[ObservedReceipt], None]] = None,
         retain: int = 1000,
     ) -> None:
-        #: Called as each receipt arrives. For metrics, logs, a budget guard.
+        #: Called as each receipt arrives.
         self._on_receipt = on_receipt
-        #: How many receipts to RETAIN. A long-lived process makes an unbounded
-        #: list a slow leak, and the running total is the part that matters, so
-        #: the total is exact forever while the list is a bounded tail. Set 0 to
-        #: retain none and rely on ``on_receipt`` plus ``total``.
+        #: How many receipts to keep in ``all``. 0 keeps none. The total is exact regardless.
         self._retain = retain
         self._observed: List[ObservedReceipt] = []
         self._lock = threading.Lock()
@@ -123,14 +75,7 @@ class ReceiptCollector:
         return observed
 
     def httpx_hook(self, response: Any) -> None:
-        """An httpx ``response`` event hook.
-
-        Duck-typed on purpose: anything with ``.headers`` and ``.url`` works,
-        so httpx is neither imported nor required.
-
-        Reads HEADERS ONLY. On a streaming response the body has not arrived
-        when this runs, and touching it would raise or break the stream.
-        """
+        """An httpx ``response`` event hook."""
         self.observe(response.headers, str(getattr(response, "url", "")))
 
     def _record(self, observed: ObservedReceipt) -> None:
@@ -145,9 +90,7 @@ class ReceiptCollector:
                 self._observed.append(observed)
                 if len(self._observed) > self._retain:
                     self._observed.pop(0)
-        # Outside the lock, and isolated: a throwing callback is the CALLER's
-        # bug. It must not corrupt the total, deadlock the next call, or — far
-        # worse — fail their inference request. They already paid for that turn.
+        # Outside the lock: a throwing callback must not fail a turn the caller already paid for.
         if self._on_receipt is not None:
             try:
                 self._on_receipt(observed)
@@ -170,12 +113,7 @@ class ReceiptCollector:
 
     @property
     def total(self) -> ReceiptTotal:
-        """The running total.
-
-        EXACT over every turn ever seen, including any the retention cap
-        dropped from ``all``: a spend figure that quietly stopped counting
-        would be worse than no figure at all.
-        """
+        """The running total over every turn seen, including any dropped from ``all``."""
         with self._lock:
             return ReceiptTotal(
                 turns=self._seen,
@@ -196,18 +134,7 @@ class ReceiptCollector:
 
 
 class SpendBudget:
-    """A hard spend ceiling across MANY turns, enforced client-side.
-
-    ``max_cost_nano_usd`` is a per-request ceiling the gateway enforces. This is
-    the other question — "this whole job must not cost more than $5" — which no
-    single request can answer.
-
-    Be precise about what this can and cannot do. It refuses the NEXT request
-    once the budget is spent; it cannot refund the one that crossed the line,
-    because the cost is only known after the turn settles. So the true worst
-    case is ``budget + one turn``. Combine it with a per-request
-    ``max_cost_nano_usd`` and that overshoot is bounded rather than open-ended.
-    """
+    """A hard spend ceiling across MANY turns, enforced client-side."""
 
     def __init__(self, budget_nano_usd: int) -> None:
         if not isinstance(budget_nano_usd, int) or isinstance(budget_nano_usd, bool):
