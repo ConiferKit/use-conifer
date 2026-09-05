@@ -1,0 +1,5 @@
+# Parallax captures agent sessions run in this repository and reviews its pull requests.
+# Delete this file to turn it off. https://www.conifer.build/parallax
+test: npm test
+setup: npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund
+comment: false
