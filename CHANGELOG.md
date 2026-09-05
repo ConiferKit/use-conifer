@@ -12,6 +12,33 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-04
+
+### Security
+
+- Automatic `OPENAI_BASE_URL` selection now requires HTTPS and the exact
+  `conifer.build` domain or one of its subdomains in both clients. Lookalike
+  domains such as `notconifer.build` can no longer receive a Conifer key
+  through this fallback. Explicit base URL overrides still support local gateways.
+
+### Fixed
+
+- Both clients expose declared minimum output budgets and output-limit support
+  on catalog models. Cheapest-model selection skips seats that explicitly
+  cannot honor output limits, avoiding a predictable gateway refusal.
+- TypeScript requests now honor cancellation before sending and throughout
+  JSON response reads, including error bodies. Cancellation cannot return a
+  completion or send a retry or fallback request.
+- TypeScript streams stop yielding buffered chunks after cancellation and
+  reject promptly if aborted before iteration begins, even with a silent body.
+- Python now advances an opted-in fallback chain after a capability refusal,
+  matching TypeScript when the primary model cannot handle images or tools.
+- Python caps `Retry-After` waits at the configured timeout and handles
+  negative hints without raising a sleep error.
+- Both clients stop streaming at `[DONE]` without waiting for the connection
+  to close, and ignore non-object JSON payloads instead of crashing. Python
+  also joins multiline events so their content and usage are preserved.
+
 ## [0.2.0] - 2026-09-03
 
 The learned router is live on the gateway. `model: "auto"` now routes for
@@ -208,7 +235,8 @@ First public release, on [npm](https://www.npmjs.com/package/conifer-sdk) and
   produces a **blank PyPI project page**. Caught by inspecting the built wheel's
   metadata rather than trusting a green build.
 
-[Unreleased]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.2.0...HEAD
+[Unreleased]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.2.1...HEAD
+[0.2.1]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.2.0...sdk-v0.2.1
 [0.2.0]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.2...sdk-v0.2.0
 [0.1.2]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.1...sdk-v0.1.2
 [0.1.1]: https://github.com/ConiferKit/use-conifer/compare/sdk-v0.1.0...sdk-v0.1.1

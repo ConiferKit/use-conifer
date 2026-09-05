@@ -270,6 +270,14 @@ catalog actually declares, and each catalog row carries `embeddingDimensions`
 before spending a token — getting that wrong means a migration on a populated
 table.
 
+`conifer.models()` also exposes `minOutputTokens` and
+`outputTokenLimitSupported` (`min_output_tokens` and
+`output_token_limit_supported` in Python) when the gateway declares them.
+The minimum includes reasoning tokens. A support value of `false` means the
+gateway refuses that seat's completions before spending; `cheapestFor()` and
+`pickCheapest()` skip it. Missing fields remain undeclared. On older gateways,
+these fields may be absent, and request admission remains authoritative.
+
 ## Deferred jobs
 
 For work that is not interactive — an overnight re-index, a bulk
@@ -529,7 +537,7 @@ Six tools, each one real gateway call:
 - `conifer_compare` — the same prompt across 2–5 models in parallel, each answer beside its cost, cheapest first. The ceiling caps each turn, not the total.
 - `conifer_embed` — text to embedding vectors, with the settled cost. Returns the shape, the cost and a short preview rather than the raw vectors: a single 1536-dimension embedding is ~30 KB of digits that no model can read, and a batch would swallow the context window.
 - `conifer_list_models` — the catalog, with declared capabilities and as-charged prices.
-- `conifer_choose_model` — the cheapest model *declaring* the capabilities you need. It skips models with undeclared capabilities rather than assuming them, and unpriced models rather than assuming they are free.
+- `conifer_choose_model` — the cheapest model *declaring* the capabilities you need. It skips models with undeclared capabilities, missing prices, or explicit inability to honor output limits.
 - `conifer_balance` — remaining credit.
 
 The reason `conifer_complete` reports its cost is that an agent that can see
@@ -669,12 +677,12 @@ what ran:
 
 ```ts
 import { VERSION } from "conifer-sdk";
-console.log(VERSION);            // "0.2.0"
+console.log(VERSION);            // "0.2.1"
 ```
 
 ```python
 import conifer_sdk
-print(conifer_sdk.__version__)   # "0.2.0"
+print(conifer_sdk.__version__)   # "0.2.1"
 ```
 
 A receipt's `id` identifies the turn on the gateway; quoting it alongside the

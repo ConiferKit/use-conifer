@@ -1,6 +1,6 @@
 [project]
 name = "conifer-sdk"
-version = "0.2.0"
+version = "0.2.1"
 description = "The Conifer gateway SDK: one client, exact per-turn cost receipts, and honest migration shims from OpenRouter, Vercel AI Gateway, and Helicone."
 requires-python = ">=3.10"
 # No dependencies, on purpose: the SDK works in a lambda, a Slack bot, or a

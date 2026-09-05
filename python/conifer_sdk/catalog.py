@@ -17,6 +17,8 @@ def to_catalog_model(entry: Mapping[str, Any]) -> CatalogModel:
         provider=entry.get("provider"),
         context_window=entry.get("context_window"),
         max_output_tokens=entry.get("max_output_tokens"),
+        min_output_tokens=entry.get("min_output_tokens"),
+        output_token_limit_supported=entry.get("output_token_limit_supported"),
         max_tools=entry.get("max_tools"),
         caps=entry.get("caps"),
         embedding_dimensions=entry.get("embedding_dimensions"),
@@ -59,10 +61,13 @@ def pick_cheapest(
     min_context_window: Optional[int] = None,
 ) -> Optional[CatalogModel]:
     """The cheapest model that declares every capability in ``caps``. A model
-    with no declared caps or no price is skipped, never assumed."""
+    with no declared caps, no price, or explicit inability to honor output
+    limits is skipped."""
     eligible = []
     for model in models:
         if model.unavailable:
+            continue
+        if model.output_token_limit_supported is False:
             continue
         if min_context_window is not None:
             if model.context_window is None or model.context_window < min_context_window:

@@ -188,6 +188,10 @@ export interface CatalogModel {
   provider?: string;
   contextWindow?: number;
   maxOutputTokens?: number;
+  /** Declared minimum completion budget, including reasoning tokens. */
+  minOutputTokens?: number;
+  /** False means completions are refused before spend. Absent means undeclared. */
+  outputTokenLimitSupported?: boolean;
   maxTools?: number;
   /** Declared capabilities. Absent means undeclared, not unsupported. */
   caps?: string[];

@@ -9,9 +9,11 @@ check that against the shared cards.
 from __future__ import annotations
 
 import json
+import io
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -303,6 +305,43 @@ class ChatTests(unittest.TestCase):
             "a different body needs a different key",
         )
 
+    def test_a_capability_refusal_advances_to_a_model_that_can_serve_it(self):
+        for code, param in (("unsupported_parameter", "messages"), ("invalid_value", "tools")):
+            with self.subTest(code=code, param=param):
+                calls, transport = scripted(
+                    (400, {}, {"error": {
+                        "type": "invalid_request_error", "code": code, "param": param,
+                        "message": "this model does not support this input",
+                    }}),
+                    (200, RECEIPT_HEADERS, COMPLETION),
+                )
+                completion = Conifer(api_key="test", transport=transport, max_retries=2).chat(
+                    ChatRequest(model="primary", messages=[], fallback_models=["backup"],
+                                allow_client_fallback=True, idempotency_key="turn-1")
+                )
+                self.assertEqual(completion.fallback_index, 1)
+                self.assertEqual([call["body"]["model"] for call in calls], ["primary", "backup"])
+                self.assertEqual([call["headers"]["idempotency-key"] for call in calls],
+                                 ["turn-1", "turn-1-1"])
+
+    def test_retry_after_wait_is_capped_and_never_negative(self):
+        for hint, expected_wait in (("3600", 0.05), ("-1", 0), ("0", 0)):
+            with self.subTest(hint=hint):
+                calls, transport = scripted(
+                    (429, {"retry-after": hint}, {"error": {"type": "rate_limited", "message": "slow"}}),
+                    (200, RECEIPT_HEADERS, COMPLETION),
+                )
+                with patch("conifer_sdk.client.time.sleep") as sleep:
+                    completion = Conifer(api_key="test", transport=transport,
+                                         max_retries=1, timeout=0.05).chat(
+                        ChatRequest(model="m", messages=[], idempotency_key="turn-1")
+                    )
+                self.assertEqual(completion.choices, COMPLETION["choices"])
+                sleep.assert_called_once_with(expected_wait)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual([call["headers"]["idempotency-key"] for call in calls],
+                                 ["turn-1", "turn-1"])
+
     def test_a_non_retryable_refusal_does_not_advance_the_chain(self):
         calls, transport = scripted((404, {}, {"error": {"type": "model_not_found", "message": "no"}}))
         with self.assertRaises(ConiferModelNotFoundError):
@@ -388,6 +427,28 @@ class WireTests(unittest.TestCase):
         self.assertEqual(nano_usd_to_usd_string(1_000_000_000), "1.000000000")
         self.assertEqual(nano_usd_to_usd_string(123_456_789_012), "123.456789012")
 
+    def test_automatic_gateway_selection_requires_https_and_a_complete_conifer_domain(self):
+        for url in (
+            "https://notconifer.build/v1",
+            "https://api.notconifer.build/v1",
+            "https://conifer.build.evil.test/v1",
+            "https://conifer.build@evil.test/v1",
+            "http://api.conifer.build/v1",
+            "ftp://api.conifer.build/v1",
+            "//api.conifer.build/v1",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(
+                    resolve_base_url(None, {"OPENAI_BASE_URL": url}),
+                    "https://api.conifer.build",
+                )
+        for origin in ("https://conifer.build", "https://staging.conifer.build"):
+            with self.subTest(origin=origin):
+                self.assertEqual(resolve_base_url(None, {"OPENAI_BASE_URL": origin + "/v1"}), origin)
+        local = "http://localhost:8080"
+        self.assertEqual(resolve_base_url(local, {}), local)
+        self.assertEqual(resolve_base_url(None, {"CONIFER_BASE_URL": local}), local)
+
     def test_a_stray_openai_base_url_cannot_redirect_conifer_traffic(self):
         self.assertEqual(
             resolve_base_url(None, {"OPENAI_BASE_URL": "https://api.openai.com/v1"}),
@@ -430,6 +491,34 @@ class WireTests(unittest.TestCase):
         _, transport = scripted((200, {}, {"remaining_nanodollars": 12_500_000_000}))
         balance = client(transport).balance()
         self.assertEqual(balance.remaining_usd, "12.500000000")
+
+    def test_catalog_output_budgets_preserve_false_zero_and_undeclared(self):
+        _, transport = scripted((200, {}, {"object": "list", "data": [
+            {"id": "uncapped", "min_output_tokens": 512, "output_token_limit_supported": False},
+            {"id": "capped", "min_output_tokens": 0, "output_token_limit_supported": True},
+            {"id": "undeclared"},
+        ]}))
+        models = client(transport).models()
+        self.assertEqual(getattr(models[0], "min_output_tokens", None), 512)
+        self.assertIs(getattr(models[0], "output_token_limit_supported", None), False)
+        self.assertIs(models[0].raw["output_token_limit_supported"], False)
+        self.assertEqual(getattr(models[1], "min_output_tokens", None), 0)
+        self.assertIs(getattr(models[1], "output_token_limit_supported", None), True)
+        self.assertIsNone(getattr(models[2], "min_output_tokens", None))
+        self.assertIsNone(getattr(models[2], "output_token_limit_supported", None))
+
+    def test_cheapest_skips_explicit_output_cap_refusals_preserving_undeclared(self):
+        _, transport = scripted((200, {}, {"object": "list", "data": [
+            {"id": "uncapped", "output_token_limit_supported": False,
+             "pricing": {"in_usd_per_mtok": "0.01", "out_usd_per_mtok": "0.01"}},
+            {"id": "capped", "output_token_limit_supported": True,
+             "pricing": {"in_usd_per_mtok": "1", "out_usd_per_mtok": "1"}},
+            {"id": "undeclared", "pricing": {"in_usd_per_mtok": "2", "out_usd_per_mtok": "2"}},
+        ]}))
+        models = client(transport).models()
+        self.assertEqual(pick_cheapest(models).id, "capped")
+        self.assertIsNone(pick_cheapest([models[0]]))
+        self.assertEqual(pick_cheapest([models[0], models[2]]).id, "undeclared")
 
     def test_route_sends_the_wire_and_returns_a_pick_never_a_score(self):
         calls, transport = scripted(
@@ -522,8 +611,60 @@ class WireTests(unittest.TestCase):
         self.assertIn("CONIFER_API_KEY", str(caught.exception))
 
 
+class SseResponse(io.BytesIO):
+    status = 200
+    headers = {"X-Conifer-Request-Id": "stream-test"}
+
+
 class StreamTests(unittest.TestCase):
     """Parity with the TypeScript stream(): same opt-in refusal, same frames."""
+
+    def test_multiline_events_preserve_content_and_terminal_usage(self):
+        body = SseResponse(
+            b'event: message\r\ndata: {"choices": [\r\n'
+            b'data: {"delta":{"content":"pine"}}]}\r\n\r\n'
+            b': keep-alive\n\n'
+            b'data: {"choices":[],"usage":{"total_tokens":13}}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        with patch("conifer_sdk.client.urllib.request.urlopen", return_value=body):
+            chunks = list(Conifer(api_key="test").stream(ChatRequest(model="m", messages=[])))
+        self.assertEqual(chunks, [
+            {"choices": [{"delta": {"content": "pine"}}]},
+            {"choices": [], "usage": {"total_tokens": 13}},
+        ])
+        self.assertTrue(body.closed)
+
+    def test_done_stops_without_reading_from_the_connection_again(self):
+        class OpenResponse(SseResponse):
+            def __iter__(self):
+                yield b'data: {"choices":[],"usage":{"total_tokens":13}}\n'
+                yield b'\n'
+                yield b'data: [DONE]\n'
+                yield b'\n'
+                raise AssertionError("read again after the terminal event")
+
+        body = OpenResponse()
+        with patch("conifer_sdk.client.urllib.request.urlopen", return_value=body):
+            chunks = list(Conifer(api_key="test").stream(ChatRequest(model="m", messages=[])))
+        self.assertEqual(chunks, [{"choices": [], "usage": {"total_tokens": 13}}])
+        self.assertTrue(body.closed)
+
+    def test_non_object_payloads_are_ignored_as_invalid_chunks(self):
+        body = SseResponse(
+            b'data: null\n\ndata: []\n\ndata: true\n\ndata: 1\n\ndata: "oops"\n\n'
+            b'data: {"choices":[{"delta":{"content":"[DONE]"}}]}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        with patch("conifer_sdk.client.urllib.request.urlopen", return_value=body):
+            chunks = list(Conifer(api_key="test").stream(ChatRequest(model="m", messages=[])))
+        self.assertEqual(chunks, [{"choices": [{"delta": {"content": "[DONE]"}}]}])
+        self.assertTrue(body.closed)
+
+    def test_public_frame_parser_joins_data_lines(self):
+        self.assertEqual(parse_frame('event: message\r\ndata: {"id":\r\ndata: "x"}'), {"id": "x"})
+        self.assertIsNone(parse_frame("data: 1\ndata: 2"))
+        self.assertEqual(parse_frame('data: {"id":"pine\u2028cone"}'), {"id": "pine\u2028cone"})
 
     def test_a_fallback_chain_cannot_ride_a_stream(self):
         c = client(lambda *a: None)

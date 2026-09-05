@@ -23,6 +23,7 @@ from .chat import (  # noqa: F401  (re-exported)
 )
 from .embeddings import decode_vector, embeddings_body, embeddings_headers  # noqa: F401
 from .errors import (
+    ConiferCapabilityError,
     ConiferConflictError,
     ConiferConnectionError,
     ConiferError,
@@ -31,6 +32,7 @@ from .errors import (
     error_from,
 )
 from .jobs import parse_frame, to_deferred_job  # noqa: F401  (re-exported)
+from .jobs import decode_frame, iter_frames
 from .receipt import Receipt, nano_usd_to_usd_string, read_receipt
 from .transport import (  # noqa: F401  (re-exported)
     RETRYABLE_STATUS,
@@ -67,7 +69,7 @@ MIN_DEFER_WINDOW_SECONDS = 86_400
 
 def resolve_base_url(explicit: Optional[str], env: Mapping[str, str]) -> str:
     """The gateway origin. ``CONIFER_BASE_URL`` wins; ``OPENAI_BASE_URL`` is
-    honoured only when it already points at a Conifer host."""
+    honoured only when it uses HTTPS on a Conifer host."""
     chosen = explicit or env.get("CONIFER_BASE_URL")
     if chosen is None:
         candidate = env.get("OPENAI_BASE_URL")
@@ -79,10 +81,13 @@ def resolve_base_url(explicit: Optional[str], env: Mapping[str, str]) -> str:
 
 def _is_conifer_host(url: str) -> bool:
     try:
-        host = urlparse(url).hostname
+        parsed = urlparse(url)
+        host = parsed.hostname
     except ValueError:
         return False
-    return host is not None and host.endswith("conifer.build")
+    return parsed.scheme == "https" and host is not None and (
+        host == "conifer.build" or host.endswith(".conifer.build")
+    )
 
 
 class Conifer:
@@ -173,7 +178,8 @@ class Conifer:
             if failure.retryable and status in RETRYABLE_STATUS and attempt < self.max_retries:
                 hinted = getattr(failure, "retry_after_seconds", None)
                 time.sleep(
-                    hinted if hinted is not None else max(backoff_seconds(attempt), minimum_backoff_seconds(status))
+                    max(0, min(hinted, self.timeout)) if hinted is not None
+                    else max(backoff_seconds(attempt), minimum_backoff_seconds(status))
                 )
                 last = failure
                 continue
@@ -202,9 +208,10 @@ class Conifer:
                 data, headers = self.request("POST", "/v1/chat/completions", chat_body(member), chat_headers(member, key))
             except ConiferError as error:
                 last = error
-                # A retryable failure moves to the next model. A 402, an auth failure
-                # or a bad body would fail on every model alike.
-                if not error.retryable or index == len(chain) - 1:
+                # A different model can also resolve a capability refusal.
+                # Auth, payment, and other bad requests fail on every member.
+                advances = error.retryable or isinstance(error, ConiferCapabilityError)
+                if not advances or index == len(chain) - 1:
                     raise
                 continue
             return _completion(data, read_receipt(headers), index)
@@ -225,8 +232,10 @@ class Conifer:
         response = self._open_stream(chat_body(request, stream=True), headers)
         self.stream_receipt = read_receipt(response.headers)
         try:
-            for line in response:
-                chunk = parse_frame(line.decode("utf-8"))
+            for frame in iter_frames(response):
+                chunk = decode_frame(frame)
+                if chunk == "[DONE]":
+                    return
                 if chunk is None:
                     continue
                 if chunk.get("error") is not None and "choices" not in chunk:

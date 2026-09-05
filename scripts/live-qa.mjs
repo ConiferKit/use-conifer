@@ -13,29 +13,29 @@
 //
 // A test that mocks the server can only ever confirm what we already believed.
 //
-// THIS SPENDS REAL MONEY. Every run is a handful of small turns (well under a
-// cent at the models chosen). It is not part of `npm test` for that reason —
-// run it deliberately, before a release.
-//
-//   CONIFER_API_KEY=sk-… node scripts/live-qa.mjs
-//   CONIFER_API_KEY=sk-… node scripts/live-qa.mjs --include-deferred
-//
-// `--include-deferred` adds a job submit + cancel. The full deferred round trip
-// is excluded by default because it rides a provider batch and took ~2 minutes
-// when measured, which is too slow for a pre-release gate.
+// This release campaign requires an explicitly approved plan and --execute.
+// Both languages share at most 40 POSTs and $1.850000002 in reserved ceilings.
+// Set the reviewed installed-package and campaign paths through CONIFER_QA_*
+// variables. Deferred jobs require a separate plan. A non-executing invocation
+// fails, so a publisher cannot mistake an omitted live gate for a passing one.
 
-import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+import { BASE_URL, BUILD, PINS, journal, assertModel, emptyOutcome, createGuardedFetch } from "./live-qa-transport.mjs";
 
-const root = new URL("..", import.meta.url);
-// Prefer the BUILT package: that is what a user installs. Fall back to sources
-// so this is runnable in a checkout that has not built yet.
-const entry = existsSync(fileURLToPath(new URL("dist/src/index.js", root)))
-  ? new URL("dist/src/index.js", root)
-  : new URL("src/index.ts", root);
+if (process.argv.includes("--include-deferred")) throw new Error("deferred jobs require a separate bounded plan");
+if (!process.argv.includes("--execute")) {
+  console.log("Local-only default. Review the bounded campaign plan; --execute requires fresh spend approval.");
+  process.exit(2);
+}
+const packagePath = process.env.CONIFER_QA_NODE_PACKAGE;
+if (!packagePath || !process.env.CONIFER_QA_RUN_DIR) throw new Error("set CONIFER_QA_NODE_PACKAGE and CONIFER_QA_RUN_DIR to the reviewed artifact and campaign paths");
+if (!existsSync(packagePath)) throw new Error("installed npm artifact is missing; no source fallback");
+const entry = pathToFileURL(packagePath);
 
 const {
   Conifer,
+  VERSION,
   ConiferBadRequestError,
   ConiferCostCeilingError,
   ConiferModelNotFoundError,
@@ -48,22 +48,25 @@ const {
   vectorOf,
 } = await import(entry.href);
 
-const includeDeferred = process.argv.includes("--include-deferred");
-
-/** The key: the env var, or the dev-token file this repo's tooling writes. */
+const includeDeferred = false;
+if (VERSION !== "0.2.1") throw new Error(`wrong installed package version: ${VERSION}`);
 function resolveKey() {
-  if (process.env.CONIFER_API_KEY) return process.env.CONIFER_API_KEY;
-  const devToken = new URL(".conifer/dev-token", `file://${process.env.HOME}/`);
-  if (existsSync(fileURLToPath(devToken))) {
-    return readFileSync(fileURLToPath(devToken), "utf8").trim();
-  }
-  throw new Error("set CONIFER_API_KEY (mint one at https://conifer.build/console#/keys)");
+  if (!process.env.CONIFER_API_KEY) throw new Error("set CONIFER_API_KEY explicitly; no credential discovery");
+  return process.env.CONIFER_API_KEY;
 }
+resolveKey();
+const finalOnly = process.argv.includes("--continue-final-auto");
+const finalCase = "chat(model: auto) is routed and the receipt names the pick";
+const phase = journal(finalOnly ? "claim_tail" : process.argv.includes("--resume-after-repair") ? "resume" : "claim");
+const guardedFetch = createGuardedFetch({ remainingPhaseMs: phase.remaining_phase_ms ?? 900_000 });
+console.log(`Installed npm ${VERSION}: ${packagePath}`);
 
-let passed = 0;
+let passed = phase.prior_passed ?? 0;
 let failed = 0;
 
 async function check(name, run) {
+  if (finalOnly && name !== finalCase) return;
+  guardedFetch.caseName = name;
   try {
     const detail = await run();
     passed += 1;
@@ -82,7 +85,9 @@ function eq(actual, expected, what) {
   }
 }
 
-const conifer = new Conifer({ apiKey: resolveKey() });
+const conifer = new Conifer({ apiKey: resolveKey(), baseUrl: BASE_URL, maxRetries: 0, timeoutMs: 90_000, fetch: guardedFetch });
+const health = await (await guardedFetch(`${BASE_URL}/healthz`, { method: "GET" })).json();
+if (typeof health.build !== "string" || !health.build.endsWith(`+${BUILD}`)) throw new Error("gateway build differs from approved plan");
 console.log(`\nlive QA against ${conifer.transport.baseUrl}\n`);
 
 // ---------------------------------------------------------------- catalog
@@ -90,14 +95,28 @@ console.log(`\nlive QA against ${conifer.transport.baseUrl}\n`);
 console.log("catalog");
 let chatModel;
 let embedModel;
+let catalog;
+if (finalOnly) {
+  catalog = await conifer.models();
+  for (const id of [phase.warmed_pick.model, ...phase.warmed_pick.fallbacks]) {
+    assertModel(catalog.find(m => m.id === id), 2048);
+  }
+}
 
 await check("models() returns a priced, capability-declaring catalog", async () => {
   const models = await conifer.models();
   if (models.length === 0) throw new Error("the catalog is empty");
-  chatModel = models.find((m) => m.caps?.includes("tools"))?.id;
-  embedModel = models.find((m) => m.caps?.includes("embeddings"))?.id;
-  if (!chatModel) throw new Error("no model declares `tools`");
-  if (!embedModel) throw new Error("no model declares `embeddings`");
+  catalog = models;
+  chatModel = PINS.chat; embedModel = PINS.embed;
+  assertModel(models.find(m => m.id === chatModel), 16, "tools", "openai");
+  assertModel(models.find(m => m.id === chatModel), 128, "tools", "openai");
+  assertModel(models.find(m => m.id === PINS.spare), 128, "tools", "openai");
+  assertModel(models.find(m => m.id === PINS.native), 2048, "tools", "anthropic");
+  assertModel(models.find(m => m.id === embedModel), undefined, "embeddings", "openai");
+  const unsupported = models.find(m => m.id === "qwen3.8-max");
+  if (unsupported) eq(unsupported.outputTokenLimitSupported, false, "unsupported output limit parsed");
+  const minimum = models.find(m => m.id === "glm-5.3-flash");
+  if (minimum) eq(minimum.minOutputTokens, 512, "minimum output budget parsed");
   return `${models.length} models`;
 });
 
@@ -118,8 +137,12 @@ await check("cheapestFor ranks the catalog's own decimal-string prices", async (
 await check("balance() reads without moving money", async () => {
   const balance = await conifer.balance();
   if (typeof balance.remainingNanoUsd !== "number") throw new Error("no remaining balance");
+  if (!Number.isSafeInteger(balance.remainingNanoUsd) || balance.remainingNanoUsd < 2_000_000_000) throw new Error("insufficient balance for the bounded plan");
   return `${balance.remainingUsd} USD`;
 });
+
+if (failed) throw new Error("catalog/balance preflight failed; no inference dispatched");
+journal("ready");
 
 // ------------------------------------------------------------------- chat
 
@@ -129,9 +152,9 @@ await check("chat() returns an answer AND its exact settled cost", async () => {
   const answer = await conifer.chat({
     model: chatModel,
     messages: [{ role: "user", content: "reply with exactly: pinecone" }],
-    maxTokens: 20,
+    maxTokens: 128,
   });
-  if (typeof textOf(answer) !== "string") throw new Error("no text in the completion");
+  eq(textOf(answer)?.trim(), "pinecone", "answer");
   if (typeof answer.receipt.costNanoUsd !== "number") {
     throw new Error("no cost on a non-streamed turn — the receipt is the product");
   }
@@ -145,7 +168,7 @@ await check("the settled cost rides the BODY, not only the headers", async () =>
   const answer = await conifer.chat({
     model: chatModel,
     messages: [{ role: "user", content: "hi" }],
-    maxTokens: 200,
+    maxTokens: 128,
   });
   if (answer.usage?.cost_nanousd === undefined) {
     throw new Error("no cost on usage — a body-only logger would see nothing");
@@ -161,7 +184,7 @@ await check("the caller's requestId is the id that comes back", async () => {
   const answer = await conifer.chat({
     model: chatModel,
     messages: [{ role: "user", content: "hi" }],
-    maxTokens: 5,
+    maxTokens: 128,
     requestId: mine,
   });
   eq(answer.receipt.requestId, mine, "requestId");
@@ -171,19 +194,23 @@ await check("the caller's requestId is the id that comes back", async () => {
 await check("stream() flows and reports usage in its terminal chunk", async () => {
   const stream = await conifer.stream({
     model: chatModel,
-    messages: [{ role: "user", content: "count to three" }],
-    maxTokens: 30,
+    messages: [{ role: "user", content: "Reply with exactly: 1,2,3" }],
+    maxTokens: 128,
   });
   let chunks = 0;
   let usage;
+  let visible = "";
   for await (const chunk of stream) {
     chunks += 1;
+    visible += chunk.choices?.[0]?.delta?.content ?? "";
     if (chunk.usage) usage = chunk.usage;
   }
   if (chunks === 0) throw new Error("no chunks arrived");
   // The documented asymmetry: cost is absent on a stream because the head is
   // sent before the first token. Usage is how a stream is reconciled.
   if (!usage) throw new Error("no terminal usage chunk — a stream must be reconcilable");
+  eq(visible.trim().replace(/\s/g, ""), "1,2,3", "streamed content");
+  guardedFetch.streamDone(usage);
   const receipt = await stream.receipt();
   if (receipt.costNanoUsd !== undefined) {
     throw new Error("a stream disclosed a cost on the head; the README says it cannot");
@@ -196,27 +223,23 @@ await check("an empty completion explains itself rather than just being empty", 
   // so a tight budget yields empty content, finish_reason "length", and a bill
   // for every output token. Indistinguishable at the call site from a refusal
   // or a broken SDK unless something reads finish_reason for you.
-  const truncated = await conifer.chat({
-    model: chatModel,
-    messages: [{ role: "user", content: "What is 8347 * 9182? Think it through step by step." }],
-    maxTokens: 16,
-  });
-  const text = textOf(truncated);
-  if (text !== "") {
-    // Not every model truncates the same way; if this one answered, the
-    // explanation must be ABSENT rather than invented.
-    eq(emptyReason(truncated), undefined, "a completion with text needs no explanation");
-    return "model answered within 16 tokens; no explanation offered (correct)";
-  }
-  const why = emptyReason(truncated);
-  if (why === undefined) throw new Error("empty content with no explanation — the trap is back");
-  if (!/maxTokens/.test(why)) throw new Error(`unhelpful explanation: ${why}`);
-  return why.slice(0, 44);
+  let truncated;
+  try {
+    truncated = await conifer.chat({
+      model: chatModel,
+      messages: [{ role: "user", content: "What is 8347 * 9182? Think it through step by step." }],
+      maxTokens: 16,
+    });
+  } catch (error) { return emptyOutcome(error); }
+  if (!textOf(truncated)?.trim()) throw new Error("empty successful completion is invalid on this gateway");
+  eq(emptyReason(truncated), undefined, "a visible completion needs no explanation");
+  return "visible answer; no invented explanation";
 });
 
 // -------------------------------------------------------------- embeddings
 
 console.log("\nembeddings");
+let observedEmbeddingWidth;
 
 await check("embeddings decode losslessly, base64 and float alike", async () => {
   // WHY THIS COMPARES ONE RESPONSE AGAINST ITSELF rather than two calls.
@@ -241,6 +264,7 @@ await check("embeddings decode losslessly, base64 and float alike", async () => 
     encodingFormat: "float",
   });
   const decoded = vectorOf(response);
+  observedEmbeddingWidth = decoded.length;
   const asSent = response.raw.data[0].embedding;
   if (!Array.isArray(asSent)) throw new Error("`float` did not return a JSON array");
   eq(decoded.length, asSent.length, "dimension");
@@ -265,10 +289,11 @@ await check("embeddings decode losslessly, base64 and float alike", async () => 
   // Same computation, so the two must agree to within this model's own
   // run-to-run noise. A decode bug is orders of magnitude larger than that
   // (wrong endianness or a misaligned offset produces garbage, not 1e-4).
+  const bytes = Buffer.from(packed.raw.data[0].embedding, "base64");
+  eq(bytes.length, unpacked.length * 4, "base64 byte width");
+  for (let i = 0; i < unpacked.length; i++) eq(unpacked[i], bytes.readFloatLE(i * 4), `base64 value ${i}`);
   const drift = Math.max(...unpacked.map((value, i) => Math.abs(value - decoded[i])));
-  if (drift > 1e-2) {
-    throw new Error(`base64 and float disagree by ${drift}, far beyond sampling noise`);
-  }
+  // Separate provider inferences may drift; exact decoding is checked against each response above.
   if (typeof packed.receipt.costNanoUsd !== "number") {
     throw new Error("embeddings settle in band; the cost must be on this response");
   }
@@ -283,7 +308,8 @@ await check("the catalog's advertised vector width is the width you get", async 
   const model = (await conifer.models()).find((entry) => entry.id === embedModel);
   const advertised = model?.embeddingDimensions;
   if (advertised === undefined) throw new Error(`${embedModel} advertises no embedding_dimensions`);
-  const actual = vectorOf(await conifer.embeddings.create({ model: embedModel, input: "hi" }))?.length;
+  const actual = observedEmbeddingWidth;
+  if (actual === undefined) throw new Error("the live embedding decode check produced no vector");
   eq(actual, advertised, "advertised vs actual vector width");
   return `${embedModel} advertises ${advertised}, returns ${actual}`;
 });
@@ -317,7 +343,7 @@ await check("a cost ceiling refuses BEFORE any upstream call", async () => {
     await conifer.chat({
       model: chatModel,
       messages: [{ role: "user", content: "hi" }],
-      maxTokens: 100,
+      maxTokens: 128,
       maxCostNanoUsd: 1,
     });
   } catch (error) {
@@ -334,7 +360,7 @@ await check("an unknown model is a typed 404, not a hang", async () => {
     await conifer.chat({
       model: "no-such-model-xyz",
       messages: [{ role: "user", content: "hi" }],
-      maxTokens: 5,
+      maxTokens: 128,
     });
   } catch (error) {
     if (!(error instanceof ConiferModelNotFoundError)) throw error;
@@ -345,7 +371,7 @@ await check("an unknown model is a typed 404, not a hang", async () => {
 
 await check("a bad credential is an auth error, not a bare ConiferError", async () => {
   // The exact regression that made three error classes unreachable.
-  const stranger = new Conifer({ apiKey: "sk-conifer-definitely-not-valid" });
+  const stranger = new Conifer({ apiKey: "sk-conifer-definitely-not-valid", baseUrl: BASE_URL, maxRetries: 0, timeoutMs: 90_000, fetch: guardedFetch });
   try {
     await stranger.balance();
   } catch (error) {
@@ -361,7 +387,7 @@ await check("a bad credential is an auth error, not a bare ConiferError", async 
 console.log("\nreceipts for any client");
 
 await check("ReceiptCollector observes a raw fetch without disturbing it", async () => {
-  const receipts = new ReceiptCollector();
+  const receipts = new ReceiptCollector({ fetch: guardedFetch });
   const response = await receipts.fetch(`${conifer.transport.baseUrl}/v1/chat/completions`, {
     method: "POST",
     headers: {
@@ -371,7 +397,7 @@ await check("ReceiptCollector observes a raw fetch without disturbing it", async
     body: JSON.stringify({
       model: chatModel,
       messages: [{ role: "user", content: "hi" }],
-      max_tokens: 5,
+      max_tokens: 128,
     }),
   });
   // The body must still belong entirely to the caller.
@@ -383,7 +409,7 @@ await check("ReceiptCollector observes a raw fetch without disturbing it", async
 });
 
 await check("SpendBudget refuses the next call once spent", async () => {
-  const budget = new SpendBudget(1); // 1 nanodollar: the first turn blows it
+  const budget = new SpendBudget(1, { fetch: guardedFetch }); // 1 nanodollar: the first turn blows it
   const call = () =>
     budget.fetch(`${conifer.transport.baseUrl}/v1/chat/completions`, {
       method: "POST",
@@ -394,13 +420,13 @@ await check("SpendBudget refuses the next call once spent", async () => {
       body: JSON.stringify({
         model: chatModel,
         messages: [{ role: "user", content: "hi" }],
-        max_tokens: 5,
+        max_tokens: 128,
       }),
     });
   await (await call()).json();
   if (!budget.exhausted) throw new Error("the budget should be exhausted");
   try {
-    await call();
+    await guardedFetch.withoutEgress(call);
   } catch (error) {
     if (!/budget exhausted/.test(error.message)) throw error;
     return `refused after ${budget.spentNanoUsd} nUSD`;
@@ -421,7 +447,7 @@ await check("the Responses and Anthropic doors carry the SAME receipt headers", 
   // false for everyone using it.
   const key = resolveKey();
   const post = (path, body) =>
-    fetch(`${conifer.transport.baseUrl}${path}`, {
+    guardedFetch(`${conifer.transport.baseUrl}${path}`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${key}`,
@@ -432,8 +458,8 @@ await check("the Responses and Anthropic doors carry the SAME receipt headers", 
     });
 
   const doors = [
-    ["/v1/responses", { model: chatModel, input: "hi", max_output_tokens: 200 }],
-    ["/v1/messages", { model: chatModel, max_tokens: 200, messages: [{ role: "user", content: "hi" }] }],
+    ["/v1/responses", { model: chatModel, input: "hi", max_output_tokens: 128 }],
+    ["/v1/messages", { model: PINS.native, max_tokens: 2048, messages: [{ role: "user", content: "hi" }] }],
   ];
   const seen = [];
   for (const [path, body] of doors) {
@@ -444,6 +470,7 @@ await check("the Responses and Anthropic doors carry the SAME receipt headers", 
     await receipts.fetch(path, { method: "POST", headers: {} });
     const cost = receipts.last?.costNanoUsd;
     if (typeof cost !== "number") throw new Error(`${path} disclosed no cost`);
+    await response.arrayBuffer();
     seen.push(`${path.replace("/v1/", "")}=${cost}`);
   }
   return seen.join(" ");
@@ -453,12 +480,12 @@ await check("the Responses and Anthropic doors carry the SAME receipt headers", 
 
 console.log("\ndeferred jobs");
 
-await check("chat() refuses a deferred turn rather than returning nothing", async () => {
+await check("chat() refuses a deferred turn rather than returning nothing", async () => guardedFetch.withoutEgress(async () => {
   try {
     await conifer.chat({
       model: chatModel,
       messages: [{ role: "user", content: "hi" }],
-      maxTokens: 5,
+      maxTokens: 128,
       defer: true,
     });
   } catch (error) {
@@ -467,14 +494,14 @@ await check("chat() refuses a deferred turn rather than returning nothing", asyn
     return "refused client-side, no spend";
   }
   throw new Error("chat() accepted defer and returned something");
-});
+}));
 
 if (includeDeferred) {
   await check("defer() submits, status polls, cancel terminates", async () => {
     const job = await conifer.defer({
       model: chatModel,
       messages: [{ role: "user", content: "hi" }],
-      maxTokens: 20,
+      maxTokens: 128,
     });
     if (!job.jobId) throw new Error("no job id");
     const status = await conifer.jobs.status(job.jobId);
@@ -496,7 +523,7 @@ if (includeDeferred) {
     throw new Error("a nonexistent job id was found");
   });
 } else {
-  console.log("  skip deferred submit/cancel (pass --include-deferred)");
+  console.log("  skip deferred submit/cancel (requires a separate bounded plan)");
 }
 
 // -------------------------------------------------- server fallback chain
@@ -516,13 +543,12 @@ await check("a declared chain never moves a HEALTHY turn off the pin", async () 
   // embeddings-only model, which the gateway refuses at admission on a chat
   // wire — so the case failed on the chain being rejected outright, never
   // reaching the property it exists to test (that a healthy turn stays pinned).
-  const spare = (await conifer.models())
-    .find((m) => m.id !== chatModel && m.caps?.includes("tools"))?.id;
-  if (!spare) throw new Error("the catalog has no second chat model; cannot form a chain");
+  const spare = PINS.spare;
+  assertModel((await conifer.models()).find(m => m.id === spare), 128, "tools", "openai");
   const answer = await conifer.chat({
     model: chatModel,
     messages: [{ role: "user", content: "reply with the single word: ok" }],
-    maxTokens: 16,
+    maxTokens: 128,
     serverFallbackModels: [spare],
   });
   eq(answer.receipt.effectiveModel, chatModel, "effective model");
@@ -538,7 +564,7 @@ await check("an unknown chain member is refused BY NAME, before any spend", asyn
     await conifer.chat({
       model: chatModel,
       messages: [{ role: "user", content: "hi" }],
-      maxTokens: 16,
+      maxTokens: 128,
       serverFallbackModels: ["zzz-not-a-model"],
     });
   } catch (error) {
@@ -557,7 +583,7 @@ await check("a chain that de-duplicates away sends no header at all", async () =
   const answer = await conifer.chat({
     model: chatModel,
     messages: [{ role: "user", content: "reply with the single word: ok" }],
-    maxTokens: 16,
+    maxTokens: 128,
     serverFallbackModels: [chatModel],
   });
   eq(answer.receipt.effectiveModel, chatModel, "effective model");
@@ -573,20 +599,17 @@ await check("a chain that de-duplicates away sends no header at all", async () =
 
 console.log("\nthe router");
 
-const ROUTER_WAKE_MS = 70_000;
-
-/** Call route() until the router answers, waiting through one cold start. */
+let warmedPick = finalOnly ? phase.warmed_pick : undefined;
 async function routeWarm(request) {
-  const started = Date.now();
-  for (;;) {
-    try {
-      return await conifer.route(request);
-    } catch (error) {
-      const waking = error?.status === 503;
-      if (!waking || Date.now() - started > ROUTER_WAKE_MS) throw error;
-      await new Promise((r) => setTimeout(r, 5_000));
+  const attempts = finalOnly ? phase.route_warmups_remaining : 6;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try { return await conifer.route({ ...request, maxOutputTokens: 2048 }); }
+    catch (error) {
+      if (error?.status !== 503 || attempt === attempts - 1) throw error;
+      await new Promise(resolve => setTimeout(resolve, 5_000));
     }
   }
+  throw new Error("approved router warmup allowance exhausted");
 }
 
 await check("route() returns a servable pick, its fallbacks and the artifact version", async () => {
@@ -596,33 +619,37 @@ await check("route() returns a servable pick, its fallbacks and the artifact ver
   if (!pick.routerVersion) throw new Error("no router version");
   eq(pick.policy, "balanced", "policy echoed");
   const catalog = await conifer.models();
-  if (!catalog.some((m) => m.id === pick.model)) throw new Error(`pick ${pick.model} is not in this key's catalog`);
+  for (const id of [pick.model, ...pick.fallbacks]) assertModel(catalog.find(m => m.id === id), 2048);
+  warmedPick = pick;
   return `${pick.model} (+${pick.fallbacks.length} fallbacks)`;
 });
 
 await check("a muted or unknown policy is a 400, never a quiet substitute", async () => {
   try {
-    await conifer.route({ query: "x", policy: "fast" });
+    await conifer.route({ query: "x", policy: "fast", maxOutputTokens: 2048 });
   } catch (error) {
     if (error?.status === 400) return "400 for fast";
-    if (error?.status === 503) return "router waking; 400 path not reached (cold start, not a failure)";
     throw error;
   }
   throw new Error("fast was served");
 });
 
-await check("chat(model: auto) is routed and the receipt names the pick", async () => {
-  await routeWarm({ query: "warm", policy: "balanced" });
-  let answer;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    answer = await conifer.chat({
-      model: "auto",
-      messages: [{ role: "user", content: "What is 17 * 23? Reply with just the number." }],
-      maxTokens: 16,
-    });
-    if (answer.receipt.reason === "routed") break;
-    await new Promise((r) => setTimeout(r, 5_000));
+await check(finalCase, async () => {
+  if (finalOnly) {
+    warmedPick = await routeWarm({ query: "What is 17 * 23?", policy: "balanced" });
+    for (const id of [warmedPick.model, ...warmedPick.fallbacks]) {
+      assertModel(catalog.find(m => m.id === id), 2048);
+    }
   }
+  if (!warmedPick) throw new Error("router readiness gate failed; auto inference withheld");
+  const answer = await conifer.chat({
+    model: "auto",
+    messages: [{ role: "user", content: "What is 17 * 23? Reply with just the number." }],
+    maxTokens: 2048,
+    maxCostNanoUsd: 350_000_000,
+  });
+  eq(textOf(answer)?.trim(), "391", "routed arithmetic");
+  assertModel(catalog.find(m => m.id === answer.receipt.effectiveModel), 2048);
   eq(answer.receipt.requestedModel, "auto", "requested model");
   eq(answer.receipt.reason, "routed", "receipt reason");
   if (answer.receipt.effectiveModel === "auto") throw new Error("effective model is still the alias");
@@ -632,4 +659,5 @@ await check("chat(model: auto) is routed and the receipt names the pick", async 
 // ----------------------------------------------------------------- verdict
 
 console.log(`\n${failed === 0 ? "PASS" : "FAIL"} — ${passed} passed, ${failed} failed\n`);
+console.log(journal("finish", { failed_checks: failed, passed_checks: passed }));
 process.exit(failed === 0 ? 0 : 1);

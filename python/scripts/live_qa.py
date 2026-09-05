@@ -11,21 +11,45 @@ here: three error classes unreachable against the live error vocabulary,
 ``chat(defer=True)`` returning an empty completion for a turn that had been
 accepted AND DEBITED.
 
-THIS SPENDS REAL MONEY — a handful of small turns, well under a cent. It is not
-part of ``pytest`` for that reason; run it deliberately, before a release.
-
-    CONIFER_API_KEY=sk-… python scripts/live_qa.py
-    CONIFER_API_KEY=sk-… python scripts/live_qa.py --include-deferred
+This release campaign requires an approved plan and ``--execute``. Both
+languages share at most 40 POSTs and $1.850000002 in reserved ceilings.
+Deferred jobs require a separate plan. Missing execution flags fail so an
+older publisher cannot silently skip the mandatory live gate.
 """
 
 from __future__ import annotations
 
 import os
+import base64
+import struct
+import math
+import signal
+import urllib.request
+import json
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+if "--include-deferred" in sys.argv:
+    raise SystemExit("deferred jobs require a separate bounded plan")
+if "--execute" not in sys.argv:
+    print("Local-only default. Review the bounded campaign plan; --execute requires fresh spend approval.")
+    raise SystemExit(2)
+if not os.environ.get("CONIFER_QA_RUN_DIR"):
+    raise SystemExit("set CONIFER_QA_RUN_DIR to the reviewed campaign path")
+if not os.environ.get("CONIFER_API_KEY"):
+    raise SystemExit("set CONIFER_API_KEY explicitly; no credential discovery")
+# Helpers are local, but conifer_sdk must come from the installed wheel.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from live_qa_transport import BASE_URL, BUILD, PINS, GuardedHTTP, assert_model, empty_outcome
+import conifer_sdk
+if conifer_sdk.__version__ != "0.2.1" or "site-packages" not in conifer_sdk.__file__:
+    raise SystemExit("expected installed conifer-sdk0.2.1 wheel; source fallback is forbidden")
+http = GuardedHTTP()
+http.record("claim")
+urllib.request.urlopen = http.urlopen
+signal.alarm(900)
+print(f"Installed wheel {conifer_sdk.__version__}: {conifer_sdk.__file__}")
 
 from conifer_sdk import (  # noqa: E402
     ChatRequest,
@@ -50,17 +74,15 @@ _failed = 0
 
 
 def resolve_key() -> str:
-    """The env var, or the dev-token file this repo's tooling writes."""
+    """Use only the explicitly supplied campaign credential."""
     if os.environ.get("CONIFER_API_KEY"):
         return os.environ["CONIFER_API_KEY"]
-    dev_token = Path.home() / ".conifer/dev-token"
-    if dev_token.exists():
-        return dev_token.read_text().strip()
-    raise SystemExit("set CONIFER_API_KEY (mint one at https://conifer.build/console#/keys)")
+    raise SystemExit("set CONIFER_API_KEY explicitly; no credential discovery")
 
 
 def check(name, run) -> None:
     global _passed, _failed
+    http.case_name = name
     try:
         detail = run()
         _passed += 1
@@ -77,7 +99,10 @@ def eq(actual, expected, what) -> None:
 
 
 key = resolve_key()
-conifer = Conifer(api_key=key)
+conifer = Conifer(api_key=key, base_url=BASE_URL, max_retries=0, timeout=90)
+health, _ = conifer.request("GET", "/healthz")
+if not isinstance(health.get("build"), str) or not health["build"].endswith("+" + BUILD[:7]):
+    raise SystemExit("gateway build differs from approved plan")
 print(f"\nlive QA against {conifer.base_url}\n")
 
 state = {}
@@ -91,17 +116,20 @@ def _models():
     models = conifer.models()
     if not models:
         raise AssertionError("the catalog is empty")
-    state["chat"] = next((m.id for m in models if m.caps and "tools" in m.caps), None)
-    state["embed"] = next((m.id for m in models if m.caps and "embeddings" in m.caps), None)
-    if not state["chat"]:
-        raise AssertionError("no model declares `tools`")
-    if not state["embed"]:
-        raise AssertionError("no model declares `embeddings`")
+    state["catalog"] = {m.id: m for m in models}
+    state["chat"] = PINS["chat"]; state["embed"] = PINS["embed"]
+    assert_model(state["catalog"].get(state["chat"]), 16, "tools", "openai")
+    assert_model(state["catalog"].get(state["chat"]), 128, "tools", "openai")
+    assert_model(state["catalog"].get(state["embed"]), None, "embeddings", "openai")
+    if "qwen3.8-max" in state["catalog"]:
+        eq(state["catalog"]["qwen3.8-max"].output_token_limit_supported, False, "unsupported limit parsed")
+    if "glm-5.3-flash" in state["catalog"]:
+        eq(state["catalog"]["glm-5.3-flash"].min_output_tokens, 512, "minimum output budget parsed")
     return f"{len(models)} models"
 
 
 check("models() returns a priced, capability-declaring catalog", _models)
-check("model(id) round-trips one entry", lambda: conifer.model(state["chat"]).id)
+check("model(id) round-trips one entry", lambda: eq(conifer.model(state["chat"]).id, state["chat"], "model id"))
 
 
 def _cheapest():
@@ -114,7 +142,15 @@ def _cheapest():
 
 
 check("cheapest_for ranks the catalog's own decimal-string prices", _cheapest)
-check("balance() reads without moving money", lambda: f"{conifer.balance().remaining_usd} USD")
+def _balance():
+    balance = conifer.balance()
+    if type(balance.remaining_nano_usd) is not int or balance.remaining_nano_usd < 2_000_000_000:
+        raise AssertionError("insufficient balance for the bounded plan")
+    return f"{balance.remaining_usd} USD"
+check("balance() reads without moving money", _balance)
+if _failed:
+    raise SystemExit("catalog/balance preflight failed; no inference dispatched")
+http.record("ready")
 
 # --------------------------------------------------------------------- chat
 
@@ -126,11 +162,10 @@ def _chat():
         ChatRequest(
             model=state["chat"],
             messages=[{"role": "user", "content": "reply with exactly: pinecone"}],
-            max_tokens=20,
+            max_tokens=128,
         )
     )
-    if not isinstance(answer.text, str):
-        raise AssertionError("no text in the completion")
+    eq(answer.text.strip(), "pinecone", "answer")
     if answer.receipt.cost_nano_usd is None:
         raise AssertionError("no cost on a non-streamed turn — the receipt is the product")
     return f"{answer.receipt.cost_usd} USD, {answer.receipt.effective_model}"
@@ -147,7 +182,7 @@ def _request_id():
         ChatRequest(
             model=state["chat"],
             messages=[{"role": "user", "content": "hi"}],
-            max_tokens=5,
+            max_tokens=128,
             request_id=mine,
         )
     )
@@ -163,7 +198,7 @@ def _cost_on_body():
         ChatRequest(
             model=state["chat"],
             messages=[{"role": "user", "content": "hi"}],
-            max_tokens=200,
+            max_tokens=128,
         )
     )
     usage = answer.usage or {}
@@ -181,14 +216,16 @@ check("the caller's request_id is the id that comes back", _request_id)
 def _stream():
     chunks = 0
     usage = None
+    visible = ""
     for chunk in conifer.stream(
         ChatRequest(
             model=state["chat"],
-            messages=[{"role": "user", "content": "count to three"}],
-            max_tokens=30,
+            messages=[{"role": "user", "content": "Reply with exactly: 1,2,3"}],
+            max_tokens=128,
         )
     ):
         chunks += 1
+        visible += ((chunk.get("choices") or [{}])[0].get("delta") or {}).get("content") or ""
         if chunk.get("usage"):
             usage = chunk["usage"]
     if chunks == 0:
@@ -197,6 +234,8 @@ def _stream():
     # sent before the first token. Usage is how a stream is reconciled.
     if usage is None:
         raise AssertionError("no terminal usage chunk — a stream must be reconcilable")
+    eq("".join(visible.split()), "1,2,3", "streamed content")
+    http.stream_done(usage)
     if conifer.stream_receipt.cost_nano_usd is not None:
         raise AssertionError("a stream disclosed a cost on the head; the README says it cannot")
     return f"{chunks} chunks, {usage.get('total_tokens')} tokens"
@@ -209,26 +248,18 @@ def _empty_reason():
     # FIRST, so a tight budget yields empty content, finish_reason "length",
     # and a bill for every output token. Indistinguishable at the call site
     # from a refusal or a broken SDK unless something reads finish_reason.
-    truncated = conifer.chat(
-        ChatRequest(
+    try:
+        truncated = conifer.chat(ChatRequest(
             model=state["chat"],
-            messages=[
-                {"role": "user", "content": "What is 8347 * 9182? Think it through step by step."}
-            ],
+            messages=[{"role": "user", "content": "What is 8347 * 9182? Think it through step by step."}],
             max_tokens=16,
-        )
-    )
-    if truncated.text != "":
-        # Not every model truncates alike; if this one answered, the
-        # explanation must be ABSENT rather than invented.
-        eq(truncated.empty_reason, None, "a completion with text needs no explanation")
-        return "model answered within 16 tokens; no explanation offered (correct)"
-    why = truncated.empty_reason
-    if why is None:
-        raise AssertionError("empty content with no explanation — the trap is back")
-    if "max_tokens" not in why:
-        raise AssertionError(f"unhelpful explanation: {why}")
-    return why[:44]
+        ))
+    except Exception as error:
+        return empty_outcome(error)
+    if not truncated.text.strip():
+        raise AssertionError("empty successful completion is invalid on this gateway")
+    eq(truncated.empty_reason, None, "a visible completion needs no explanation")
+    return "visible answer; no invented explanation"
 
 
 check("an empty completion explains itself rather than just being empty", _empty_reason)
@@ -271,12 +302,15 @@ def _embeddings():
     eq(len(unpacked), len(decoded), "base64 dimension")
     if not unpacked:
         raise AssertionError("base64 decoded to an EMPTY vector")
-    # Same computation, so the two must agree within this model's run-to-run
-    # noise. A decode bug is orders of magnitude larger (wrong endianness or a
-    # misaligned offset produces garbage, not 1e-4).
+    raw_bytes = base64.b64decode(packed.raw["data"][0]["embedding"], validate=True)
+    expected = list(struct.unpack(f"<{len(raw_bytes) // 4}f", raw_bytes))
+    eq(unpacked, expected, "independent little-endian base64 decode")
+    if not all(math.isfinite(value) for value in decoded + unpacked):
+        raise AssertionError("non-finite embedding")
+    eq(len(unpacked), state["catalog"][state["embed"]].embedding_dimensions, "advertised vector width")
+    # Separate provider calls can drift; exact decoding uses each response above.
     drift = max(abs(x - y) for x, y in zip(unpacked, decoded))
-    if drift > 1e-2:
-        raise AssertionError(f"base64 and float disagree by {drift}, beyond sampling noise")
+
     if packed.receipt.cost_nano_usd is None:
         raise AssertionError("embeddings settle in band; the cost must be on this response")
     return f"{len(decoded)} dims, decode exact, run-to-run drift {drift:.1e}"
@@ -318,7 +352,7 @@ def _ceiling():
             ChatRequest(
                 model=state["chat"],
                 messages=[{"role": "user", "content": "hi"}],
-                max_tokens=100,
+                max_tokens=128,
                 max_cost_nano_usd=1,
             )
         )
@@ -339,7 +373,7 @@ def _unknown_model():
             ChatRequest(
                 model="no-such-model-xyz",
                 messages=[{"role": "user", "content": "hi"}],
-                max_tokens=5,
+                max_tokens=128,
             )
         )
     except ConiferModelNotFoundError as error:
@@ -352,7 +386,7 @@ check("an unknown model is a typed 404, not a hang", _unknown_model)
 
 def _bad_key():
     # The exact regression that made three error classes unreachable.
-    stranger = Conifer(api_key="sk-conifer-definitely-not-valid")
+    stranger = Conifer(api_key="sk-conifer-definitely-not-valid", base_url=BASE_URL, timeout=90, max_retries=0)
     try:
         stranger.balance()
     except ConiferAuthError as error:
@@ -378,7 +412,7 @@ def _collector():
         {
             "model": state["chat"],
             "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 5,
+            "max_tokens": 128,
         },
     )
     observed = receipts.observe(headers, "/v1/chat/completions")
@@ -398,7 +432,7 @@ def _budget():
         {
             "model": state["chat"],
             "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 5,
+            "max_tokens": 128,
         },
     )
     budget.collector.observe(headers)
@@ -424,7 +458,7 @@ def _chat_refuses_defer():
             ChatRequest(
                 model=state["chat"],
                 messages=[{"role": "user", "content": "hi"}],
-                max_tokens=5,
+                max_tokens=128,
                 defer=True,
             )
         )
@@ -434,7 +468,7 @@ def _chat_refuses_defer():
     raise AssertionError("chat() accepted defer and returned something")
 
 
-check("chat() refuses a deferred turn rather than returning nothing", _chat_refuses_defer)
+check("chat() refuses a deferred turn rather than returning nothing", lambda: http.without_egress(_chat_refuses_defer))
 
 if INCLUDE_DEFERRED:
 
@@ -443,7 +477,7 @@ if INCLUDE_DEFERRED:
             ChatRequest(
                 model=state["chat"],
                 messages=[{"role": "user", "content": "hi"}],
-                max_tokens=20,
+                max_tokens=128,
             )
         )
         if not job.job_id:
@@ -467,7 +501,9 @@ if INCLUDE_DEFERRED:
 
     check("a foreign job id is a 404 with no existence oracle", _foreign_job)
 else:
-    print("  skip deferred submit/cancel (pass --include-deferred)")
+    print("  skip deferred submit/cancel (requires a separate bounded plan)")
 
 print(f"\n{'PASS' if _failed == 0 else 'FAIL'} — {_passed} passed, {_failed} failed\n")
+print(http.record("finish", failed_checks=_failed))
+signal.alarm(0)
 sys.exit(0 if _failed == 0 else 1)

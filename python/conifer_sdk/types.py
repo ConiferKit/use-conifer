@@ -148,6 +148,10 @@ class CatalogModel:
     #: True when BYOK custody is degraded for a provider you hold a key for.
     unavailable: Optional[bool] = None
     raw: Dict[str, Any] = field(default_factory=dict)
+    #: Declared minimum completion budget, including reasoning tokens.
+    min_output_tokens: Optional[int] = None
+    #: False means completions are refused before spend. None means undeclared.
+    output_token_limit_supported: Optional[bool] = None
 
 
 @dataclass

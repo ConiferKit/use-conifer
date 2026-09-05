@@ -19,6 +19,7 @@ import {
   ConiferTimeoutError,
   ConiferUpstreamError,
   STREAM_IDLE_MS,
+  type StreamChunk,
   Transport,
   chatBody,
   chatHeaders,
@@ -590,6 +591,40 @@ test("the catalog keeps every field, and absence stays absence", async () => {
   assert.equal(models[0]!.raw.id, "claude-haiku-4-5");
 });
 
+test("catalog output budgets preserve explicit false, zero, and undeclared facts", async () => {
+  const { fetchImpl } = stubFetch([jsonResponse({
+    object: "list",
+    data: [
+      { id: "uncapped", min_output_tokens: 512, output_token_limit_supported: false },
+      { id: "capped", min_output_tokens: 0, output_token_limit_supported: true },
+      { id: "undeclared" },
+    ],
+  })]);
+  const models = await client(fetchImpl).models();
+  assert.equal(models[0]!.minOutputTokens, 512);
+  assert.equal(models[0]!.outputTokenLimitSupported, false);
+  assert.equal(models[0]!.raw.output_token_limit_supported, false);
+  assert.equal(models[1]!.minOutputTokens, 0);
+  assert.equal(models[1]!.outputTokenLimitSupported, true);
+  assert.equal(models[2]!.minOutputTokens, undefined);
+  assert.equal(models[2]!.outputTokenLimitSupported, undefined);
+});
+
+test("cheapest selection skips explicit output-cap refusals and preserves undeclared seats", async () => {
+  const { fetchImpl } = stubFetch([jsonResponse({
+    object: "list",
+    data: [
+      { id: "uncapped", pricing: priced("0.01", "0.01"), output_token_limit_supported: false },
+      { id: "capped", pricing: priced("1", "1"), output_token_limit_supported: true },
+      { id: "undeclared", pricing: priced("2", "2") },
+    ],
+  })]);
+  const models = await client(fetchImpl).models();
+  assert.equal(pickCheapest(models, [])?.id, "capped");
+  assert.equal(pickCheapest([models[0]!], []), undefined);
+  assert.equal(pickCheapest([models[0]!, models[2]!], [])?.id, "undeclared");
+});
+
 test("route sends the /v1/route wire and returns a pick, never a score", async () => {
   const { calls, fetchImpl } = stubFetch([
     jsonResponse({
@@ -733,6 +768,26 @@ test("a stray OPENAI_BASE_URL cannot redirect Conifer traffic elsewhere", () => 
     "https://staging.conifer.build",
   );
   assert.equal(resolveBaseUrl("http://localhost:8080", {}), "http://localhost:8080");
+});
+
+test("automatic gateway selection requires HTTPS and a complete Conifer domain", () => {
+  for (const url of [
+    "https://notconifer.build/v1",
+    "https://api.notconifer.build/v1",
+    "https://conifer.build.evil.test/v1",
+    "https://conifer.build@evil.test/v1",
+    "http://api.conifer.build/v1",
+    "ftp://api.conifer.build/v1",
+    "//api.conifer.build/v1",
+  ]) {
+    assert.equal(resolveBaseUrl(undefined, { OPENAI_BASE_URL: url }), "https://api.conifer.build", url);
+  }
+  for (const origin of ["https://conifer.build", "https://staging.conifer.build"]) {
+    assert.equal(resolveBaseUrl(undefined, { OPENAI_BASE_URL: `${origin}/v1` }), origin);
+  }
+  const local = "http://localhost:8080";
+  assert.equal(resolveBaseUrl(local, {}), local);
+  assert.equal(resolveBaseUrl(undefined, { CONIFER_BASE_URL: local }), local);
 });
 
 test("a missing key fails at construction, not at the first call", () => {
@@ -1122,6 +1177,16 @@ const STREAM_CASES: StreamCase[] = [
     cancels: 1,
   },
   {
+    name: "a caller abort stops chunks already buffered from the same read",
+    sse: `${PINE}\n\n${CONE}\n\n`,
+    cuts: [],
+    stall: true,
+    abortAfter: 1,
+    text: "pine",
+    throws: { type: ConiferTimeoutError, message: /aborted/ },
+    cancels: 1,
+  },
+  {
     name: "the receipt resolves before iteration: it is read from the head",
     sse: `${PINE}\n\n${CONE}\n\ndata: [DONE]\n\n`,
     cuts: [],
@@ -1182,6 +1247,82 @@ for (const row of STREAM_CASES) {
   });
 }
 
+test("cancel() discards chunks already buffered from the same read", async () => {
+  const { body, cancels } = byteBody(`${PINE}\n\n${CONE}\n\n`, [], { stallAfterLast: true });
+  const { fetchImpl } = stubFetch([new Response(body)]);
+  const stream = await client(fetchImpl).stream({ model: "m", messages: [] });
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+    await stream.cancel();
+  }
+  assert.equal(chunks.length, 1);
+  assert.equal(cancels(), 1);
+});
+
+test("a stream aborted before iteration cancels a silent body without waiting for bytes", async () => {
+  let cancels = 0;
+  const body = new ReadableStream<Uint8Array>({ cancel() { cancels += 1; } });
+  const { fetchImpl } = stubFetch([new Response(body)]);
+  const controller = new AbortController();
+  const stream = await client(fetchImpl).stream({ model: "m", messages: [], signal: controller.signal });
+  controller.abort();
+  const result = stream[Symbol.asyncIterator]().next().then(() => undefined, (error: unknown) => error);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<string>((resolve) => {
+    timer = setTimeout(() => resolve("still waiting for bytes after abort"), 100);
+  });
+  try {
+    const failure = await Promise.race([result, deadline]);
+    assert.ok(failure instanceof ConiferTimeoutError, String(failure));
+    assert.equal(cancels, 1);
+  } finally {
+    clearTimeout(timer);
+    await stream.cancel();
+    await result;
+  }
+});
+
+for (const ending of ["\n", "\r\n"]) {
+  test(`DONE ends an open stream and discards trailing frames (${JSON.stringify(ending)})`, async () => {
+    const usage = 'data: {"choices":[],"usage":{"total_tokens":13}}';
+    const sse = [PINE, usage, "data: [DONE]", CONE].join(ending.repeat(2)) + ending.repeat(2);
+    const { body, cancels } = byteBody(sse, [3, PINE.length + 1, PINE.length + 3], { stallAfterLast: true });
+    const { fetchImpl } = stubFetch([new Response(body, { headers: RECEIPT_HEADERS })]);
+    const stream = await client(fetchImpl).stream({ model: "m", messages: [] });
+    const chunks: StreamChunk[] = [];
+    const drive = (async () => { for await (const chunk of stream) chunks.push(chunk); })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<string>((resolve) => {
+      timer = setTimeout(() => resolve("still waiting after DONE"), 200);
+    });
+    try {
+      assert.equal(await Promise.race([drive, deadline]), undefined);
+      assert.deepEqual(chunks, [
+        { choices: [{ delta: { content: "pine" } }] },
+        { choices: [], usage: { total_tokens: 13 } },
+      ]);
+      assert.equal(cancels(), 1);
+      assert.equal((await stream.receipt()).requestId, "req-abc");
+    } finally {
+      clearTimeout(timer);
+      await stream.cancel();
+      await drive;
+    }
+  });
+}
+
+test("non-object SSE payloads are ignored as invalid chunks", async () => {
+  const sse = ['null', '[]', 'true', '1', '"oops"',
+    '{"choices":[{"delta":{"content":"[DONE]"}}]}', '[DONE]']
+    .map((data) => `data: ${data}\n\n`).join("");
+  const { fetchImpl } = stubFetch([new Response(sse)]);
+  const stream = await client(fetchImpl).stream({ model: "m", messages: [] });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.deepEqual(chunks, [{ choices: [{ delta: { content: "[DONE]" } }] }]);
+});
+
 test("a stream that goes silent is cut by the idle clock, not waited on forever", async () => {
   const contract = JSON.parse(
     readFileSync(fileURLToPath(new URL("../contracts/gateway-contract.json", import.meta.url)), "utf8"),
@@ -1216,6 +1357,66 @@ test("a stream that goes silent is cut by the idle clock, not waited on forever"
   assert.match(error.message, /20ms/);
   lease.release();
 });
+
+test("an already-aborted request never reaches fetch or its fallback models", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const { calls, fetchImpl } = stubFetch([jsonResponse(COMPLETION)]);
+  await assert.rejects(
+    client(fetchImpl, { maxRetries: 2 }).chat({
+      model: "m",
+      messages: [],
+      signal: controller.signal,
+      fallbackModels: ["backup"],
+      allowClientFallback: true,
+    }),
+    (error: unknown) => error instanceof ConiferTimeoutError && /aborted/.test(error.message),
+  );
+  assert.equal(calls.length, 0);
+});
+
+for (const status of [200, 400, 503]) {
+  test(`a caller abort while reading a ${status} JSON body stops the request`, async () => {
+    const controller = new AbortController();
+    let bodyController!: ReadableStreamDefaultController<Uint8Array>;
+    let fetchSignal!: AbortSignal;
+    let reading!: () => void;
+    const bodyStarted = new Promise<void>((resolve) => { reading = resolve; });
+    let calls = 0;
+    const conifer = client(async (_url: string, init: { signal: AbortSignal }) => {
+      calls += 1;
+      if (calls > 1) return jsonResponse(COMPLETION);
+      fetchSignal = init.signal;
+      const body = new ReadableStream<Uint8Array>({
+        start(streamController) {
+          bodyController = streamController;
+          // A real fetch abort errors its response body, even after headers arrive.
+          init.signal.addEventListener("abort", () => {
+            streamController.error(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        },
+        pull() { reading(); },
+      }, { highWaterMark: 0 });
+      return new Response(body, { status, headers: { "content-type": "application/json" } });
+    }, { maxRetries: 1 });
+    const pending = conifer.chat({
+      model: "m", messages: [], signal: controller.signal,
+      fallbackModels: ["backup"], allowClientFallback: true,
+    });
+    await bodyStarted;
+    controller.abort();
+    if (!fetchSignal.aborted) {
+      // Let the buggy implementation finish so failure does not depend on a timeout.
+      const payload = status === 200 ? COMPLETION : { error: { type: "bad_request", message: "bad" } };
+      bodyController.enqueue(new TextEncoder().encode(JSON.stringify(payload)));
+      bodyController.close();
+    }
+    await assert.rejects(pending,
+      (error: unknown) => error instanceof ConiferTimeoutError && /aborted/.test(error.message));
+    assert.equal(fetchSignal.aborted, true, "cancellation must reach the connection");
+    assert.equal(calls, 1, "cancellation must not send a retry or fallback");
+  });
+}
 
 test("a Retry-After beyond the request timeout is capped at the timeout", async () => {
   const { calls, fetchImpl } = stubFetch([

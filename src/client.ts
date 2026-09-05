@@ -39,7 +39,7 @@ export interface ConiferOptions {
 
 /**
  * The gateway origin. `CONIFER_BASE_URL` wins; `OPENAI_BASE_URL` is honoured
- * only when it already points at a Conifer host, so a stray OpenAI base URL
+ * only when it uses HTTPS on a Conifer host, so a stray OpenAI base URL
  * never sends a Conifer key somewhere else.
  */
 export function resolveBaseUrl(explicit: string | undefined, env: Record<string, string | undefined>): string {
@@ -54,7 +54,9 @@ export function resolveBaseUrl(explicit: string | undefined, env: Record<string,
 function isConiferHost(url: string | undefined): url is string {
   if (url === undefined) return false;
   try {
-    return new URL(url).hostname.endsWith("conifer.build");
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" &&
+      (parsed.hostname === "conifer.build" || parsed.hostname.endsWith(".conifer.build"));
   } catch {
     return false;
   }

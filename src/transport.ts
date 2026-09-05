@@ -125,40 +125,55 @@ export class Transport {
     let lastError: ConiferError | undefined;
 
     for (let attempt = 0; attempt <= this.options.maxRetries; attempt += 1) {
+      if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
       const onOuterAbort = () => controller.abort();
       spec.signal?.addEventListener("abort", onOuterAbort);
       let response: Response;
+      let data: unknown;
       try {
-        response = await this.options.fetch(url, { method: spec.method, headers, body, signal: controller.signal });
-      } catch (cause) {
-        if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");
-        lastError = controller.signal.aborted
-          ? new ConiferTimeoutError(
-              `no response within ${this.options.timeoutMs}ms; the turn may still have been served and billed`,
-            )
-          : new ConiferConnectionError(`could not reach the gateway at ${url}`, cause);
-        if (attempt < this.options.maxRetries) {
-          await sleep(backoffMs(attempt), spec.signal);
+        try {
+          response = await this.options.fetch(url, { method: spec.method, headers, body, signal: controller.signal });
+        } catch (cause) {
           if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");
-          continue;
+          lastError = controller.signal.aborted
+            ? new ConiferTimeoutError(
+                `no response within ${this.options.timeoutMs}ms; the turn may still have been served and billed`,
+              )
+            : new ConiferConnectionError(`could not reach the gateway at ${url}`, cause);
+          if (attempt < this.options.maxRetries) {
+            await sleep(backoffMs(attempt), spec.signal);
+            if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");
+            continue;
+          }
+          throw lastError;
+        } finally {
+          clearTimeout(timer);
         }
-        throw lastError;
-      } finally {
-        clearTimeout(timer);
-        spec.signal?.removeEventListener("abort", onOuterAbort);
-      }
 
-      if (response.ok) {
-        if (spec.raw) {
+        if (response.ok && spec.raw) {
           const lease = leaseStream(controller, spec.signal, this.options.streamIdleMs ?? STREAM_IDLE_MS);
           return { data: undefined, response, lease };
         }
-        return { data: await parseJson(response), response };
+
+        // Headers end the timeout, but the caller still owns cancellation
+        // until the JSON body has finished (including an HTTP error body).
+        data = await parseJson(response).catch((cause: unknown) => {
+          if (response.ok) throw cause;
+          return undefined;
+        });
+        if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");
+      } catch (cause) {
+        if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");
+        throw cause;
+      } finally {
+        spec.signal?.removeEventListener("abort", onOuterAbort);
       }
 
-      const failure = errorFrom(response.status, await parseJson(response).catch(() => undefined), response.headers);
+      if (response.ok) return { data, response };
+
+      const failure = errorFrom(response.status, data, response.headers);
       const retryable = failure.retryable && RETRYABLE_STATUS.has(response.status);
       if (retryable && attempt < this.options.maxRetries) {
         const hinted = (failure as { retryAfterSeconds?: number }).retryAfterSeconds;

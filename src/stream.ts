@@ -8,6 +8,7 @@ import type { CompletionStream, StreamChunk } from "./types.ts";
 
 /** An SSE event ends at a blank line, with either line ending. */
 const FRAME_BOUNDARY = /\r?\n\r?\n/;
+const DONE = Symbol("done");
 
 /**
  * Wrap a streaming response. An error frame is thrown as the matching
@@ -17,9 +18,9 @@ const FRAME_BOUNDARY = /\r?\n\r?\n/;
 export function makeStream(response: Response, lease: StreamLease): CompletionStream {
   const receipt = Promise.resolve(readReceipt(response.headers));
 
-  const accept = (frame: string): StreamChunk | undefined => {
-    const chunk = parseFrame(frame);
-    if (chunk !== undefined && isErrorFrame(chunk)) {
+  const accept = (frame: string): StreamChunk | typeof DONE | undefined => {
+    const chunk = decodeFrame(frame);
+    if (chunk !== undefined && chunk !== DONE && isErrorFrame(chunk)) {
       throw errorFrom(response.status, chunk, response.headers);
     }
     return chunk;
@@ -43,6 +44,8 @@ export function makeStream(response: Response, lease: StreamLease): CompletionSt
     let finished = false;
     try {
       for (;;) {
+        if (lease.signal.aborted) throw lease.error();
+        if (cancelled !== undefined) return;
         let result: ReadableStreamReadResult<Uint8Array>;
         try {
           result = await reader.read();
@@ -56,15 +59,22 @@ export function makeStream(response: Response, lease: StreamLease): CompletionSt
         buffer += decoder.decode(result.value, { stream: true });
         let boundary = FRAME_BOUNDARY.exec(buffer);
         while (boundary !== null) {
+          // A consumer can cancel while suspended at the previous yield,
+          // even when the next frame has already arrived in the same read.
+          if (lease.signal.aborted) throw lease.error();
+          if (cancelled !== undefined) return;
           const frame = buffer.slice(0, boundary.index);
           buffer = buffer.slice(boundary.index + boundary[0].length);
           const chunk = accept(frame);
+          if (chunk === DONE) return;
           if (chunk !== undefined) yield chunk;
           boundary = FRAME_BOUNDARY.exec(buffer);
         }
       }
+      if (lease.signal.aborted) throw lease.error();
+      if (cancelled !== undefined) return;
       const tail = accept(buffer);
-      if (tail !== undefined) yield tail;
+      if (tail !== undefined && tail !== DONE) yield tail;
       finished = true;
     } finally {
       lease.signal.removeEventListener("abort", cancel);
@@ -98,14 +108,24 @@ function isErrorFrame(chunk: StreamChunk): boolean {
  * nothing. Several `data:` lines join with a newline, per the SSE spec.
  */
 export function parseFrame(frame: string): StreamChunk | undefined {
+  const chunk = decodeFrame(frame);
+  return chunk === DONE ? undefined : chunk;
+}
+
+/** Keep the terminator distinct from an ignored frame inside the iterator. */
+function decodeFrame(frame: string): StreamChunk | typeof DONE | undefined {
   const data = frame
     .split(/\r?\n/)
     .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trim())
-    .join("\n");
-  if (data === "" || data === "[DONE]") return undefined;
+    .map((line) => line.slice(5).replace(/^ /, ""))
+    .join("\n").trim();
+  if (data === "[DONE]") return DONE;
+  if (data === "") return undefined;
   try {
-    return JSON.parse(data) as StreamChunk;
+    const chunk: unknown = JSON.parse(data);
+    return typeof chunk === "object" && chunk !== null && !Array.isArray(chunk)
+      ? chunk as StreamChunk
+      : undefined;
   } catch {
     return undefined;
   }

@@ -12,6 +12,8 @@ export function toCatalogModel(entry: Record<string, unknown>): CatalogModel {
     provider: entry.provider as string | undefined,
     contextWindow: entry.context_window as number | undefined,
     maxOutputTokens: entry.max_output_tokens as number | undefined,
+    minOutputTokens: entry.min_output_tokens as number | undefined,
+    outputTokenLimitSupported: entry.output_token_limit_supported as boolean | undefined,
     maxTools: entry.max_tools as number | undefined,
     caps: entry.caps as string[] | undefined,
     embeddingDimensions: entry.embedding_dimensions as number | undefined,
@@ -24,7 +26,7 @@ export function toCatalogModel(entry: Record<string, unknown>): CatalogModel {
 
 /**
  * The cheapest model that declares every capability in `caps`. A model with
- * no declared caps or no price is skipped, never assumed.
+ * no declared caps, no price, or explicit inability to honor output limits is skipped.
  */
 export function pickCheapest(
   models: CatalogModel[],
@@ -33,6 +35,7 @@ export function pickCheapest(
 ): CatalogModel | undefined {
   const eligible = models.filter((model) => {
     if (model.unavailable === true) return false;
+    if (model.outputTokenLimitSupported === false) return false;
     if (options.minContextWindow !== undefined) {
       if (model.contextWindow === undefined || model.contextWindow < options.minContextWindow) return false;
     }

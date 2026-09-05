@@ -13,7 +13,7 @@
       "type": "string",
       "default": "https://api.conifer.build",
       "env": "CONIFER_BASE_URL",
-      "note": "Gateway origin WITHOUT the /v1 suffix. The OpenAI door is `${baseUrl}/v1`; the Anthropic Messages door is `${baseUrl}/v1/messages`."
+      "note": "Gateway origin WITHOUT the /v1 suffix. The OpenAI door is `${baseUrl}/v1`; the Anthropic Messages door is `${baseUrl}/v1/messages`. When neither an explicit baseUrl nor CONIFER_BASE_URL is set, OPENAI_BASE_URL is accepted only for HTTPS on conifer.build or a dot-separated subdomain. Lookalike host suffixes and non-HTTPS automatic URLs fall back to the default. Explicit overrides still support local gateways."
     },
     "fetch": {
       "type": "function",
@@ -110,7 +110,7 @@
     },
     "fallbackModels": {
       "wire": "NONE \u2014 client-side",
-      "note": "The CLIENT-side chain, kept for callers who want the retry in their own process. NOTE: `serverFallbackModels` above is now the better answer for almost every case \u2014 it is one request, one bill, and it can act on failures the client never sees. The SDK therefore walks the chain ITSELF, one full request per member, and reports which member served in the result's `fallbackIndex`. Honest, not free: each attempt is its own billed turn only if it reached upstream, and only retryable failures advance the chain."
+      "note": "The CLIENT-side chain, kept for callers who want the retry in their own process. NOTE: `serverFallbackModels` above is now the better answer for almost every case \u2014 it is one request, one bill, and it can act on failures the client never sees. The SDK therefore walks the chain ITSELF, one full request per member, and reports which member served in the result's `fallbackIndex`. Honest, not free: each attempt is its own billed turn only if it reached upstream. In both languages, retryable failures and ConiferCapabilityError advance the chain; the latter permits a different model to handle unsupported images or tools without retrying the incapable model."
     }
   },
   "embeddings_request": {
