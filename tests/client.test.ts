@@ -566,6 +566,21 @@ test("a fractional cost ceiling is refused, not rounded", () => {
   );
 });
 
+test("a negative or inexact cost ceiling is refused, not sent", () => {
+  // String(1e21) is "1e+21", and 2 ** 60 + 1 is already 2 ** 60 by the time it arrives.
+  for (const maxCostNanoUsd of [-1, 1e21, 2 ** 60, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () => chatHeaders({ model: "m", messages: [], maxCostNanoUsd }, "idem"),
+      ConiferPortabilityError,
+    );
+  }
+  const headers = chatHeaders(
+    { model: "m", messages: [], maxCostNanoUsd: Number.MAX_SAFE_INTEGER },
+    "idem",
+  );
+  assert.equal(headers["x-conifer-max-cost-nanousd"], "9007199254740991");
+});
+
 test("the catalog keeps every field, and absence stays absence", async () => {
   const { fetchImpl } = stubFetch([
     jsonResponse({

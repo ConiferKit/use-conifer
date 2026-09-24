@@ -396,6 +396,10 @@ class WireTests(unittest.TestCase):
         with self.assertRaises(ConiferPortabilityError):
             chat_headers(ChatRequest(model="m", messages=[], max_cost_nano_usd=1.5), "idem")
 
+    def test_a_negative_ceiling_is_refused(self):
+        with self.assertRaises(ConiferPortabilityError):
+            chat_headers(ChatRequest(model="m", messages=[], max_cost_nano_usd=-1), "idem")
+
     def test_a_stream_always_asks_for_the_usage_chunk(self):
         body = chat_body(ChatRequest(model="m", messages=[]), stream=True)
         self.assertTrue(body["stream"])
@@ -894,6 +898,14 @@ class PortabilityTests(unittest.TestCase):
         self.refuses(
             "helicone-ratelimit-policy", lambda: ceiling_from_policy("10;w=60;u=requests")
         )
+
+    def test_rate_limit_quota_must_be_all_digits(self):
+        # int() also takes a sign, whitespace and underscores; the TypeScript twin does not.
+        for quota in ["1.5", "10abc", "1e3", "-10", "+10", "1_0", ""]:
+            self.refuses(
+                "helicone-ratelimit-policy",
+                lambda q=quota: ceiling_from_policy(f"{q};w=60;u=cents"),
+            )
 
     def test_fallbacks_parse_from_either_shape(self):
         self.assertEqual(parse_fallbacks('["a","b"]'), ["a", "b"])

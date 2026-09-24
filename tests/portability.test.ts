@@ -181,6 +181,13 @@ test("a cents rate-limit policy becomes a money ceiling; a request policy refuse
   refuses("helicone-ratelimit-policy", () => ceilingFromPolicy("junk;w=60;u=cents"));
 });
 
+test("a rate-limit quota must be all digits, as the Python twin requires", () => {
+  // parseInt read a prefix and kept going: "1.5" became 10 cents, "1e3" 1 cent.
+  for (const quota of ["1.5", "10abc", "1e3", "-10", "+10", "", "99999999999999999999"]) {
+    refuses("helicone-ratelimit-policy", () => ceilingFromPolicy(`${quota};w=60;u=cents`));
+  }
+});
+
 test("fallbacks parse from either shape and refuse a URL-pinned entry", () => {
   assert.deepEqual(parseFallbacks('["gpt-4o","claude-haiku-4-5"]'), [
     "gpt-4o",

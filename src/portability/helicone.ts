@@ -144,9 +144,10 @@ export function parseFallbacks(raw: string): string[] {
  */
 export function ceilingFromPolicy(policy: string): number {
   const parts = policy.split(";").map((part) => part.trim());
-  const quota = Number.parseInt(parts[0] ?? "", 10);
+  const quotaText = parts[0] ?? "";
+  const quota = /^\d+$/.test(quotaText) ? Number(quotaText) : Number.NaN;
   const unit = parts.find((part) => part.startsWith("u="))?.slice(2);
-  if (!Number.isFinite(quota)) {
+  if (!Number.isSafeInteger(quota * 10_000_000)) {
     throw new ConiferPortabilityError(
       "helicone-ratelimit-policy",
       "could not read the quota from the policy string.",
