@@ -312,7 +312,13 @@ def ceiling_from_policy(policy: str) -> int:
         raise ConiferPortabilityError(
             "helicone-ratelimit-policy", "could not read the quota from the policy string."
         )
-    quota = int(parts[0])
+    try:
+        quota = int(parts[0])
+    except ValueError as cause:
+        # All digits, but longer than this interpreter's int() digit limit.
+        raise ConiferPortabilityError(
+            "helicone-ratelimit-policy", "could not read the quota from the policy string."
+        ) from cause
     unit = next((part[2:] for part in parts if part.startswith("u=")), None)
     if unit != "cents":
         raise ConiferPortabilityError(

@@ -907,6 +907,16 @@ class PortabilityTests(unittest.TestCase):
                 lambda q=quota: ceiling_from_policy(f"{q};w=60;u=cents"),
             )
 
+    def test_rate_limit_quota_past_the_int_digit_limit_is_refused(self):
+        # Python 3.11+ caps int() on long digit strings with a bare ValueError.
+        limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+        if not limit:
+            self.skipTest("this interpreter has no int() digit limit")
+        self.refuses(
+            "helicone-ratelimit-policy",
+            lambda: ceiling_from_policy("1" * (limit + 1) + ";w=60;u=cents"),
+        )
+
     def test_fallbacks_parse_from_either_shape(self):
         self.assertEqual(parse_fallbacks('["a","b"]'), ["a", "b"])
         self.assertEqual(parse_fallbacks('[{"model":"a"}]'), ["a"])
