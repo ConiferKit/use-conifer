@@ -53,12 +53,25 @@ export function chatHeaders(request: ChatRequest, idempotencyKey: string): Recor
   return headers;
 }
 
-/** A spend ceiling is an integer number of nanodollars. Fractions are refused, not rounded. */
+/**
+ * A spend ceiling is a non-negative integer number of nanodollars. Fractions
+ * are refused, not rounded; so is anything past `Number.MAX_SAFE_INTEGER`,
+ * where a `number` can no longer hold the exact amount.
+ */
 export function costCeiling(nanoUsd: number): string {
   if (!Number.isInteger(nanoUsd)) {
     throw new ConiferPortabilityError(
       "maxCostNanoUsd",
       "the cost ceiling is an integer nanodollar amount ($1 = 1e9). A fractional value is refused rather than rounded.",
+    );
+  }
+  if (nanoUsd < 0) {
+    throw new ConiferPortabilityError("maxCostNanoUsd", "the cost ceiling cannot be negative.");
+  }
+  if (!Number.isSafeInteger(nanoUsd)) {
+    throw new ConiferPortabilityError(
+      "maxCostNanoUsd",
+      "the cost ceiling is past Number.MAX_SAFE_INTEGER, where a number no longer holds the exact amount. It is refused rather than approximated.",
     );
   }
   return String(nanoUsd);

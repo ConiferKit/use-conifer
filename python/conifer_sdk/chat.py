@@ -74,6 +74,8 @@ def cost_ceiling(nano_usd: Any) -> str:
             "the cost ceiling is an INTEGER nanodollar amount ($1 = 1e9). A fractional "
             "value is refused rather than rounded.",
         )
+    if nano_usd < 0:
+        raise ConiferPortabilityError("max_cost_nano_usd", "the cost ceiling cannot be negative.")
     return str(nano_usd)
 
 

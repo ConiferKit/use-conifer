@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .client import DEFAULT_BASE_URL
@@ -307,9 +308,14 @@ def parse_fallbacks(raw: str) -> List[str]:
 def ceiling_from_policy(policy: str) -> int:
     """``[quota];w=[window];u=[unit];s=[segment]`` -> a nanodollar ceiling."""
     parts = [part.strip() for part in policy.split(";")]
+    if not re.fullmatch(r"[0-9]+", parts[0]):
+        raise ConiferPortabilityError(
+            "helicone-ratelimit-policy", "could not read the quota from the policy string."
+        )
     try:
         quota = int(parts[0])
-    except (ValueError, IndexError) as cause:
+    except ValueError as cause:
+        # All digits, but longer than this interpreter's int() digit limit.
         raise ConiferPortabilityError(
             "helicone-ratelimit-policy", "could not read the quota from the policy string."
         ) from cause

@@ -12,6 +12,21 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 
 ## [Unreleased]
 
+### Fixed
+
+- TypeScript `ceilingFromPolicy` now refuses a Helicone quota that is not
+  plain digits, as Python already did. `1.5;w=60;u=cents` used to become a
+  1 cent ceiling, and `10abc` or `1e3` were read as 10 and 1. Python now
+  refuses a signed or underscored quota too, so both accept the same quota
+  syntax. One difference remains: TypeScript also refuses a quota whose
+  converted ceiling exceeds `Number.MAX_SAFE_INTEGER` (about 900,000,000
+  cents), which Python accepts. A quota too long for Python's `int()` digit
+  limit is now refused as a portability error rather than a bare `ValueError`.
+- Both clients refuse a negative `maxCostNanoUsd` / `max_cost_nano_usd`
+  instead of sending it. TypeScript also refuses a ceiling above
+  `Number.MAX_SAFE_INTEGER`, which used to go out as `1e+21` or as a rounded
+  amount rather than the exact one.
+
 ## [0.2.1] - 2026-09-04
 
 ### Security
