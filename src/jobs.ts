@@ -32,11 +32,11 @@ export class JobsApi {
    * no result. Fetching starts the retention clock on the body.
    */
   async result(jobId: string): Promise<Completion> {
-    const { data, response } = await this.transport.request({
+    const { data, headers } = await this.transport.request({
       method: "GET",
       path: `/v1/deferred/${encodeURIComponent(jobId)}/result`,
     });
-    return toCompletion(data, readReceipt(response.headers), 0);
+    return toCompletion(data, readReceipt(headers), 0);
   }
 
   /** `POST /v1/deferred/{id}/cancel`. Unfinished work is refunded. */

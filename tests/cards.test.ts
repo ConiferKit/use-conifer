@@ -42,7 +42,14 @@ const portability = card("portability.card.json");
  */
 const gatewayContract = JSON.parse(
   readFileSync(here("../contracts/gateway-contract.json"), "utf8"),
-) as { receipt_headers: string[]; request_id_header: string; timeouts_secs: Record<string, number> };
+) as {
+  version: number;
+  receipt_headers: string[];
+  request_id_header: string;
+  provider_completion_choice_fields: string[];
+  incomplete_finish_reasons: string[];
+  timeouts_secs: Record<string, number>;
+};
 
 test("the SDK parses exactly the receipt headers the gateway emits", () => {
   const headers = new Headers();
@@ -60,12 +67,56 @@ test("the SDK parses exactly the receipt headers the gateway emits", () => {
     "reason",
     "endpoint",
     "costNanoUsd",
+    "pricingIdentity",
     "serviceTier",
     "receiptVenue",
     "counterfactualNanoUsd",
+    "pinFallback",
     "requestId",
   ]) {
     assert.ok(populated.includes(expected), `${expected} must be parsed`);
+  }
+});
+
+test("every gateway receipt header on its own lands on a parsed field", () => {
+  for (const name of gatewayContract.receipt_headers) {
+    const value = name.includes("components") ? "fresh=1,cache_write=2,cache_read=3,output=4" : "7";
+    const populated = Object.values(readReceipt(new Headers({ [name]: value }))).filter((field) => field !== undefined);
+    assert.ok(populated.length > 0, `${name} is emitted but never parsed`);
+  }
+});
+
+test("the vendored contract is the public v2 surface, without the private beta fields", async () => {
+  assert.equal(gatewayContract.version, 2);
+  for (const key of Object.keys(gatewayContract)) {
+    assert.ok(!key.startsWith("beta_") && key !== "model_management", `${key} is not part of the public contract`);
+  }
+  // The SDK's own list of what makes an error a charged one is the same list.
+  const { RECEIPT_HEADERS } = await import("../src/receipt.ts");
+  assert.deepEqual([...RECEIPT_HEADERS], gatewayContract.receipt_headers);
+});
+
+test("every incomplete finish in the contract is a non-success, and its provider fields surface", async () => {
+  const { toCompletion } = await import("../src/chat.ts");
+  const { incompleteReason } = await import("../src/types.ts");
+  const [reasonField, detailsField] = gatewayContract.provider_completion_choice_fields as [string, string];
+  for (const finish of gatewayContract.incomplete_finish_reasons) {
+    const completion = toCompletion(
+      {
+        choices: [{
+          finish_reason: finish,
+          message: { role: "assistant", content: "half an answer" },
+          [reasonField]: "native_reason",
+          [detailsField]: { type: "t", category: null },
+        }],
+      },
+      {},
+      0,
+    );
+    assert.equal(completion.finishReason, finish);
+    assert.equal(completion.providerStopReason, "native_reason");
+    assert.deepEqual(completion.providerStopDetails, { type: "t", category: null });
+    assert.ok(incompleteReason(completion) !== undefined, `${finish} must never read as a finished turn`);
   }
 });
 

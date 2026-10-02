@@ -118,14 +118,14 @@ export class Conifer {
     for (let index = 0; index < chain.length; index += 1) {
       const model = chain[index] as string;
       try {
-        const { data, response } = await this.transport.request({
+        const { data, headers } = await this.transport.request({
           method: "POST",
           path: "/v1/chat/completions",
           body: chatBody({ ...request, model }, false),
           headers: chatHeaders(request, index === 0 ? idempotencyKey : `${idempotencyKey}-${index}`),
           signal: request.signal,
         });
-        return toCompletion(data, readReceipt(response.headers), index);
+        return toCompletion(data, readReceipt(headers), index);
       } catch (error) {
         if (!(error instanceof ConiferError)) throw error;
         lastError = error;

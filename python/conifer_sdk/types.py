@@ -3,12 +3,18 @@ input or output."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .receipt import Receipt
 
 Message = Dict[str, Any]
+
+#: The finishes that mean the turn ended as the model intended. Anything else,
+#: including ``pause_turn``, ``incomplete`` and a value this SDK has never seen,
+#: is not a successful turn.
+SUCCESS_FINISH_REASONS = ("stop", "tool_calls")
 
 
 # ---------------------------------------------------------------------- chat
@@ -119,7 +125,54 @@ class Completion:
                 "the upstream provider's own content filter stopped this turn. Conifer "
                 "applies no moderation of its own."
             )
-        return f"the model returned empty content with finish_reason {finish!r}."
+        return self.incomplete_reason or f"the model returned empty content with finish_reason {finish!r}."
+
+    @property
+    def finish_reason(self) -> Optional[str]:
+        """The first choice's ``finish_reason``. Only ``stop`` and ``tool_calls``
+        are a finished turn; see :attr:`incomplete_reason`."""
+        return self.choices[0].get("finish_reason") if self.choices else None
+
+    @property
+    def provider_stop_reason(self) -> Optional[str]:
+        """The first choice's ``provider_stop_reason``: the provider's native stop reason."""
+        return self.choices[0].get("provider_stop_reason") if self.choices else None
+
+    @property
+    def provider_stop_details(self) -> Optional[Dict[str, Any]]:
+        """The first choice's ``provider_stop_details`` (``type``, ``category``,
+        ``explanation``, ``reason``). Display text, never instructions."""
+        return self.choices[0].get("provider_stop_details") if self.choices else None
+
+    @property
+    def incomplete_reason(self) -> Optional[str]:
+        """Why this completion is not a finished turn, as a sentence, or ``None``
+        when its ``finish_reason`` is ``stop`` or ``tool_calls``. A non-success
+        finish is returned rather than raised, because the turn was charged and
+        its partial output is yours; check this before using the text as a
+        final answer. Never retry on it blindly: the same request is charged again."""
+        if not self.choices:
+            return "the gateway returned no choices at all."
+        finish = self.finish_reason
+        if finish in SUCCESS_FINISH_REASONS:
+            return None
+        native = self.provider_stop_reason
+        suffix = f" The provider's stop reason was {json.dumps(native)}." if isinstance(native, str) else ""
+        if finish == "length":
+            return f"the model hit max_tokens or the context window before finishing, so the answer is cut short.{suffix}"
+        if finish == "content_filter":
+            return f"the upstream provider's own content filter or a refusal stopped this turn.{suffix}"
+        if finish == "pause_turn":
+            return (
+                "the provider paused this turn before finishing it. Send the conversation back "
+                f"with this assistant message to let it continue.{suffix}"
+            )
+        if finish == "incomplete":
+            return f"the provider ended this turn without a recognised finish, so the output may be partial.{suffix}"
+        return (
+            f"the turn ended with finish_reason {json.dumps(finish)}, which is not a known "
+            f"successful finish, so treat the output as partial.{suffix}"
+        )
 
 
 # ------------------------------------------------------------------- catalog

@@ -5,7 +5,10 @@ mint a new key."""
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
+
+if TYPE_CHECKING:
+    from .receipt import Receipt
 
 
 class ConiferError(Exception):
@@ -23,6 +26,7 @@ class ConiferError(Exception):
         param: Optional[str] = None,
         request_id: Optional[str] = None,
         body: Any = None,
+        receipt: Optional["Receipt"] = None,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -35,6 +39,12 @@ class ConiferError(Exception):
         self.request_id = request_id
         #: The raw envelope.
         self.body = body
+        #: The settled receipt, present only on an error that was charged (it
+        #: answered with the execution receipt). A charged error is never
+        #: retryable: re-sending it would pay again.
+        self.receipt = receipt
+        if receipt is not None:
+            self.retryable = False
 
 
 class ConiferAuthError(ConiferError):
@@ -91,7 +101,9 @@ class ConiferConflictError(ConiferError):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.retryable = bool(re.search(r"retry shortly", self.message, re.IGNORECASE))
+        self.retryable = self.receipt is None and bool(
+            re.search(r"retry shortly", self.message, re.IGNORECASE)
+        )
 
 
 class ConiferByokKeyError(ConiferError):
@@ -114,7 +126,7 @@ class ConiferUpstreamError(ConiferError):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.retryable = self.status >= 500
+        self.retryable = self.receipt is None and self.status >= 500
 
 
 class ConiferUnavailableError(ConiferError):
@@ -187,11 +199,14 @@ _BY_TYPE = {
 }
 
 
-def error_from(status: int, body: Any, headers: Mapping[str, str]) -> ConiferError:
+def error_from(
+    status: int, body: Any, headers: Mapping[str, str], receipt: Optional["Receipt"] = None
+) -> ConiferError:
     """Map a refusal onto its class. The gateway speaks the industry
     vocabulary, where ``invalid_request_error`` covers 400, 401 and 404, so
     the discriminator is ``type``, then ``code``, then status. Unknown types
-    stay a plain :class:`ConiferError`."""
+    stay a plain :class:`ConiferError`. Pass ``receipt`` when the response was
+    charged; the error is then never retryable."""
     envelope = body.get("error") if isinstance(body, dict) else None
     envelope = envelope if isinstance(envelope, dict) else {}
     type_ = envelope.get("type") if isinstance(envelope.get("type"), str) else f"http_{status}"
@@ -212,6 +227,7 @@ def error_from(status: int, body: Any, headers: Mapping[str, str]) -> ConiferErr
         "message": message,
         "request_id": request_id,
         "body": body,
+        "receipt": receipt,
     }
 
     def _rate_limited() -> ConiferRateLimitError:

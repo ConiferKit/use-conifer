@@ -7,7 +7,7 @@
 // tools/call) is small enough to implement directly, so this has no
 // dependency tree.
 
-import { Conifer, emptyReason } from "../src/index.ts";
+import { Conifer, emptyReason, incompleteReason } from "../src/index.ts";
 import { ConiferError } from "../src/errors.ts";
 import type { CatalogModel, Message } from "../src/types.ts";
 
@@ -116,6 +116,8 @@ export const TOOLS: ToolDefinition[] = [
         text: completion.choices[0]?.message?.content ?? "",
         // Why the text is empty, so the agent fixes the budget instead of retrying.
         empty_reason: emptyReason(completion),
+        // Why the turn did not finish, so a partial answer is not taken as final.
+        incomplete_reason: incompleteReason(completion),
         reasoning:
           completion.choices[0]?.message?.reasoning ??
           completion.choices[0]?.message?.reasoning_content,
@@ -171,6 +173,7 @@ export const TOOLS: ToolDefinition[] = [
                 note: "empty answer: the model spent its max_tokens on reasoning; raise max_tokens or set reasoning_effort on conifer_complete",
               }),
               empty_reason: emptyReason(completion),
+              incomplete_reason: incompleteReason(completion),
               cost_nanousd: completion.receipt.costNanoUsd,
               cost_usd: completion.receipt.costUsd,
               usage: completion.usage,

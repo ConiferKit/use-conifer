@@ -17,6 +17,7 @@ import {
   ConiferPortabilityError,
   ConiferRateLimitError,
   ConiferTimeoutError,
+  ConiferUnavailableError,
   ConiferUpstreamError,
   STREAM_IDLE_MS,
   type StreamChunk,
@@ -24,6 +25,7 @@ import {
   chatBody,
   chatHeaders,
   emptyReason,
+  incompleteReason,
   minimumBackoffMs,
   nanoUsdToUsdString,
   parseCostComponents,
@@ -1516,4 +1518,174 @@ test("a lease nobody releases does not keep the process alive", async () => {
   } finally {
     globalThis.setTimeout = realSetTimeout;
   }
+});
+
+// ---------------------------------------------------------------------------
+// Gateway contract v2: two receipt headers, non-success finishes, and the
+// stream keepalive.
+
+test("the pricing identity and the pin fallback are read off the receipt", () => {
+  const identity = `sha256:${"0f".repeat(32)}`;
+  const receipt = readReceipt(
+    new Headers({
+      "x-conifer-cost-components-nanousd": "fresh=1,cache_write=0,cache_read=0,output=2",
+      "x-conifer-pricing-identity": identity,
+      "x-conifer-receipt-pin-fallback": "breaker_open",
+    }),
+  );
+  assert.equal(receipt.pricingIdentity, identity);
+  assert.equal(receipt.pinFallback, "breaker_open");
+  // Append-only vocabulary: a value this SDK has never seen is kept, not dropped.
+  assert.equal(readReceipt(new Headers({ "x-conifer-receipt-pin-fallback": "overloaded" })).pinFallback, "overloaded");
+  assert.equal(readReceipt(new Headers()).pricingIdentity, undefined);
+  assert.equal(readReceipt(new Headers()).pinFallback, undefined);
+});
+
+function finishing(finish: unknown, extra: Record<string, unknown> = {}) {
+  return {
+    ...COMPLETION,
+    choices: [{ index: 0, finish_reason: finish, message: { role: "assistant", content: "half an answer" }, ...extra }],
+  };
+}
+
+test("stop and tool_calls are the only finished turns; every other finish is flagged", async () => {
+  for (const finish of ["stop", "tool_calls"]) {
+    const { fetchImpl } = stubFetch([jsonResponse(finishing(finish))]);
+    const answer = await client(fetchImpl).chat({ model: "m", messages: [] });
+    assert.equal(answer.finishReason, finish);
+    assert.equal(incompleteReason(answer), undefined);
+  }
+  const expected: Array<[unknown, RegExp]> = [
+    ["pause_turn", /paused this turn/],
+    ["incomplete", /without a recognised finish/],
+    ["length", /cut short/],
+    ["content_filter", /content filter/],
+    ["end_of_universe", /"end_of_universe", which is not a known successful finish/],
+    [null, /finish_reason null/],
+  ];
+  for (const [finish, sentence] of expected) {
+    const { fetchImpl } = stubFetch([jsonResponse(finishing(finish))]);
+    const answer = await client(fetchImpl).chat({ model: "m", messages: [] });
+    assert.equal(answer.finishReason, finish);
+    assert.match(incompleteReason(answer) ?? "", sentence, `finish ${JSON.stringify(finish)}`);
+    // The partial output and the receipt stay the caller's.
+    assert.equal(textOf(answer), "half an answer");
+  }
+});
+
+test("the provider's stop facts are exposed, absence stays absent and null stays null", async () => {
+  const details = { type: "server_tool", category: "web_search", explanation: "still searching", reason: null };
+  const { fetchImpl } = stubFetch([
+    jsonResponse(finishing("pause_turn", { provider_stop_reason: "pause_turn", provider_stop_details: details })),
+    jsonResponse(finishing("incomplete", { provider_stop_reason: null })),
+    jsonResponse(finishing("stop")),
+  ]);
+  const conifer = client(fetchImpl);
+  const paused = await conifer.chat({ model: "m", messages: [] });
+  assert.equal(paused.providerStopReason, "pause_turn");
+  assert.deepEqual(paused.providerStopDetails, details);
+  assert.match(incompleteReason(paused) ?? "", /stop reason was "pause_turn"/);
+
+  const nulled = await conifer.chat({ model: "m", messages: [] });
+  assert.equal(nulled.providerStopReason, null);
+  assert.equal("providerStopDetails" in nulled, false);
+
+  const plain = await conifer.chat({ model: "m", messages: [] });
+  assert.equal("providerStopReason" in plain, false);
+});
+
+test("a non-success finish is never retried and never advances the fallback chain", async () => {
+  const { calls, fetchImpl } = stubFetch([jsonResponse(finishing("pause_turn"))]);
+  const answer = await client(fetchImpl, { maxRetries: 2 }).chat({
+    model: "m",
+    messages: [],
+    fallbackModels: ["other"],
+    allowClientFallback: true,
+  });
+  assert.equal(calls.length, 1, "the paused turn was charged; another request would be charged again");
+  assert.equal(answer.fallbackIndex, 0);
+  assert.equal(answer.finishReason, "pause_turn");
+});
+
+test("an empty paused turn explains itself through emptyReason too", async () => {
+  const { fetchImpl } = stubFetch([
+    jsonResponse({ ...COMPLETION, choices: [{ finish_reason: "pause_turn", message: { role: "assistant", content: "" } }] }),
+  ]);
+  const answer = await client(fetchImpl).chat({ model: "m", messages: [] });
+  assert.match(emptyReason(answer) ?? "", /paused this turn/);
+});
+
+test("the stream idle bound is the gateway's 280 s stream idle cut", () => {
+  assert.equal(STREAM_IDLE_MS, 280_000);
+});
+
+const KEEPALIVE = ": keep-alive";
+
+test("a keep-alive comment yields nothing and restarts the idle clock", async () => {
+  // Four comments 30 ms apart under a 70 ms idle clock: only the comments keep it alive.
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      for (let i = 0; i < 4; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        controller.enqueue(encoder.encode(`${KEEPALIVE}\n\n`));
+      }
+      controller.enqueue(encoder.encode(`${PINE}\n\ndata: [DONE]\n\n`));
+      controller.close();
+    },
+  });
+  const { fetchImpl } = stubFetch([
+    new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+  ]);
+  const transport = new Transport({
+    baseUrl: "https://gw.test",
+    apiKey: "k",
+    fetch: fetchImpl,
+    timeoutMs: 10_000,
+    maxRetries: 0,
+    defaultHeaders: {},
+    streamIdleMs: 70,
+  });
+  const { makeStream } = await import("../src/stream.ts");
+  const { response, lease } = await transport.request({ method: "POST", path: "/v1/chat/completions", body: {}, raw: true });
+  const chunks: StreamChunk[] = [];
+  for await (const chunk of makeStream(response, lease)) chunks.push(chunk);
+  assert.deepEqual(chunks, [{ choices: [{ delta: { content: "pine" } }] }]);
+});
+
+test("a late in-band error on a committed stream raises the typed error", async () => {
+  // Committed as 200 text/event-stream at 15 s with the identity receipt and
+  // no cost; the failure arrives later as the chat door's in-band error.
+  const sse = [
+    KEEPALIVE,
+    KEEPALIVE,
+    'data: {"error":{"type":"service_unavailable","message":"no provider could serve this turn"}}',
+    "data: [DONE]",
+  ].map((frame) => `${frame}\n\n`).join("");
+  const { body } = byteBody(sse, [5, 20]);
+  const { fetchImpl } = stubFetch([
+    new Response(body, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "x-conifer-requested-model": "auto",
+        "x-conifer-request-id": "gw-late",
+      },
+    }),
+  ]);
+  const stream = await client(fetchImpl).stream({ model: "auto", messages: [] });
+  assert.equal((await stream.receipt()).requestedModel, "auto");
+  const chunks: StreamChunk[] = [];
+  await assert.rejects(
+    (async () => {
+      for await (const chunk of stream) chunks.push(chunk);
+    })(),
+    (error: unknown) => {
+      assert.ok(error instanceof ConiferUnavailableError, `got ${(error as Error).constructor.name}`);
+      assert.equal(error.requestId, "gw-late");
+      assert.equal(error.receipt, undefined, "a stream's identity head is not a charge");
+      return true;
+    },
+  );
+  assert.deepEqual(chunks, []);
 });

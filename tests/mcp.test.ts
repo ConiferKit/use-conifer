@@ -399,4 +399,28 @@ test("a normal answer carries no empty_reason to confuse the agent", async () =>
   );
   assert.equal(result.text, "pinecone");
   assert.equal(result.empty_reason, undefined);
+  assert.equal(result.incomplete_reason, undefined);
+});
+
+test("a paused turn tells the agent its text is partial, not final", async () => {
+  const { client } = stubClient([
+    json(
+      { choices: [{ finish_reason: "pause_turn", message: { role: "assistant", content: "Searching the web" } }] },
+      { headers: { "x-conifer-cost-nanousd": "1000" } },
+    ),
+  ]);
+  const result = payload(
+    await handle(
+      {
+        jsonrpc: "2.0",
+        id: 9,
+        method: "tools/call",
+        params: { name: "conifer_complete", arguments: { model: "m", prompt: "hi" } },
+      },
+      client,
+    ),
+  );
+  assert.equal(result.text, "Searching the web");
+  assert.match(result.incomplete_reason as string, /paused this turn/);
+  assert.equal(result.cost_nanousd, 1000);
 });

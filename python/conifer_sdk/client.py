@@ -33,7 +33,8 @@ from .errors import (
 )
 from .jobs import parse_frame, to_deferred_job  # noqa: F401  (re-exported)
 from .jobs import decode_frame, iter_frames
-from .receipt import Receipt, nano_usd_to_usd_string, read_receipt
+from .keepalive import is_committed, settle_committed
+from .receipt import Receipt, charged_receipt, nano_usd_to_usd_string, read_receipt
 from .transport import (  # noqa: F401  (re-exported)
     RETRYABLE_STATUS,
     USER_AGENT,
@@ -133,7 +134,10 @@ class Conifer:
         body: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> Tuple[Any, Dict[str, str]]:
-        """One request. Retries transport faults and retryable statuses with the same idempotency key."""
+        """One request. Retries transport faults and retryable statuses with the
+        same idempotency key, and never a charged error. The headers returned
+        are the ones to read the receipt from: on a response the gateway
+        committed before its answer existed, the receipt headers its body carries."""
         url = f"{self.base_url}{path}"
         merged = with_user_agent(self.default_headers, headers or {})
         merged["authorization"] = f"Bearer {self.api_key}"
@@ -171,10 +175,22 @@ class Conifer:
                 raise last from cause
 
             parsed = parse_json(text, status)
+            if is_committed(response_headers):
+                settled = settle_committed(parsed, response_headers)
+                if settled is None:
+                    last = ConiferConnectionError(
+                        "the connection ended inside a committed response, which is how the gateway "
+                        "ends an uncharged failure; a retry reuses the idempotency key"
+                    )
+                    if attempt < self.max_retries:
+                        time.sleep(backoff_seconds(attempt))
+                        continue
+                    raise last
+                status, response_headers, parsed = settled
             if 200 <= status < 300:
                 return parsed, response_headers
 
-            failure = error_from(status, parsed, response_headers)
+            failure = error_from(status, parsed, response_headers, charged_receipt(response_headers))
             if failure.retryable and status in RETRYABLE_STATUS and attempt < self.max_retries:
                 hinted = getattr(failure, "retry_after_seconds", None)
                 time.sleep(

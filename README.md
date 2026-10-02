@@ -83,6 +83,12 @@ console.log(answer.receipt.effectiveModel);       // "deepseek-v4-flash"
 console.log(answer.receipt.reason);               // "routed"
 ```
 
+When the router could not pick in time and the default model served instead,
+`receipt.pinFallback` (`pin_fallback` in Python) says why: `timeout`,
+`unavailable`, `breaker_open` or `saturated`, with more values possible later.
+`receipt.reason` reads `as_requested` on such a turn, so this field is what
+tells a skipped routing apart from a model you named.
+
 `auto` is the `balanced` policy: the router scores the question against every
 model you can call, keeps the ones predicted to answer it, and takes the best
 value among them. `best` ranks that same shortlist on ability alone and costs
@@ -142,6 +148,7 @@ const answer = await conifer.chat({
 console.log(textOf(answer));
 console.log(answer.receipt.costUsd);            // "0.001250000" — this exact call
 console.log(answer.receipt.costComponentsNanoUsd); // itemized across four token classes
+console.log(answer.receipt.pricingIdentity);       // "sha256:…" — the rate card that itemization used
 ```
 
 ```python

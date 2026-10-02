@@ -29,6 +29,9 @@ class Receipt:
     cost_nano_usd: Optional[int] = None
     cost_usd: Optional[str] = None
     cost_components_nano_usd: Optional[CostComponents] = None
+    #: The rate card the itemization was computed under, as ``sha256:<hex>``.
+    #: Sent only beside ``cost_components_nano_usd``.
+    pricing_identity: Optional[str] = None
     service_tier: Optional[str] = None
     #: The venue that served the turn.
     receipt_venue: Optional[str] = None
@@ -36,6 +39,11 @@ class Receipt:
     #: routed predicate holds, and never 0-as-guess: absence means "not
     #: applicable", not "no saving".
     counterfactual_nano_usd: Optional[int] = None
+    #: Why a router id served the default pin instead of a routed pick:
+    #: ``timeout``, ``unavailable``, ``breaker_open`` or ``saturated``. ``None``
+    #: when the router picked or was not involved. The vocabulary grows; treat
+    #: unknown values as opaque.
+    pin_fallback: Optional[str] = None
     cache: Optional[str] = None
     request_id: Optional[str] = None
 
@@ -98,9 +106,35 @@ def read_receipt(headers: Mapping[str, str]) -> Receipt:
         cost_components_nano_usd=parse_cost_components(
             lowered.get("x-conifer-cost-components-nanousd")
         ),
+        pricing_identity=lowered.get("x-conifer-pricing-identity"),
         service_tier=lowered.get("x-conifer-service-tier"),
         receipt_venue=lowered.get("x-conifer-receipt-venue"),
         counterfactual_nano_usd=integer("x-conifer-counterfactual-nanousd"),
+        pin_fallback=lowered.get("x-conifer-receipt-pin-fallback"),
         cache=lowered.get("x-conifer-cache"),
         request_id=lowered.get("x-conifer-request-id") or lowered.get("x-request-id"),
     )
+
+
+#: The execution receipt headers, in the gateway contract's order.
+RECEIPT_HEADERS = (
+    "x-conifer-requested-model",
+    "x-conifer-effective-model",
+    "x-conifer-receipt-reason",
+    "x-conifer-endpoint",
+    "x-conifer-cost-nanousd",
+    "x-conifer-cost-components-nanousd",
+    "x-conifer-pricing-identity",
+    "x-conifer-service-tier",
+    "x-conifer-receipt-venue",
+    "x-conifer-counterfactual-nanousd",
+    "x-conifer-receipt-pin-fallback",
+)
+
+
+def charged_receipt(headers: Mapping[str, str]) -> Optional[Receipt]:
+    """The receipt on an error response, or ``None`` when it carries none. The
+    gateway answers an error with the execution receipt only when the error was
+    charged, so its presence is the charge."""
+    lowered = {key.lower() for key in headers}
+    return read_receipt(headers) if any(name in lowered for name in RECEIPT_HEADERS) else None

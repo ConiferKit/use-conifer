@@ -12,7 +12,82 @@ CI; the judgement about whether an entry is worth reading is the reviewer's.
 
 ## [Unreleased]
 
+The gateway now commits slow answers before they exist, sends two new receipt
+headers, and reports turns that stopped without finishing. Upgrade if you make
+non-streaming calls that can run past about 285 seconds (failover walks,
+compositions, `model: "auto"` on long turns), or if a partial answer must not
+pass for a finished one.
+
+### Added
+
+- `receipt.pricingIdentity` (`pricing_identity` in Python) carries
+  `x-conifer-pricing-identity`, a `sha256:<hex>` name for the rate card the
+  cost itemization was computed under. The gateway sends it only beside
+  `costComponentsNanoUsd`, so you can tell a provider-settled receipt from an
+  estimate rebuilt against a local price table.
+- `receipt.pinFallback` (`pin_fallback`) carries
+  `x-conifer-receipt-pin-fallback`: why a router id (`auto`, `default`, a
+  policy) served the default model instead of a routed pick (`timeout`,
+  `unavailable`, `breaker_open` or `saturated`). `receipt.reason` still reads
+  `as_requested` on such a turn, so this is the only way to see that routing
+  was skipped. The value is kept as an opaque string because the gateway may
+  add new ones.
+- Completions expose the first choice's `finishReason`, `providerStopReason`
+  and `providerStopDetails` (`finish_reason`, `provider_stop_reason`,
+  `provider_stop_details` in Python), and a new `incompleteReason(completion)`
+  (`completion.incomplete_reason`) returns a sentence whenever the turn did not
+  finish. Only `stop` and `tool_calls` count as finished. `length`,
+  `content_filter`, the gateway's new `pause_turn` and `incomplete`, a missing
+  value and any value the SDK has never seen all return a reason.
+  **Decision:** a non-success finish is flagged, not thrown, the same way an
+  empty or `length` answer already is. The turn was charged, so its partial
+  output and receipt belong to the caller. A `pause_turn` is continued by
+  sending that output back, which a thrown error would make awkward. Neither
+  client retries such a turn or moves down a client-side fallback chain on it,
+  because the same request would be charged again. Check `incompleteReason`
+  before using `textOf(answer)` as a final answer. The MCP tools
+  `conifer_complete` and `conifer_compare` now return `incomplete_reason` too.
+- `ConiferError.receipt` (`receipt` in Python) holds the settled receipt of an
+  error that was charged, such as `output_budget_exhausted`. The gateway sends
+  the execution receipt on an error only when it charged for it.
+
+### Changed
+
+- The vendored gateway contract is now version 2, without the gateway's
+  private beta fields and model-management block. `STREAM_IDLE_MS` is now
+  280,000 (it was 120,000) to match the gateway's stream idle cut. Streams also
+  get a `: keep-alive` comment every 15 s, which yields no chunk and restarts
+  the idle clock. A stream the gateway commits before the answer exists
+  reports a late failure as an in-band error frame, which throws the same
+  typed error a refusal would.
+- A charged error is never retryable. `retryable` is `false` whenever
+  `receipt` is set, including on a 5xx or a "retry shortly" 409, so neither
+  the transport nor a client-side fallback chain re-sends it. In TypeScript,
+  `ConiferRateLimitError.retryable` and `ConiferUnavailableError.retryable`
+  are now typed `boolean` instead of the literal `true`.
+- `Transport.request()` also returns `headers`, the headers to read the
+  receipt from. Code that calls the transport directly and reads the receipt
+  from `response.headers` gets an empty receipt on a committed response and
+  should switch to `headers`.
+- `emptyReason` now explains an empty `pause_turn`, `incomplete` or unknown
+  finish with the same sentence as `incompleteReason`.
+
 ### Fixed
+
+- Non-streaming calls still running at 285 s were misread. The gateway now
+  answers them with a provisional `200` marked `x-conifer-keepalive:
+  committed`, sends whitespace heartbeats, and then sends the real body with
+  the real status and receipt headers appended as `conifer_receipt`. Both
+  clients used to return such an answer with an empty receipt. An error sent
+  this way came back as a successful completion with no choices. Now the
+  status and receipt are read from `conifer_receipt`, and that member is
+  removed from the data you get back. A charged error throws its proper class
+  with its receipt and request id, and is not retried. When the connection
+  drops partway through a committed body, which is how the gateway ends a
+  failure it did not charge for, both clients raise a retryable
+  `ConiferConnectionError` and retry it under the same idempotency key. The
+  300 s headers timeout still holds, because the gateway commits 15 s before
+  it, and the heartbeat body is not subject to it.
 
 - TypeScript `ceilingFromPolicy` now refuses a Helicone quota that is not
   plain digits, as Python already did. `1.5;w=60;u=cents` used to become a
