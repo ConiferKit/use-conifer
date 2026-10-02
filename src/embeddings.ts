@@ -26,7 +26,7 @@ export class Embeddings {
         "embeddings input must be text (a string, or an array of strings). Token-id arrays are refused.",
       );
     }
-    const { data, response } = await this.transport.request({
+    const { data, headers } = await this.transport.request({
       method: "POST",
       path: "/v1/embeddings",
       body: embeddingsBody(request),
@@ -35,7 +35,7 @@ export class Embeddings {
     });
     const payload = (data ?? {}) as Record<string, unknown>;
     const entries = (payload.data ?? []) as Record<string, unknown>[];
-    const receipt = readReceipt(response.headers);
+    const receipt = readReceipt(headers);
     return {
       object: payload.object as string | undefined,
       model: payload.model as string | undefined,

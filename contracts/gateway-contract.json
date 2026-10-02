@@ -1,6 +1,6 @@
 {
-  "_comment": "Conifer's public wire contract, vendored here and pinned by the SDK test suites. Do not edit by hand.",
-  "version": 1,
+  "_comment": "Conifer's public wire contract, vendored here and pinned by the SDK test suites. Do not edit by hand. Vendored from the gateway's generated contracts/gateway-contract.json v2 without its model_management block and its private beta_* fields; error_envelope is SDK-owned.",
+  "version": 2,
   "receipt_headers": [
     "x-conifer-requested-model",
     "x-conifer-effective-model",
@@ -8,11 +8,15 @@
     "x-conifer-endpoint",
     "x-conifer-cost-nanousd",
     "x-conifer-cost-components-nanousd",
+    "x-conifer-pricing-identity",
     "x-conifer-service-tier",
     "x-conifer-receipt-venue",
-    "x-conifer-counterfactual-nanousd"
+    "x-conifer-counterfactual-nanousd",
+    "x-conifer-receipt-pin-fallback"
   ],
   "request_id_header": "x-conifer-request-id",
+  "provider_completion_choice_fields": ["provider_stop_reason","provider_stop_details"],
+  "incomplete_finish_reasons": ["pause_turn","incomplete"],
   "error_envelope": {
     "_comment": "The API's error vocabulary, pinned by tests/errors.test.ts and python/tests/test_sdk.py. `type` alone is not a reliable discriminator: clients should discriminate on (type, code, status).",
     "types": [
@@ -54,6 +58,6 @@
     "edge_silent_cut": 300,
     "upstream": 280,
     "stream_max": 2400,
-    "stream_idle": 120
+    "stream_idle": 280
   }
 }

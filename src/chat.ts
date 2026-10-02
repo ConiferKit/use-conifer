@@ -160,10 +160,15 @@ export function withCost(
 /** A completion from a response body and its receipt. */
 export function toCompletion(data: unknown, receipt: Completion["receipt"], fallbackIndex: number): Completion {
   const payload = (data ?? {}) as Record<string, unknown>;
+  const choices = (payload.choices as Completion["choices"]) ?? [];
+  const first = choices[0];
   return {
     ...payload,
-    choices: (payload.choices as Completion["choices"]) ?? [],
+    choices,
     usage: withCost(payload.usage as Completion["usage"], receipt),
+    ...(first !== undefined && { finishReason: first.finish_reason ?? null }),
+    ...(first !== undefined && "provider_stop_reason" in first && { providerStopReason: first.provider_stop_reason }),
+    ...(first !== undefined && "provider_stop_details" in first && { providerStopDetails: first.provider_stop_details }),
     receipt,
     fallbackIndex,
   } as Completion;

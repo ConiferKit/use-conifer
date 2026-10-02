@@ -1,8 +1,11 @@
 // The one place the SDK touches the network. Retries are narrow (transport
 // faults and 429/5xx, plus the 409s that say "retry shortly") and every retry
-// of a POST reuses its idempotency key, so a retry cannot bill twice.
+// of a POST reuses its idempotency key, so a retry cannot bill twice. A
+// charged error is never retried.
 
 import { ConiferConnectionError, ConiferError, ConiferTimeoutError, errorFrom } from "./errors.ts";
+import { isCommitted, settleCommitted } from "./keepalive.ts";
+import { chargedReceipt, type HeaderReader } from "./receipt.ts";
 
 export type FetchLike = (
   input: string,
@@ -27,10 +30,11 @@ export interface TransportOptions {
 
 /**
  * `timeoutMs` bounds the wait for headers. A stream's body is read afterwards
- * over minutes, so it has its own idle clock that restarts on every byte.
+ * over minutes, so it has its own idle clock that restarts on every byte,
+ * including the gateway's `: keep-alive` comments (one per 15 s of silence).
  * This matches the gateway's own stream idle cut.
  */
-export const STREAM_IDLE_MS = 120_000;
+export const STREAM_IDLE_MS = 280_000;
 
 /** Keeps the caller's abort and the idle clock attached to a streaming body until it is done. */
 export interface StreamLease {
@@ -116,11 +120,20 @@ export class Transport {
     return headers;
   }
 
-  request(spec: RequestSpec & { raw: true }): Promise<{ data: undefined; response: Response; lease: StreamLease }>;
-  request(spec: RequestSpec): Promise<{ data: unknown; response: Response }>;
-  async request(spec: RequestSpec): Promise<{ data: unknown; response: Response; lease?: StreamLease }> {
+  /**
+   * One request. `headers` are the ones to read the receipt from: the
+   * response's own, or on a response the gateway committed before its answer
+   * existed, the receipt headers its body carries.
+   */
+  request(
+    spec: RequestSpec & { raw: true },
+  ): Promise<{ data: undefined; response: Response; headers: HeaderReader; lease: StreamLease }>;
+  request(spec: RequestSpec): Promise<{ data: unknown; response: Response; headers: HeaderReader }>;
+  async request(
+    spec: RequestSpec,
+  ): Promise<{ data: unknown; response: Response; headers: HeaderReader; lease?: StreamLease }> {
     const url = `${this.options.baseUrl}${spec.path}`;
-    const headers = this.headersFor(spec);
+    const requestHeaders = this.headersFor(spec);
     const body = spec.body === undefined ? undefined : JSON.stringify(spec.body);
     let lastError: ConiferError | undefined;
 
@@ -131,10 +144,17 @@ export class Transport {
       const onOuterAbort = () => controller.abort();
       spec.signal?.addEventListener("abort", onOuterAbort);
       let response: Response;
+      let status: number;
+      let headers: HeaderReader;
       let data: unknown;
       try {
         try {
-          response = await this.options.fetch(url, { method: spec.method, headers, body, signal: controller.signal });
+          response = await this.options.fetch(url, {
+            method: spec.method,
+            headers: requestHeaders,
+            body,
+            signal: controller.signal,
+          });
         } catch (cause) {
           if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");
           lastError = controller.signal.aborted
@@ -154,16 +174,37 @@ export class Transport {
 
         if (response.ok && spec.raw) {
           const lease = leaseStream(controller, spec.signal, this.options.streamIdleMs ?? STREAM_IDLE_MS);
-          return { data: undefined, response, lease };
+          return { data: undefined, response, headers: response.headers, lease };
         }
 
         // Headers end the timeout, but the caller still owns cancellation
         // until the JSON body has finished (including an HTTP error body).
+        const committed = isCommitted(response.headers);
+        let cut: unknown;
         data = await parseJson(response).catch((cause: unknown) => {
-          if (response.ok) throw cause;
+          if (committed) cut = cause;
+          else if (response.ok) throw cause;
           return undefined;
         });
         if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");
+        status = response.status;
+        headers = response.headers;
+        if (committed) {
+          const settled = cut === undefined ? settleCommitted(data, response.headers) : undefined;
+          if (settled === undefined) {
+            lastError = new ConiferConnectionError(
+              "the connection ended inside a committed response, which is how the gateway ends an uncharged failure; a retry reuses the idempotency key",
+              cut,
+            );
+            if (attempt < this.options.maxRetries) {
+              await sleep(backoffMs(attempt), spec.signal);
+              if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");
+              continue;
+            }
+            throw lastError;
+          }
+          ({ status, headers, data } = settled);
+        }
       } catch (cause) {
         if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");
         throw cause;
@@ -171,17 +212,17 @@ export class Transport {
         spec.signal?.removeEventListener("abort", onOuterAbort);
       }
 
-      if (response.ok) return { data, response };
+      if (status >= 200 && status < 300) return { data, response, headers };
 
-      const failure = errorFrom(response.status, data, response.headers);
-      const retryable = failure.retryable && RETRYABLE_STATUS.has(response.status);
+      const failure = errorFrom(status, data, headers, chargedReceipt(headers));
+      const retryable = failure.retryable && RETRYABLE_STATUS.has(status);
       if (retryable && attempt < this.options.maxRetries) {
         const hinted = (failure as { retryAfterSeconds?: number }).retryAfterSeconds;
         // `retry-after` is honoured up to the request's own timeout.
         await sleep(
           hinted !== undefined
             ? Math.min(hinted * 1000, this.options.timeoutMs)
-            : Math.max(backoffMs(attempt), minimumBackoffMs(response.status)),
+            : Math.max(backoffMs(attempt), minimumBackoffMs(status)),
           spec.signal,
         );
         if (spec.signal?.aborted) throw new ConiferTimeoutError("the caller aborted this request");

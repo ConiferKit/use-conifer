@@ -2307,3 +2307,420 @@ class TypeHintsAreVisible(unittest.TestCase):
             (pkg_dir / "py.typed").is_file(),
             f"py.typed is not next to the imported package at {pkg_dir}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Gateway contract v2. Twin of tests/keepalive.test.ts and the v2 block at the
+# end of tests/client.test.ts.
+
+SETTLED = {
+    "x-conifer-requested-model": "auto",
+    "x-conifer-effective-model": "gpt-6-astra",
+    "x-conifer-receipt-reason": "routed",
+    "x-conifer-endpoint": "credits",
+    "x-conifer-cost-nanousd": "4200000",
+    "x-conifer-cost-components-nanousd": "fresh=4000000,cache_write=0,cache_read=0,output=200000",
+    "x-conifer-pricing-identity": "sha256:" + "ab" * 32,
+    "x-conifer-receipt-venue": "cloud",
+}
+
+COMMITTED_HEAD = {
+    "content-type": "application/json",
+    "x-conifer-keepalive": "committed",
+    "cache-control": "no-transform",
+    "x-conifer-request-id": "gw-slow",
+}
+
+FINISHED = {
+    "id": "chatcmpl-1",
+    "model": "gpt-6-astra",
+    "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "pinecone"}}],
+    "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+}
+
+
+def committed_body(door, status, headers):
+    """Heartbeat whitespace, then the door's JSON with its receipt appended last."""
+    return "   " + json.dumps({**door, "conifer_receipt": {"status": status, "headers": headers}})
+
+
+def raw_scripted(*responses):
+    """Like :func:`scripted`, but each response is (status, headers, text or exception)."""
+    calls = []
+    queue = list(responses)
+
+    def transport(method, url, headers, body, timeout):
+        calls.append({"headers": headers, "timeout": timeout})
+        status, response_headers, text = queue.pop(0)
+        if isinstance(text, BaseException):
+            raise text
+        return status, response_headers, text
+
+    return calls, transport
+
+
+class GatewayContractV2(unittest.TestCase):
+    def test_the_vendored_contract_is_the_public_v2_surface(self):
+        contract = _contract()
+        self.assertEqual(contract["version"], 2)
+        for key in contract:
+            self.assertFalse(key.startswith("beta_") or key == "model_management", key)
+        from conifer_sdk.receipt import RECEIPT_HEADERS
+
+        self.assertEqual(list(RECEIPT_HEADERS), contract["receipt_headers"])
+
+    def test_every_gateway_receipt_header_lands_on_a_parsed_field(self):
+        for name in _contract()["receipt_headers"]:
+            value = "fresh=1,cache_write=2,cache_read=3,output=4" if "components" in name else "7"
+            receipt = read_receipt({name: value})
+            populated = [v for v in receipt.__dict__.values() if v is not None]
+            self.assertTrue(populated, f"{name} is emitted but never parsed")
+
+    def test_the_pricing_identity_and_the_pin_fallback_are_read(self):
+        identity = "sha256:" + "0f" * 32
+        receipt = read_receipt(
+            {
+                "X-Conifer-Cost-Components-Nanousd": "fresh=1,cache_write=0,cache_read=0,output=2",
+                "x-conifer-pricing-identity": identity,
+                "x-conifer-receipt-pin-fallback": "breaker_open",
+            }
+        )
+        self.assertEqual(receipt.pricing_identity, identity)
+        self.assertEqual(receipt.pin_fallback, "breaker_open")
+        # Append-only vocabulary: an unseen value is kept, not dropped.
+        self.assertEqual(read_receipt({"x-conifer-receipt-pin-fallback": "overloaded"}).pin_fallback, "overloaded")
+        self.assertIsNone(read_receipt({}).pricing_identity)
+        self.assertIsNone(read_receipt({}).pin_fallback)
+
+    def test_every_incomplete_finish_in_the_contract_is_a_non_success(self):
+        contract = _contract()
+        reason_field, details_field = contract["provider_completion_choice_fields"]
+        for finish in contract["incomplete_finish_reasons"]:
+            choice = {
+                "finish_reason": finish,
+                "message": {"role": "assistant", "content": "half an answer"},
+                reason_field: "native_reason",
+                details_field: {"type": "t", "category": None},
+            }
+            _, transport = scripted((200, {}, {"choices": [choice]}))
+            completion = client(transport).chat(ChatRequest(model="m", messages=[]))
+            self.assertEqual(completion.finish_reason, finish)
+            self.assertEqual(completion.provider_stop_reason, "native_reason")
+            self.assertEqual(completion.provider_stop_details, {"type": "t", "category": None})
+            self.assertIsNotNone(completion.incomplete_reason, f"{finish} must never read as finished")
+
+    def test_the_stream_idle_cut_is_280_seconds(self):
+        self.assertEqual(_contract()["timeouts_secs"]["stream_idle"], 280)
+
+
+def _finishing(finish, **extra):
+    return {
+        **FINISHED,
+        "choices": [{"index": 0, "finish_reason": finish, "message": {"role": "assistant", "content": "half an answer"}, **extra}],
+    }
+
+
+class NonSuccessFinishes(unittest.TestCase):
+    def test_stop_and_tool_calls_are_the_only_finished_turns(self):
+        for finish in ("stop", "tool_calls"):
+            _, transport = scripted((200, {}, _finishing(finish)))
+            answer = client(transport).chat(ChatRequest(model="m", messages=[]))
+            self.assertEqual(answer.finish_reason, finish)
+            self.assertIsNone(answer.incomplete_reason)
+        for finish, sentence in (
+            ("pause_turn", r"paused this turn"),
+            ("incomplete", r"without a recognised finish"),
+            ("length", r"cut short"),
+            ("content_filter", r"content filter"),
+            ("end_of_universe", r'"end_of_universe", which is not a known successful finish'),
+            (None, r"finish_reason null"),
+        ):
+            _, transport = scripted((200, {}, _finishing(finish)))
+            answer = client(transport).chat(ChatRequest(model="m", messages=[]))
+            self.assertEqual(answer.finish_reason, finish)
+            self.assertRegex(answer.incomplete_reason or "", sentence)
+            self.assertEqual(answer.text, "half an answer")
+
+    def test_the_providers_stop_facts_are_exposed(self):
+        details = {"type": "server_tool", "category": "web_search", "explanation": "still searching", "reason": None}
+        _, transport = scripted(
+            (200, {}, _finishing("pause_turn", provider_stop_reason="pause_turn", provider_stop_details=details))
+        )
+        paused = client(transport).chat(ChatRequest(model="m", messages=[]))
+        self.assertEqual(paused.provider_stop_reason, "pause_turn")
+        self.assertEqual(paused.provider_stop_details, details)
+        self.assertRegex(paused.incomplete_reason, r'stop reason was "pause_turn"')
+
+    def test_a_non_success_finish_is_never_retried_nor_advances_the_chain(self):
+        calls, transport = scripted((200, {}, _finishing("pause_turn")))
+        answer = Conifer(api_key="k", transport=transport, max_retries=2).chat(
+            ChatRequest(model="m", messages=[], fallback_models=["other"], allow_client_fallback=True)
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(answer.fallback_index, 0)
+        self.assertEqual(answer.finish_reason, "pause_turn")
+
+    def test_an_empty_paused_turn_explains_itself_through_empty_reason_too(self):
+        _, transport = scripted(
+            (200, {}, {"choices": [{"finish_reason": "pause_turn", "message": {"role": "assistant", "content": ""}}]})
+        )
+        answer = client(transport).chat(ChatRequest(model="m", messages=[]))
+        self.assertRegex(answer.empty_reason, r"paused this turn")
+
+
+class ResponseKeepalive(unittest.TestCase):
+    def test_a_committed_success_reads_its_receipt_from_the_body(self):
+        _, transport = raw_scripted((200, COMMITTED_HEAD, committed_body(FINISHED, 200, SETTLED)))
+        answer = client(transport).chat(ChatRequest(model="auto", messages=[]))
+        self.assertEqual(answer.text, "pinecone")
+        self.assertEqual(answer.receipt.cost_nano_usd, 4_200_000)
+        self.assertEqual(answer.receipt.effective_model, "gpt-6-astra")
+        self.assertEqual(answer.receipt.pricing_identity, "sha256:" + "ab" * 32)
+        self.assertEqual(answer.receipt.request_id, "gw-slow")
+        self.assertEqual(answer.usage["cost_nanousd"], 4_200_000)
+        self.assertNotIn("conifer_receipt", answer.raw)
+
+    def test_a_committed_embeddings_answer_settles_the_same_way(self):
+        door = {"object": "list", "model": "e", "data": [{"index": 0, "embedding": [0.5, 0.25]}]}
+        _, transport = raw_scripted((200, COMMITTED_HEAD, committed_body(door, 200, SETTLED)))
+        response = client(transport).embed(EmbeddingsRequest(model="e", input="hi", encoding_format="float"))
+        self.assertEqual(response.data[0].embedding, [0.5, 0.25])
+        self.assertEqual(response.receipt.cost_nano_usd, 4_200_000)
+        self.assertNotIn("conifer_receipt", response.raw)
+
+    def test_a_charged_error_after_the_commit_raises_its_class_with_its_receipt_and_is_never_retried(self):
+        from conifer_sdk import ConiferUpstreamError
+
+        door = {"error": {"type": "upstream_error", "message": "the answer could not be re-rendered"}}
+        calls, transport = raw_scripted(
+            (200, COMMITTED_HEAD, committed_body(door, 502, SETTLED)),
+            (200, COMMITTED_HEAD, committed_body(FINISHED, 200, SETTLED)),
+        )
+        with self.assertRaises(ConiferUpstreamError) as caught:
+            Conifer(api_key="k", transport=transport, max_retries=2).chat(
+                ChatRequest(model="auto", messages=[], fallback_models=["other"], allow_client_fallback=True)
+            )
+        self.assertEqual(caught.exception.status, 502)
+        self.assertEqual(caught.exception.request_id, "gw-slow")
+        self.assertEqual(caught.exception.receipt.cost_nano_usd, 4_200_000)
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_charged_output_budget_error_carries_what_it_cost(self):
+        door = {"error": {"type": "output_budget_exhausted", "param": "max_tokens", "message": "Usage for this attempt was settled."}}
+        calls, transport = raw_scripted((200, COMMITTED_HEAD, committed_body(door, 422, SETTLED)))
+        with self.assertRaises(ConiferError) as caught:
+            Conifer(api_key="k", transport=transport, max_retries=2).chat(ChatRequest(model="auto", messages=[]))
+        self.assertEqual(caught.exception.status, 422)
+        self.assertEqual(caught.exception.type, "output_budget_exhausted")
+        self.assertEqual(caught.exception.receipt.cost_usd, "0.004200000")
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_committed_body_without_its_receipt_was_cut_and_is_retried_under_the_same_key(self):
+        from conifer_sdk import ConiferConnectionError
+
+        for text in ("   ", '  {"id":"chatcmpl-1","choices":[]', json.dumps(FINISHED)):
+            calls, transport = raw_scripted(
+                (200, COMMITTED_HEAD, text),
+                (200, COMMITTED_HEAD, committed_body(FINISHED, 200, SETTLED)),
+            )
+            with patch("conifer_sdk.client.time.sleep"):
+                answer = Conifer(api_key="k", transport=transport, max_retries=1).chat(
+                    ChatRequest(model="auto", messages=[])
+                )
+            self.assertEqual(answer.text, "pinecone")
+            self.assertEqual(calls[0]["headers"]["idempotency-key"], calls[1]["headers"]["idempotency-key"])
+
+            _, transport = raw_scripted((200, COMMITTED_HEAD, text))
+            with self.assertRaises(ConiferConnectionError) as caught:
+                client(transport).chat(ChatRequest(model="auto", messages=[]))
+            self.assertTrue(caught.exception.retryable)
+
+    def test_an_error_that_answers_with_the_execution_receipt_was_charged(self):
+        from conifer_sdk import ConiferUpstreamError
+
+        calls, transport = scripted(
+            (502, SETTLED, {"error": {"type": "upstream_error", "message": "re-render failed"}}),
+            (200, SETTLED, FINISHED),
+        )
+        with self.assertRaises(ConiferUpstreamError) as caught:
+            Conifer(api_key="k", transport=transport, max_retries=2).chat(ChatRequest(model="m", messages=[]))
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(caught.exception.receipt.effective_model, "gpt-6-astra")
+        self.assertEqual(len(calls), 1)
+
+    def test_an_uncharged_error_is_unchanged(self):
+        calls, transport = scripted(
+            (503, {}, {"error": {"type": "service_unavailable", "message": "down"}}),
+            (200, SETTLED, FINISHED),
+        )
+        with patch("conifer_sdk.client.time.sleep"):
+            Conifer(api_key="k", transport=transport, max_retries=1).chat(ChatRequest(model="m", messages=[]))
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(error_from(503, {}, {}).receipt)
+
+
+class _Gateway:
+    """A raw HTTP/1.1 server on a real socket, one scripted handler per connection."""
+
+    def __init__(self, *handlers):
+        import socket
+        import threading
+
+        self.handlers = list(handlers)
+        self.served = 0
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}"
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self._read_request(conn)
+            handler = self.handlers[min(self.served, len(self.handlers) - 1)]
+            self.served += 1
+            try:
+                handler(conn)
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _read_request(conn):
+        """The whole request, so closing the socket sends a clean FIN, not a reset."""
+        data = b""
+        while b"\r\n\r\n" not in data:
+            data += conn.recv(65536)
+        head, _, body = data.partition(b"\r\n\r\n")
+        length = next(
+            (int(line.split(b":", 1)[1]) for line in head.split(b"\r\n") if line.lower().startswith(b"content-length:")),
+            0,
+        )
+        while len(body) < length:
+            body += conn.recv(65536)
+
+    def close(self):
+        self.sock.close()
+
+
+HEAD = (
+    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nx-conifer-keepalive: committed\r\n"
+    b"cache-control: no-transform\r\nx-conifer-request-id: gw-socket\r\ntransfer-encoding: chunked\r\n"
+    b"connection: close\r\n\r\n"
+)
+
+
+def _chunk(text):
+    data = text.encode() if isinstance(text, str) else text
+    return f"{len(data):x}\r\n".encode() + data + b"\r\n"
+
+
+class ResponseKeepaliveOverASocket(unittest.TestCase):
+    """The default urllib transport against the bytes a committed response puts on the wire."""
+
+    def test_an_aborted_committed_failure_is_retried_and_the_answer_settles(self):
+        def aborted(conn):
+            door = {"error": {"type": "upstream_error", "message": "provider timed out"}}
+            conn.sendall(HEAD + _chunk(" ") + _chunk(json.dumps({**door, "conifer_receipt": {"status": 503, "headers": {}}})))
+            # No terminating chunk: the gateway aborts an uncharged failure.
+
+        def answered(conn):
+            conn.sendall(HEAD + _chunk(" ") + _chunk(committed_body(FINISHED, 200, SETTLED)) + b"0\r\n\r\n")
+
+        gateway = _Gateway(aborted, answered)
+        try:
+            with patch("conifer_sdk.client.time.sleep"):
+                answer = Conifer(api_key="k", base_url=gateway.url, max_retries=1).chat(
+                    ChatRequest(model="auto", messages=[])
+                )
+        finally:
+            gateway.close()
+        self.assertEqual(answer.text, "pinecone")
+        self.assertEqual(answer.receipt.cost_nano_usd, 4_200_000)
+        self.assertEqual(answer.receipt.request_id, "gw-socket")
+        self.assertEqual(gateway.served, 2)
+
+    def test_an_aborted_committed_failure_with_no_retries_left_is_a_connection_error(self):
+        from conifer_sdk import ConiferConnectionError
+
+        def aborted(conn):
+            conn.sendall(HEAD + _chunk(" ") + _chunk('{"error":{"type":"upstream_error","message":"timed out"}'))
+
+        gateway = _Gateway(aborted)
+        try:
+            with self.assertRaises(ConiferConnectionError):
+                Conifer(api_key="k", base_url=gateway.url, max_retries=0).chat(ChatRequest(model="auto", messages=[]))
+        finally:
+            gateway.close()
+
+    def test_the_timeout_outlasts_the_commit_and_heartbeats_keep_the_body_alive(self):
+        # urllib's timeout bounds each socket wait, so the 300 s default beats
+        # the 285 s commit and every 10 s heartbeat restarts it. Scaled 1000x:
+        # head at 0.285 s, timeout 0.3 s, heartbeats every 0.1 s, answer at 0.6 s.
+        import time as clock
+
+        from conifer_sdk import DEFAULT_TIMEOUT_SECONDS
+
+        self.assertGreater(DEFAULT_TIMEOUT_SECONDS, 285)
+
+        def slow(conn):
+            clock.sleep(0.285)
+            conn.sendall(HEAD + _chunk(" "))
+            for _ in range(3):
+                clock.sleep(0.1)
+                conn.sendall(_chunk(" "))
+            conn.sendall(_chunk(committed_body(FINISHED, 200, SETTLED)) + b"0\r\n\r\n")
+
+        gateway = _Gateway(slow)
+        try:
+            answer = Conifer(api_key="k", base_url=gateway.url, timeout=0.3, max_retries=0).chat(
+                ChatRequest(model="auto", messages=[])
+            )
+        finally:
+            gateway.close()
+        self.assertEqual(answer.text, "pinecone")
+        self.assertEqual(answer.receipt.cost_nano_usd, 4_200_000)
+
+
+class StreamKeepalive(unittest.TestCase):
+    def test_a_keep_alive_comment_yields_nothing(self):
+        body = SseResponse(
+            b": keep-alive\n\n: keep-alive\n\n"
+            b'data: {"choices":[{"delta":{"content":"pine"}}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        with patch("conifer_sdk.client.urllib.request.urlopen", return_value=body):
+            chunks = list(Conifer(api_key="test").stream(ChatRequest(model="m", messages=[])))
+        self.assertEqual(chunks, [{"choices": [{"delta": {"content": "pine"}}]}])
+
+    def test_a_late_in_band_error_on_a_committed_stream_raises_the_typed_error(self):
+        from conifer_sdk import ConiferUnavailableError
+
+        class Committed(SseResponse):
+            headers = {
+                "content-type": "text/event-stream",
+                "x-conifer-requested-model": "auto",
+                "X-Conifer-Request-Id": "gw-late",
+            }
+
+        body = Committed(
+            b": keep-alive\n\n: keep-alive\n\n"
+            b'data: {"error":{"type":"service_unavailable","message":"no provider could serve this turn"}}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        c = Conifer(api_key="test")
+        seen = []
+        with patch("conifer_sdk.client.urllib.request.urlopen", return_value=body):
+            with self.assertRaises(ConiferUnavailableError) as caught:
+                for chunk in c.stream(ChatRequest(model="auto", messages=[])):
+                    seen.append(chunk)
+        self.assertEqual(seen, [])
+        self.assertEqual(c.stream_receipt.requested_model, "auto")
+        self.assertEqual(caught.exception.request_id, "gw-late")
+        self.assertIsNone(caught.exception.receipt)
+        self.assertTrue(body.closed)

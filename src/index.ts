@@ -21,6 +21,8 @@ export { parseFrame } from "./stream.ts";
 export {
   textOf,
   emptyReason,
+  incompleteReason,
+  SUCCESS_FINISH_REASONS,
   vectorOf,
   isTerminalJob,
   TERMINAL_JOB_STATUSES,
@@ -38,6 +40,7 @@ export type {
   EmbeddingsResponse,
   Message,
   JobStatus,
+  ProviderStopDetails,
   Role,
   RouteDecision,
   RoutePolicy,
@@ -51,7 +54,7 @@ export {
   parseCostComponents,
   readReceipt,
 } from "./receipt.ts";
-export type { CostComponents, Receipt } from "./receipt.ts";
+export type { CostComponents, HeaderReader, Receipt } from "./receipt.ts";
 
 export {
   ConiferAuthError,

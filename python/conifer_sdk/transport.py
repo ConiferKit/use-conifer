@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import random
 import ssl
@@ -11,6 +12,7 @@ import urllib.request
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from . import __version__
+from .keepalive import is_committed
 
 #: (status, lower-cased headers, body text)
 TransportResult = Tuple[int, Dict[str, str], str]
@@ -39,15 +41,19 @@ def ssl_context() -> Optional["ssl.SSLContext"]:
 def urllib_transport(
     method: str, url: str, headers: Dict[str, str], body: Optional[bytes], timeout: float
 ) -> TransportResult:
-    """The default transport. An HTTP error status is a result, not an exception."""
+    """The default transport. An HTTP error status is a result, not an exception.
+    A committed response whose body is cut raises :class:`ConnectionError`."""
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout, context=ssl_context()) as response:
-            return (
-                response.status,
-                {key.lower(): value for key, value in response.headers.items()},
-                response.read().decode("utf-8"),
-            )
+            received = {key.lower(): value for key, value in response.headers.items()}
+            try:
+                text = response.read().decode("utf-8")
+            except (http.client.IncompleteRead, ConnectionError) as cause:
+                if not is_committed(received):
+                    raise
+                raise ConnectionError("the connection ended inside a committed response") from cause
+            return response.status, received, text
     except urllib.error.HTTPError as error:
         return (
             error.code,

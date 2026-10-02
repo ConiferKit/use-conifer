@@ -73,6 +73,7 @@ from .types import (
     ROUTE_POLICIES,
     RouteDecision,
     RouteRequest,
+    SUCCESS_FINISH_REASONS,
     vector_of,
 )
 
@@ -124,6 +125,7 @@ __all__ = [
     "nano_usd_to_usd_string",
     "ChatRequest",
     "Completion",
+    "SUCCESS_FINISH_REASONS",
     "CatalogModel",
     "Balance",
     "ROUTE_POLICIES",

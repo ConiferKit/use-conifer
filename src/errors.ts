@@ -2,6 +2,8 @@
 // status: a 402 alone does not say whether to add credit, raise a ceiling,
 // or mint a new key.
 
+import type { Receipt } from "./receipt.ts";
+
 export interface ConiferErrorInit {
   status: number;
   type: string;
@@ -13,6 +15,8 @@ export interface ConiferErrorInit {
   requestId?: string;
   /** The raw envelope. */
   body?: unknown;
+  /** The settled receipt of an error that was charged. */
+  receipt?: Receipt;
 }
 
 export class ConiferError extends Error {
@@ -22,6 +26,12 @@ export class ConiferError extends Error {
   readonly param?: string;
   readonly requestId?: string;
   readonly body?: unknown;
+  /**
+   * The settled receipt, present only on an error that was charged (it
+   * answered with the execution receipt). A charged error is never retryable:
+   * re-sending it would pay again.
+   */
+  readonly receipt?: Receipt;
   /** Whether re-sending the same bytes could succeed. Transport faults and 429/5xx only. */
   readonly retryable: boolean = false;
 
@@ -34,6 +44,7 @@ export class ConiferError extends Error {
     this.param = init.param;
     this.requestId = init.requestId;
     this.body = init.body;
+    this.receipt = init.receipt;
   }
 }
 
@@ -92,7 +103,7 @@ export class ConiferConflictError extends ConiferError {
   readonly retryable: boolean;
   constructor(init: ConiferErrorInit) {
     super(init);
-    this.retryable = /retry shortly/i.test(init.message);
+    this.retryable = /retry shortly/i.test(init.message) && init.receipt === undefined;
   }
 }
 
@@ -101,7 +112,7 @@ export class ConiferByokKeyError extends ConiferError {}
 
 /** 429. */
 export class ConiferRateLimitError extends ConiferError {
-  readonly retryable = true;
+  readonly retryable: boolean = this.receipt === undefined;
   /** From the `retry-after` header, when sent. */
   readonly retryAfterSeconds?: number;
   constructor(init: ConiferErrorInit & { retryAfterSeconds?: number }) {
@@ -115,13 +126,13 @@ export class ConiferUpstreamError extends ConiferError {
   readonly retryable: boolean;
   constructor(init: ConiferErrorInit) {
     super(init);
-    this.retryable = init.status >= 500;
+    this.retryable = init.status >= 500 && init.receipt === undefined;
   }
 }
 
 /** 503. */
 export class ConiferUnavailableError extends ConiferError {
-  readonly retryable = true;
+  readonly retryable: boolean = this.receipt === undefined;
 }
 
 /** No verdict arrived in time. Whether the turn was billed is unknown. */
@@ -182,8 +193,14 @@ function rateLimit(init: ConiferErrorInit, headers: { get(name: string): string 
  * where `invalid_request_error` covers 400, 401 and 404, so the discriminator
  * is `type`, then `code`, then status. The gateway's retired private type
  * names are still accepted. Unknown types stay a plain `ConiferError`.
+ * Pass `receipt` when the response was charged; the error is then never retryable.
  */
-export function errorFrom(status: number, body: unknown, headers: { get(name: string): string | null }): ConiferError {
+export function errorFrom(
+  status: number,
+  body: unknown,
+  headers: { get(name: string): string | null },
+  receipt?: Receipt,
+): ConiferError {
   const envelope =
     typeof body === "object" && body !== null && "error" in body
       ? ((body as { error: unknown }).error as Record<string, unknown>)
@@ -193,7 +210,7 @@ export function errorFrom(status: number, body: unknown, headers: { get(name: st
   const param = typeof envelope?.param === "string" ? envelope.param : undefined;
   const message = typeof envelope?.message === "string" ? envelope.message : `the gateway refused with HTTP ${status}`;
   const requestId = headers.get("x-conifer-request-id") ?? headers.get("x-request-id") ?? undefined;
-  const init: ConiferErrorInit = { status, type, code, param, message, requestId, body };
+  const init: ConiferErrorInit = { status, type, code, param, message, requestId, body, receipt };
 
   if (type === "invalid_request_error") {
     if (code === "invalid_api_key" || status === 401 || status === 403) return new ConiferAuthError(init);

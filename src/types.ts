@@ -85,9 +85,27 @@ export interface Usage {
   [extra: string]: unknown;
 }
 
+/** The provider's own account of why a turn stopped. Display text, never instructions. */
+export interface ProviderStopDetails {
+  type?: string | null;
+  category?: string | null;
+  explanation?: string | null;
+  reason?: string | null;
+}
+
+/**
+ * The finishes that mean the turn ended as the model intended. Anything else,
+ * including `pause_turn`, `incomplete` and a value this SDK has never seen, is
+ * not a successful turn.
+ */
+export const SUCCESS_FINISH_REASONS: readonly string[] = ["stop", "tool_calls"];
+
 export interface Choice {
   index?: number;
   finish_reason?: string | null;
+  /** The provider's native stop reason. Absent when unavailable. */
+  provider_stop_reason?: string | null;
+  provider_stop_details?: ProviderStopDetails | null;
   message?: {
     role?: string;
     content?: string | null;
@@ -109,6 +127,12 @@ export interface Completion {
   model?: string;
   choices: Choice[];
   usage?: Usage;
+  /** The first choice's `finish_reason`. Only `stop` and `tool_calls` are a finished turn; see `incompleteReason`. */
+  finishReason?: string | null;
+  /** The first choice's `provider_stop_reason`, when the gateway sent one. */
+  providerStopReason?: string | null;
+  /** The first choice's `provider_stop_details`, when the gateway sent them. */
+  providerStopDetails?: ProviderStopDetails | null;
   /** The `x-conifer-*` headers, parsed. */
   receipt: Receipt;
   /** Which chain member served. 0 is the model you asked for. */
@@ -145,7 +169,39 @@ export function emptyReason(completion: Completion): string | undefined {
   if (choice.finish_reason === "content_filter") {
     return "the upstream provider's own content filter stopped this turn. Conifer applies no moderation of its own.";
   }
-  return `the model returned empty content with finish_reason ${JSON.stringify(choice.finish_reason)}.`;
+  return (
+    incompleteReason(completion) ??
+    `the model returned empty content with finish_reason ${JSON.stringify(choice.finish_reason)}.`
+  );
+}
+
+/**
+ * Why a completion is not a finished turn, as a sentence, or `undefined` when
+ * its `finish_reason` is `stop` or `tool_calls`. A non-success finish is
+ * returned rather than thrown, because the turn was charged and its partial
+ * output is yours; check this before using the text as a final answer. Never
+ * retry on it blindly: the same request is charged again.
+ */
+export function incompleteReason(completion: Completion): string | undefined {
+  const choice = completion.choices[0];
+  if (choice === undefined) return "the gateway returned no choices at all.";
+  const finish = choice.finish_reason;
+  if (typeof finish === "string" && SUCCESS_FINISH_REASONS.includes(finish)) return undefined;
+  const native = typeof choice.provider_stop_reason === "string"
+    ? ` The provider's stop reason was ${JSON.stringify(choice.provider_stop_reason)}.`
+    : "";
+  switch (finish) {
+    case "length":
+      return `the model hit maxTokens or the context window before finishing, so the answer is cut short.${native}`;
+    case "content_filter":
+      return `the upstream provider's own content filter or a refusal stopped this turn.${native}`;
+    case "pause_turn":
+      return `the provider paused this turn before finishing it. Send the conversation back with this assistant message to let it continue.${native}`;
+    case "incomplete":
+      return `the provider ended this turn without a recognised finish, so the output may be partial.${native}`;
+    default:
+      return `the turn ended with finish_reason ${JSON.stringify(finish ?? null)}, which is not a known successful finish, so treat the output as partial.${native}`;
+  }
 }
 
 // --------------------------------------------------------------- streaming

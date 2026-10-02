@@ -25,11 +25,19 @@ export interface Receipt {
   costUsd?: string;
   /** Itemised cost. Absent when the gateway could not guarantee the sum. */
   costComponentsNanoUsd?: CostComponents;
+  /** The rate card the itemisation was computed under, as `sha256:<hex>`. Sent only beside `costComponentsNanoUsd`. */
+  pricingIdentity?: string;
   serviceTier?: string;
   /** The venue that served the turn. */
   receiptVenue?: string;
   /** What this turn would have cost at the default pin. Absent unless the turn was routed. */
   counterfactualNanoUsd?: number;
+  /**
+   * Why a router id served the default pin instead of a routed pick:
+   * `timeout`, `unavailable`, `breaker_open` or `saturated`. Absent when the
+   * router picked or was not involved. The vocabulary grows; treat unknown values as opaque.
+   */
+  pinFallback?: string;
   /** Prompt-cache disclosure, when sent. */
   cache?: string;
   /** The id to quote in a support request. */
@@ -89,10 +97,36 @@ export function readReceipt(headers: HeaderReader): Receipt {
     costNanoUsd,
     costUsd: costNanoUsd === undefined ? undefined : nanoUsdToUsdString(costNanoUsd),
     costComponentsNanoUsd: parseCostComponents(headers.get("x-conifer-cost-components-nanousd")),
+    pricingIdentity: text(headers, "x-conifer-pricing-identity"),
     serviceTier: text(headers, "x-conifer-service-tier"),
     receiptVenue: text(headers, "x-conifer-receipt-venue"),
     counterfactualNanoUsd: integer(headers, "x-conifer-counterfactual-nanousd"),
+    pinFallback: text(headers, "x-conifer-receipt-pin-fallback"),
     cache: text(headers, "x-conifer-cache"),
     requestId: text(headers, "x-conifer-request-id") ?? text(headers, "x-request-id"),
   };
+}
+
+/** The execution receipt headers, in the gateway contract's order. */
+export const RECEIPT_HEADERS = [
+  "x-conifer-requested-model",
+  "x-conifer-effective-model",
+  "x-conifer-receipt-reason",
+  "x-conifer-endpoint",
+  "x-conifer-cost-nanousd",
+  "x-conifer-cost-components-nanousd",
+  "x-conifer-pricing-identity",
+  "x-conifer-service-tier",
+  "x-conifer-receipt-venue",
+  "x-conifer-counterfactual-nanousd",
+  "x-conifer-receipt-pin-fallback",
+] as const;
+
+/**
+ * The receipt on an error response, or `undefined` when it carries none. The
+ * gateway answers an error with the execution receipt only when the error was
+ * charged, so its presence is the charge.
+ */
+export function chargedReceipt(headers: HeaderReader): Receipt | undefined {
+  return RECEIPT_HEADERS.some((name) => headers.get(name) !== null) ? readReceipt(headers) : undefined;
 }
